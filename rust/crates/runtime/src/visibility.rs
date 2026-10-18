@@ -144,6 +144,14 @@ impl VisibilityPlan {
 
     /// Role-only branches can make row/set branches irrelevant for this member.
     /// Member admission and role changes remain dependencies in every case.
+    /// Row decisions need membership values only for branches not settled by
+    /// the admitted role. SQL-only snapshots leave these values on the server.
+    pub fn needs_materialized_sets(&self, resolved: &ResolvedVisibility) -> bool {
+        let mut sets = BTreeSet::new();
+        active_visibility_sets(&self.predicate, &resolved.role, &mut sets);
+        !sets.is_empty()
+    }
+
     pub fn resolved_dependency_columns(
         &self,
         resolved: &ResolvedVisibility,
@@ -311,7 +319,11 @@ pub fn resolve_related_query(
     let mut resolved = member.clone();
     resolved.sets.clear();
     resolved.fingerprint = visibility_fingerprint(
-        plan, &resolved.direct, &resolved.role, &resolved.permissions, &resolved.sets,
+        plan,
+        &resolved.direct,
+        &resolved.role,
+        &resolved.permissions,
+        &resolved.sets,
     );
     Ok(resolved)
 }
@@ -956,7 +968,8 @@ mod tests {
 
     #[test]
     fn bounded_sql_visibility_keeps_membership_in_sql_without_materialized_ids() {
-        let plan = dependency_plan(serde_json::json!({"operator":"inSet","column":"id","set":"assigned"}));
+        let plan =
+            dependency_plan(serde_json::json!({"operator":"inSet","column":"id","set":"assigned"}));
         let member = dependency_member("member");
         let related = resolve_related_query(&plan, &member).unwrap();
         assert!(related.sets.is_empty());
@@ -968,7 +981,11 @@ mod tests {
         assert_eq!(parameters, vec![Value::String("member-1".to_owned())]);
         // Set changes still invalidate the exact server window. An empty Rust
         // set must never imply public access or suppress a dependency.
-        assert!(plan.resolved_dependency_columns(&related).change_affects("taskUsers", "delete", &[]));
+        assert!(plan.resolved_dependency_columns(&related).change_affects(
+            "taskUsers",
+            "delete",
+            &[]
+        ));
         assert_ne!(related.fingerprint, member.fingerprint);
     }
 

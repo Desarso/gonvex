@@ -1341,6 +1341,7 @@ async fn websocket(
     let mut feed = None;
     let mut feed_scheduler = FeedFirstScheduler::default();
     let mut sent_replica_revision = 0u64;
+    let mut sent_zero_bootstrap_watermark = false;
     let mut replicas = BTreeMap::new();
     let mut live_queries = BTreeMap::new();
     let mut control_queries = BTreeMap::new();
@@ -1390,6 +1391,7 @@ async fn websocket(
             feed = None;
             feed_scheduler.reset();
             sent_replica_revision = 0;
+            sent_zero_bootstrap_watermark = false;
             runtime.inner.metrics.authenticated(
                 &connection_id,
                 &control::ControlConnection {
@@ -1427,6 +1429,7 @@ async fn websocket(
                     feed = None;
                     feed_scheduler.reset();
                     sent_replica_revision = 0;
+                    sent_zero_bootstrap_watermark = false;
                     control_connection = control::ControlConnection {
                         connection_id: connection_id.clone(),
                         ..control::ControlConnection::default()
@@ -1552,6 +1555,7 @@ async fn websocket(
                         feed = None;
                         feed_scheduler.reset();
                         sent_replica_revision = 0;
+                        sent_zero_bootstrap_watermark = false;
                         continue;
                     }
                     },
@@ -1839,6 +1843,7 @@ async fn websocket(
                     feed = None;
                     feed_scheduler.reset();
                     sent_replica_revision = 0;
+                    sent_zero_bootstrap_watermark = false;
                     tenant_session = None;
                     connected_client_contract = None;
                     control_connection = control::ControlConnection {
@@ -2028,6 +2033,7 @@ async fn websocket(
                         }
                         feed_scheduler.reset();
                         sent_replica_revision = 0;
+                        sent_zero_bootstrap_watermark = false;
                     }
                     tenant_session = next_tenant_session;
                     control_connection = authenticated_control;
@@ -2158,6 +2164,7 @@ async fn websocket(
                         )
                     };
                     if let Some(subscription) = subscription {
+                        sent_zero_bootstrap_watermark = false;
                         live_queries.insert(subscription.id.clone(), subscription);
                     }
                     record_connection_subscriptions(
@@ -2252,6 +2259,7 @@ async fn websocket(
                             )
                         };
                         if let Some(subscription) = subscription {
+                            sent_zero_bootstrap_watermark = false;
                             live_queries.insert(subscription.id.clone(), subscription);
                         }
                         if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
@@ -2580,6 +2588,7 @@ async fn websocket(
                     }
                 }
                 Ok(ClientMessage::ReplicaOpen(request)) => {
+                    sent_zero_bootstrap_watermark = false;
                     snapshot_delivery.remove(&request.id);
                     runtime.inner.metrics.activity(
                         &connection_id,
@@ -2637,6 +2646,7 @@ async fn websocket(
                     );
                 }
                 Ok(ClientMessage::ReplicaOpenMany { opens }) => {
+                    sent_zero_bootstrap_watermark = false;
                     if opens.len() > REPLICA_OPEN_BATCH_LIMIT {
                         let response = ServerMessage::ReplicaError {
                             id: String::new(),
@@ -2894,6 +2904,30 @@ async fn websocket(
             Message::Close(_) => break,
             _ => {}
         }
+        if replica_native_rows_enabled && tenant_session.is_some() {
+            if let Some(watermark) = bootstrap_watermark_after_sent_snapshots(
+                snapshot_delivery.is_empty(),
+                replicas
+                    .values()
+                    .map(|s| s.cursor.revision)
+                    .chain(live_queries.values().map(|s| s.computed_revision)),
+                sent_replica_revision,
+                sent_zero_bootstrap_watermark,
+            ) {
+                if send_connection_json(&mut snapshot_delivery, &mut socket, &watermark)
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                if let ServerMessage::ReplicaWatermark { revision } = watermark {
+                    sent_replica_revision = sent_replica_revision.max(revision);
+                    if revision == 0 {
+                        sent_zero_bootstrap_watermark = true;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -3149,6 +3183,24 @@ async fn next_feed_event(
         Some(receiver) => receiver.recv().await,
         None => std::future::pending().await,
     }
+}
+
+/// A quiet tenant may never emit a change-feed event after authentication.
+/// Close its initial cohort once all native snapshots have been durably ACKed.
+/// The oldest subscribed snapshot is the only safe boundary: a newer snapshot
+/// cannot certify changes still queued for an older subscription.
+fn bootstrap_watermark_after_sent_snapshots(
+    snapshots_complete: bool,
+    revisions: impl Iterator<Item = u64>,
+    sent_revision: u64,
+    zero_already_sent: bool,
+) -> Option<ServerMessage> {
+    if !snapshots_complete {
+        return None;
+    }
+    let revision = revisions.min()?;
+    (revision > sent_revision || revision == 0 && sent_revision == 0 && !zero_already_sent)
+        .then_some(ServerMessage::ReplicaWatermark { revision })
 }
 
 fn replica_watermark(event: &change_feed::FeedEvent) -> Option<ServerMessage> {
@@ -5191,6 +5243,35 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn quiet_bootstrap_closes_only_after_acks_and_through_the_oldest_snapshot() {
+        assert!(
+            bootstrap_watermark_after_sent_snapshots(false, [100].into_iter(), 0, false).is_none()
+        );
+        assert!(bootstrap_watermark_after_sent_snapshots(true, [].into_iter(), 0, false).is_none());
+        assert!(matches!(
+            bootstrap_watermark_after_sent_snapshots(true, [100].into_iter(), 0, false),
+            Some(ServerMessage::ReplicaWatermark { revision: 100 })
+        ));
+        assert!(matches!(
+            bootstrap_watermark_after_sent_snapshots(true, [105, 100, 103].into_iter(), 0, false),
+            Some(ServerMessage::ReplicaWatermark { revision: 100 })
+        ));
+        assert!(
+            bootstrap_watermark_after_sent_snapshots(true, [105, 100].into_iter(), 100, false)
+                .is_none()
+        );
+        assert!(
+            bootstrap_watermark_after_sent_snapshots(true, [105, 100].into_iter(), 102, false)
+                .is_none()
+        );
+        assert!(matches!(
+            bootstrap_watermark_after_sent_snapshots(true, [0].into_iter(), 0, false),
+            Some(ServerMessage::ReplicaWatermark { revision: 0 })
+        ));
+        assert!(bootstrap_watermark_after_sent_snapshots(true, [0].into_iter(), 0, true).is_none());
     }
 
     #[test]

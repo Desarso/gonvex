@@ -125,6 +125,8 @@ export class SQLiteWorkerSessions {
   if(write&&record.phase!=='online'&&this.options.offlineMaxAgeMs!==null&&(!Number.isSafeInteger(now)||now<(session.lastOnlineAtMs??0)||now-(session.lastOnlineAtMs??0)>this.options.offlineMaxAgeMs))fail('FENCED','Offline editing window expired. Reconnect before making more changes.');
   return {scope:session.directive.visibilityScope,intentScope:record.intentScope,generation:record.id+':'+record.revision,identity:clone(session.identity),artifactHash:session.artifactHash,online:record.phase==='online'};
  }
+ /** Owner-only bounded session capture for independent intent durability. */
+ sessionForConnection(id:string){const record=this.connection(id);if(!record.session||record.phase==='quarantined'||record.phase==='unavailable')fail('FENCED','Worker session is unavailable');return clone(record.session);}
  /** A transport frame is attributable only after its exact durable admission.
   * Authentication or disconnect never permits a new binary stage to proceed. */
  admitsFrames(id:string,generation:number){const record=this.connection(id);return record.phase==='online'&&record.transportGeneration===generation;}

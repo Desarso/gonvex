@@ -576,7 +576,8 @@ impl Runtime {
         let epoch: String = clock.get("epoch");
         let revision = clock.get::<i64, _>("revision").max(0) as u64;
         let resolved =
-            visibility::resolve_for_query(&mut transaction, session, visibility_plan, revision).await?;
+            visibility::resolve_for_query(&mut transaction, session, visibility_plan, revision)
+                .await?;
         let mut related = BTreeMap::new();
         let tables = relation_tables(plan.predicate.as_ref());
         if !tables.is_empty() {

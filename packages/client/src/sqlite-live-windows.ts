@@ -1,3 +1,4 @@
+import {prepareNativeLiveWindow} from './native-live-window-frame.js';
 import type {JsonValue} from '@gonvex/protocol';
 import type {FunctionReference} from './index.js';
 import type {SQLiteLiveQueryUpdate} from './sqlite-native-transport.js';
@@ -9,11 +10,6 @@ export type SQLitePendingLivePage={complete:false;serverVerified:false;generatio
 type Stage={stream:string;scope:string;signature:string;epoch:string;revision:number;generation:string;header:string;rows:string;fingerprint:string};
 const schema=`CREATE TABLE IF NOT EXISTS gv_live_window_stages(stream TEXT NOT NULL,scope TEXT NOT NULL,signature TEXT NOT NULL,epoch TEXT NOT NULL,revision INTEGER NOT NULL,generation TEXT NOT NULL,header TEXT NOT NULL CHECK(length(header)*2<=16384),rows TEXT NOT NULL CHECK(length(rows)*2<=131072),fingerprint TEXT NOT NULL,PRIMARY KEY(stream,scope,signature)) WITHOUT ROWID;`;
 const sha=async(value:string)=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))),byte=>byte.toString(16).padStart(2,'0')).join('');
-const record=(value:JsonValue):value is Record<string,JsonValue>=>value!==null&&typeof value==='object'&&!Array.isArray(value);
-function projection(result:JsonValue,path:readonly string[]){let current=result;for(const part of path){if(!record(current)||!Object.hasOwn(current,part))throw new TypeError('Live result path is missing');current=current[part]!;}const scalar=!Array.isArray(current),rows=Array.isArray(current)?current:current===null?[]:[current];if(rows.length>256||rows.some(row=>!record(row)))throw new RangeError('Live windows must contain at most 256 entity rows');
- const replace=(value:JsonValue,depth:number):JsonValue=>depth===path.length?(scalar?null:[]):{...(value as Record<string,JsonValue>),[path[depth]!]:replace((value as Record<string,JsonValue>)[path[depth]!]!,depth+1)};
- return {rows:rows as Array<Record<string,JsonValue>>,scalar,skeleton:replace(result,0)};
-}
 async function decodeStage(stage:Stage){
  decodedJSONBytes(stage.rows,131072);decodedJSONBytes(stage.header,16384);const header=JSON.parse(stage.header) as SQLiteWindowHeader;
  if(header.signature!==stage.signature||header.kind!=='live'||header.source!=='server'||header.entityCoverage!==undefined||header.cursor?.epoch!==stage.epoch||header.cursor?.revision!==stage.revision||await sha(stage.rows)!==header.aggregateDigest||await sha(stage.header+'\0'+stage.rows)!==stage.fingerprint)fail('INTENT_CORRUPT','Pending live window differs from its durable frame');
@@ -29,13 +25,7 @@ export class SQLiteLiveWindows {
  ready(){return this.initialized??= (async()=>{await this.windows.ready();await this.owner.database.execAsync(schema);await this.owner.database.runAsync('DELETE FROM gv_live_window_stages');})();}
  private check(){if(!this.owner.database.ownerTransactionDepth)throw Error('Live windows require an owner transaction');}
  async stage(stream:string,scope:string,signature:string,ref:FunctionReference,frame:Frame){
-  this.check();sqlitePayloadBytes({stream,scope,signature},4096);sqlitePayloadBytes(frame,131072);if(!stream||stream.length>128||!scope||scope.length>512||!signature||signature.length>128||ref.kind!=='query'||ref.delivery!=='live'||!ref.live)throw new TypeError('Invalid generated live source');
-  const live=ref.live,table=this.owner.engine.schema[live.entity],cursor=frame.subscriptionRevision;if(!table||table.key!==live.key||!cursor||!cursor.epoch||cursor.epoch.length>256||!Number.isSafeInteger(cursor.sequence)||cursor.sequence<0||frame.replicaScope!==undefined&&frame.replicaScope!==scope)fail('FENCED','Live window differs from its admitted replica');
-  const path=live.resultPath??[];if(path.length>16||path.some(part=>typeof part!=='string'||!part||part.length>256||['__proto__','constructor','prototype'].includes(part)))throw new TypeError('Invalid generated live result path');
-  const projected=projection(frame.result,path),columns=new Set(live.plan.columns??Object.keys(table.fields));columns.add(live.key);
-  const identities=new Map<string,string>();for(const row of projected.rows){const id=row[live.key];if(typeof id!=='string'||!id||id.length>1024||Object.keys(row).some(column=>!columns.has(column)||!Object.hasOwn(table.fields,column)))throw new TypeError('Live window contains an undeclared entity projection');const body=JSON.stringify(row);if(identities.has(id)&&identities.get(id)!==body)fail('INTENT_CONFLICT','Live window repeats an entity with different values');identities.set(id,body);}
-  const rows=JSON.stringify(projected.rows);decodedJSONBytes(rows,131072);const hash=await sha(rows);
-  const header:SQLiteWindowHeader={signature,kind:'live',entity:live.entity,key:live.key,source:'server',completeness:'complete',cursor:{epoch:cursor.epoch,revision:cursor.sequence},subscriptionRevision:cursor,columns:[...columns],artifactHash:this.artifactHash,resultPath:[...path],resultSkeleton:projected.skeleton,scalar:projected.scalar,aggregateDigest:hash,...(frame.windowRevision!==undefined?{windowRevision:frame.windowRevision}:{})};sqlitePayloadBytes(header,16384);
+  this.check();const {header,rows,hash,cursor}=await prepareNativeLiveWindow(this.owner.engine.schema,this.artifactHash,stream,scope,signature,ref,frame);
   await this.ready();await this.owner.engine.verifyOwner();const active=await this.windows.header(scope,signature);if(active?.header.cursor?.epoch===cursor.epoch){if(active.header.cursor.revision>cursor.sequence)return false;if(active.header.cursor.revision===cursor.sequence){if(active.header.aggregateDigest!==hash||JSON.stringify(active.header.resultSkeleton)!==JSON.stringify(header.resultSkeleton))fail('INTENT_CONFLICT','Live query changed at the same authoritative revision');return false;}}
   const previous=await this.owner.database.getFirstAsync<Stage>('SELECT * FROM gv_live_window_stages WHERE stream=? AND scope=? AND signature=?',stream,scope,signature);if(previous?.epoch===cursor.epoch&&previous.revision>cursor.sequence)return false;
   if(previous?.epoch===cursor.epoch&&previous.revision===cursor.sequence){if(previous.rows!==rows||previous.header!==JSON.stringify(header))fail('INTENT_CONFLICT','Pending live query changed at the same revision');return false;}

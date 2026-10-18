@@ -1,8 +1,10 @@
+import {indexedDBEffectiveIntent} from './indexeddb-intent-ledger.js';
 import {SQLiteReducerPreparationRequiredError} from './sqlite-reducer-core.js';
 import type {LocalExecution,LocalTransactionResult} from '@gonvex/local-runtime';
 import type {PortableReducerRuntime} from '@gonvex/local-runtime/portable';
 import type {SQLiteReducerInvocation,SQLiteReducerReceipt,SQLitePreparedReducer,SQLiteReducerContext} from './sqlite-reducer-core.js';
 import type {IndexedDBReplicaEngine} from './indexeddb-replica-engine.js';
+import type {ReducerOutboxEntry} from './outbox.js';
 import {sqlitePayloadBytes,fail} from './sqlite-admission.js';
 const stable=(value:unknown):string=>value===null||typeof value!=='object'?JSON.stringify(value):Array.isArray(value)?'['+value.map(stable).join(',')+']':'{'+Object.keys(value).sort().map(key=>JSON.stringify(key)+':'+stable((value as Record<string,unknown>)[key])).join(',')+'}';
 type Context=SQLiteReducerContext&{generation:string};
@@ -33,20 +35,29 @@ export class IndexedDBReducerCore {
   // Bound preloading to the prefix already durable when this rebase started.
   // An arriving command with a new module is caught by the atomic retry below.
   const through=(await this.options.engine.generation()).sequence;let after=0;
-  for(;;){const page=await this.options.engine.deliveryPage(admitted.intentScope,after);for(const record of page.records){if(record.sequence>through)break;const entry={...record.prepared.intent,...record.delivery};if(!admitted.predictionBlocked&&entry.state!=='rejected'&&entry.sentAt===undefined&&entry.localExecution?.artifactHash===this.options.artifactHash&&!entry.entityKeys.includes('__gonvex_local_intents')&&!this.options.runtime.isPrepared(entry.path))await prepare(entry.path);}if(page.nextSequence===null||page.records.some(record=>record.sequence>=through))break;after=page.nextSequence;}
+  for(;;){const page=await this.options.engine.deliveryPage(admitted.intentScope,after);for(const record of page.records){if(record.sequence>through)break;const entry=indexedDBEffectiveIntent(record);if(!admitted.predictionBlocked&&entry.state!=='rejected'&&entry.sentAt===undefined&&entry.localExecution?.artifactHash===this.options.artifactHash&&!entry.entityKeys.includes('__gonvex_local_intents')&&!this.options.runtime.isPrepared(entry.path))await prepare(entry.path);}if(page.nextSequence===null||page.records.some(record=>record.sequence>=through))break;after=page.nextSequence;}
   for(;;){const generation=await this.options.engine.generation();await this.current(scope,admitted);try{
    return await this.options.engine.atomic(generation,async tx=>{
     this.options.assertCurrent(scope,admitted.generation);await authority?.(tx);const captured=await this.options.context(scope,tx);sqlitePayloadBytes(captured,524288);if(captured.generation!==admitted.generation||captured.intentScope!==admitted.intentScope)fail('FENCED','Fallback rebase identity changed');await this.options.engine.resetPredictionsInTransaction(tx,scope);let cursor=0,replayed=0,retained=0,unavailable=0;const sharedView=this.options.engine.readViewInTransaction(tx,scope,captured.coverage);
-    for(;;){const page=await this.options.engine.pendingInTransaction(tx,captured.intentScope,cursor);for(const record of page.records){const entry={...record.prepared.intent,...record.delivery};if(entry.state==='rejected')continue;const execution=entry.localExecution,compatible=execution?.scope===scope&&execution.artifactHash===this.options.artifactHash&&stable(execution.identity)===stable(captured.identity);let patches=compatible?entry.patches??[]:[];
+    for(;;){const page=await this.options.engine.pendingInTransaction(tx,captured.intentScope,cursor);for(const record of page.records){const entry=indexedDBEffectiveIntent(record);if(entry.state==='rejected')continue;const execution=entry.localExecution,compatible=execution?.scope===scope&&execution.artifactHash===this.options.artifactHash&&stable(execution.identity)===stable(captured.identity);let patches=compatible?entry.patches??[]:[],dependencies=entry.dependencies;
       if(compatible&&!captured.predictionBlocked&&!entry.entityKeys.includes('__gonvex_local_intents')&&entry.sentAt===undefined&&entry.state!=='inflight'&&entry.state!=='committed'){
        if(!this.options.runtime.isPrepared(entry.path))throw new SQLiteReducerPreparationRequiredError(entry.path);
-       let readFailure:{error:unknown}|undefined;const view=sharedView;try{const value=await this.options.runtime.execute(entry.path,entry.args as import('@gonvex/protocol').JsonValue,{async select(read){try{return await view.select(read);}catch(error){readFailure={error};throw error;}}},{...execution,scope,identity:captured.identity});sqlitePayloadBytes(value,262144);patches=value.patches;replayed++;}catch(error){if(readFailure&&(readFailure.error as {code?:string})?.code!=='replica-read-budget')throw readFailure.error;patches=[];unavailable++;}
+       let readFailure:{error:unknown}|undefined;const view=sharedView;try{const value=await this.options.runtime.execute(entry.path,entry.args as import('@gonvex/protocol').JsonValue,{async select(read){try{return await view.select(read);}catch(error){readFailure={error};throw error;}}},{...execution,scope,identity:captured.identity});sqlitePayloadBytes(value,262144);patches=value.patches;dependencies={reads:value.readRows??[],writes:value.patches.map(patch=>({entity:patch.entity,rowId:patch.rowId})),scans:value.scanTables??value.readTables};replayed++;}catch(error){if(readFailure&&(readFailure.error as {code?:string})?.code!=='replica-read-budget')throw readFailure.error;patches=[];unavailable++;}
       }else retained++;
-      await this.options.engine.predictionsInTransaction(tx,scope,entry.idempotencyKey,patches);this.options.assertCurrent(scope,admitted.generation);
+      await this.options.engine.deriveInTransaction(tx,record,patches,dependencies);await this.options.engine.predictionsInTransaction(tx,scope,entry.idempotencyKey,patches);this.options.assertCurrent(scope,admitted.generation);
      }if(page.nextSequence===null)break;cursor=page.nextSequence;}
     this.options.assertCurrent(scope,admitted.generation);return {replayed,retained,unavailable};
    });
   }catch(error){if(!(error instanceof SQLiteReducerPreparationRequiredError))throw error;await prepare(error.path);}}
+ }
+ /** Old SDKs did not persist a business result. Preserve their original
+  * command and return an explicit queued receipt, never execute over an
+  * unknown server outcome or invent a result from current canonical rows. */
+ async recoverLegacy(input:SQLiteReducerInvocation,legacy:ReducerOutboxEntry):Promise<SQLiteReducerReceipt>{
+  sqlitePayloadBytes({input,legacy},262144);const admitted=await this.context(input.scope),generation=await this.options.engine.generation();
+  if(legacy.scope!==admitted.intentScope||legacy.idempotencyKey!==input.commandId||legacy.path!==input.path||!Number.isSafeInteger(legacy.id)||legacy.id<1)fail('FENCED','Fallback legacy command differs from its admitted envelope');
+  const execution=legacy.localExecution??{scope:input.scope,commandId:input.commandId,now:input.now,artifactHash:'legacy-unavailable',identity:admitted.identity,...(input.intentEntropy===undefined?{}:{intentEntropy:input.intentEntropy})};
+  return this.recover(input,{intent:{...structuredClone(legacy),localExecution:structuredClone(execution)},receipt:{intentId:legacy.id,commandId:input.commandId,result:null,queuedOnly:true,originalGeneration:generation}});
  }
  /** The independently accepted result wins after a crash or late IDB failure.
   * Never execute that command again over its own original prediction. */

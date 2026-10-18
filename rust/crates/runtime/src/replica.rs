@@ -355,7 +355,11 @@ impl Runtime {
             .begin_tenant_transaction(&session.route, true)
             .await?;
         let clock = clock_in_transaction(&mut transaction).await?;
-        let resolved = visibility::resolve(&mut transaction, session, plan, clock.revision).await?;
+        let resolved = if definition.max_rows > 0 || definition.max_bytes > 0 {
+            visibility::resolve_for_query(&mut transaction, session, plan, clock.revision).await?
+        } else {
+            visibility::resolve(&mut transaction, session, plan, clock.revision).await?
+        };
         let rows = query_rows(&mut transaction, definition, plan, &resolved, args).await?;
         let resume_changes = if let Some(after) =
             after.filter(|after| *after >= clock.retained_revision && *after < clock.revision)
@@ -444,6 +448,11 @@ impl Runtime {
                 .filter(|change| change.table == subscription.definition.table)
                 .collect::<Vec<_>>();
             if dependency_changed
+                || bounded_sql_visibility(
+                    &subscription.definition,
+                    &subscription.visibility,
+                    &subscription.resolved,
+                )
                 || source_update_requires_snapshot(
                     &subscription.rows,
                     subscription.truncated,
@@ -858,6 +867,14 @@ fn row_in_collection(
 /// projected post-transaction rows fit its budgets, including for progressive
 /// delivery. Once a collection is truncated, its missing rows are unknown and
 /// the next source change must rebuild the window from PostgreSQL.
+fn bounded_sql_visibility(
+    definition: &ReplicaCollectionDefinition,
+    plan: &VisibilityPlan,
+    resolved: &ResolvedVisibility,
+) -> bool {
+    (definition.max_rows > 0 || definition.max_bytes > 0) && plan.needs_materialized_sets(resolved)
+}
+
 fn source_update_requires_snapshot<'a>(
     rows: &BTreeMap<String, Value>,
     truncated: bool,
@@ -1042,6 +1059,11 @@ fn resume_hashes(
     plan: &VisibilityPlan,
     resolved: &ResolvedVisibility,
 ) -> Result<Option<BTreeMap<String, String>>, ReplicaError> {
+    if bounded_sql_visibility(definition, plan, resolved) {
+        // Retained before-images cannot evaluate an unmaterialized SQL set.
+        // Reconcile the bounded snapshot instead of trusting missing IDs.
+        return Ok(None);
+    }
     let dependencies = plan.resolved_dependency_columns(resolved);
     if table_change_relevance(&definition.table, &dependencies, changes.iter()).1 {
         return Ok(None);
