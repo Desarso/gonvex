@@ -174,7 +174,7 @@ function handoffNonce(): string {
 const ManagedAuthContext = createContext<GonvexAuthValue | null>(null);
 
 export function GonvexProviderWithAuth(props: {
-  client: GonvexClient;
+  client: GonvexClient | SQLiteBrowserClient;
   children: ReactNode;
   useAuth: () => AuthState;
 }) {
@@ -255,7 +255,7 @@ const authBootstrapPromises = new Map<string, Promise<GonvexAuthSession | null>>
 // made onboarding report a failure for a tenant that was still being created.
 const TENANT_CREATE_TIMEOUT_MS = 120_000;
 
-export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexClient; children: ReactNode }) {
+export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexClient | SQLiteBrowserClient; children: ReactNode }) {
   const runtimeUrl = props.runtimeUrl.replace(/\/+$/, "");
   const hasExplicitInitialTenant = props.initialTenantId !== undefined;
   const initialTenantId = props.initialTenantId?.trim() || undefined;
@@ -1200,7 +1200,7 @@ export function GonvexGoogleAuthButton(props: ButtonHTMLAttributes<HTMLButtonEle
 }
 
 export function createGonvexAuth(config: GonvexAuthConfig) {
-  function ConfiguredGonvexAuthProvider(props: { client: GonvexClient; children: ReactNode }) {
+  function ConfiguredGonvexAuthProvider(props: { client: GonvexClient | SQLiteBrowserClient; children: ReactNode }) {
     return <GonvexAuthProvider {...config} {...props} />;
   }
   return {
@@ -1223,7 +1223,7 @@ function GoogleMark() {
 
 async function bootstrapGonvexAuth(options: {
   callbackPath: string;
-  client: GonvexClient;
+  client: GonvexClient | SQLiteBrowserClient;
   pkceStorageKey: string;
   projectId: string;
   runtimeUrl: string;
@@ -1510,7 +1510,7 @@ function clearDeveloperGrants(storageKey: string, keepAccountId?: string) {
 }
 
 function installDeveloperClientAuth(
-  client: GonvexClient,
+  client: GonvexClient | SQLiteBrowserClient,
   projectId: string,
   developer: ActiveDeveloperMode,
   token: string,
@@ -1525,7 +1525,7 @@ function installDeveloperClientAuth(
 }
 
 function installClientSession(
-  client: GonvexClient,
+  client: GonvexClient | SQLiteBrowserClient,
   projectId: string,
   session: GonvexAuthSession,
 ) {

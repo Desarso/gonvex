@@ -2,6 +2,11 @@
   "name": "@gonvex/client",
   "version": "0.5.2-staging.29",
   "type": "module",
+  "sideEffects": [
+    "./dist/sqlite-owner-worker.js",
+    "./dist/sqlite-router-worker.js",
+    "./dist/vendor/**"
+  ],
   "publishConfig": {
     "access": "public"
   },
