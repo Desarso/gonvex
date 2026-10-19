@@ -166,7 +166,10 @@ export function serveEngineHost(endpoint: EngineEndpoint, binding?: StaticEngine
 
       client.onLocalExecutionFallback(value => event("fallback", [value]));
       client.onReducerRejection(value => event("rejection", [value]));
-      await client.localSessionReady;
+      // Restoring hydrates the whole local scope. Answer init first so the UI can register its visible
+      // watches during hydration; later transitions arrive as session events, and a failed restore
+      // falls back to legacy as a failed init did.
+      void client.localSessionReady.catch(error => event("startupError", [serializeEngineError(error)]));
       return { connection: client.connectionState(), session: client.localSessionState(), commandScope: engineScope(client), capabilities: { admissionBatch: 1, admissionBatchLimit: 1024 } };
     }
     if (!client) throw new Error("Engine is not initialized");
@@ -230,7 +233,9 @@ export function serveEngineHost(endpoint: EngineEndpoint, binding?: StaticEngine
     if (request.method === "close") {
       await admission;
       for (const release of subscriptions.values()) release(); subscriptions.clear(); readers.clear(); previous.clear(); dirty.clear();
-      unsubscribeIntents?.(); await closeEngine(client); stores?.close(); receipts?.close(); releaseOwnership?.(); return;
+      // Release storage and ownership even when a failed restore rejects a client lane, so a fallback can reopen them.
+      try { unsubscribeIntents?.(); await closeEngine(client); } finally { stores?.close(); receipts?.close(); releaseOwnership?.(); }
+      return;
     }
     if (request.method === "localSessionReady") return client.localSessionReady;
     if (request.method === "connect") { client.connect(); return; }

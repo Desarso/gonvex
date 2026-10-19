@@ -60,6 +60,7 @@ export class EngineClient {
   private epoch = 0;
   private connected = false;
   private commandScope = "";
+  private sessionEvents = 0;
   private ownerLock?: string;
   constructor(private readonly url: string, private readonly config: EngineClientOptions) { this.auth = config.auth; this.fetchToken = config.auth.fetchToken; }
   private emit(name: string, ...args: unknown[]) { for (const listener of this.listeners.get(name) ?? []) listener(...args); }
@@ -121,8 +122,9 @@ export class EngineClient {
         watch.error = deserializeEngineError(args[1]); for (const listener of watch.listeners) listener();
       } else if (method === "scope") { this.commandScope = args[0]; this.invalidate(); }
       else if (method === "connection") { this.connection = { ...args[0], hasEverConnected: this.connection?.hasEverConnected || args[0].hasEverConnected, connectionCount: this.connectionOffset + args[0].connectionCount }; this.emit(method, this.connection); }
-      else if (method === "session") { this.session = args[0]; this.emit(method); }
+      else if (method === "session") { this.session = args[0]; this.sessionEvents++; this.emit(method); }
       else if (method === "intents") { this.intents = args[0]; this.emit(method); }
+      else if (method === "startupError") { this.config.onDiagnostic?.(String(deserializeEngineError(args[0]))); void this.useLegacy("Engine startup failed").catch(error => this.emit("error", error)); }
       else this.emit(method, ...args);
     });
   }
@@ -168,9 +170,11 @@ export class EngineClient {
     return { protocolVersion: 1, url: this.url, options: { ...this.config.options, ...auth }, fetchToken: Boolean(this.fetchToken), storage: this.config.storage, residency: this.config.residency, ownerLock: this.engineMode === "worker" ? this.ownerLock : undefined, artifactHash: this.config.engine.artifactHash };
   }
   private async initializeEndpoint() {
+    // Init answers before session restoration; a session event received meanwhile is at least as new as its snapshot.
+    const sessionEvents = this.sessionEvents;
     const state = await this.call<{ connection: ConnectionState; session: "unavailable" | "restored" | "authenticated"; commandScope: string; capabilities?: { admissionBatch?: number; admissionBatchLimit?: number } }>("init", [this.init()]);
     this.rpc.setAdmissionBatching(state.capabilities?.admissionBatch === 1, state.capabilities?.admissionBatchLimit);
-    this.connection = { ...state.connection, hasEverConnected: this.connection?.hasEverConnected || state.connection.hasEverConnected, connectionCount: this.connectionOffset + state.connection.connectionCount }; this.session = state.session; this.commandScope = state.commandScope;
+    this.connection = { ...state.connection, hasEverConnected: this.connection?.hasEverConnected || state.connection.hasEverConnected, connectionCount: this.connectionOffset + state.connection.connectionCount }; if (this.sessionEvents === sessionEvents) this.session = state.session; this.commandScope = state.commandScope;
   }
   async initialize(): Promise<void> {
     const locks = globalThis.navigator?.locks;

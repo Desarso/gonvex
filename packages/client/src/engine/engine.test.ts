@@ -510,6 +510,64 @@ it("keeps loaded entity reads ready across same-account offline session transiti
   expect(states).not.toContain("pending"); expect(watch.getSnapshot()).toBe(before);
 });
 
+async function workerModeClient(init: EngineInit, diagnostics: string[] = []) {
+  const endpoints = pair(); const stop = serveEngineHost(endpoints.worker, binding);
+  vi.stubGlobal("Worker", class {});
+  vi.stubGlobal("navigator", { locks: { request: (_name: string, _options: any, callback: any) => Promise.resolve(callback({ name: _name })), query: async () => ({ held: [] }) } });
+  const worker = Object.assign(endpoints.ui, { terminate: vi.fn() }) as unknown as Worker;
+  const client = await createEngineClient(url, { engine: { workerUrl: "worker.js", artifactHash: "artifact", workerFactory: () => worker }, auth,
+    storage: init.storage, fallbackBinding: binding, onDiagnostic: message => diagnostics.push(message) });
+  // Close the client while its host still answers, then stop the host.
+  cleanups.push(() => client.close(), stop); return client;
+}
+
+it("answers worker init before local session hydration and publishes the restored session afterwards", async () => {
+  const { init } = await setup();
+  const storage = new IndexedDBLocalReplicaStorage(init.storage.replicaName);
+  await storage.replaceSnapshot({ entities: { tasks: { one: { id: "one", value: 1 } } }, liveQueries: {} }, "visible"); storage.close();
+  const load = IndexedDBLocalReplicaStorage.prototype.loadSession; let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
+  const spy = vi.spyOn(IndexedDBLocalReplicaStorage.prototype, "loadSession").mockImplementation(async function (this: IndexedDBLocalReplicaStorage, scope: string) { await gate; return load.call(this, scope); });
+  const client = await workerModeClient(init);
+  expect(client.engineMode).toBe("worker"); await vi.waitFor(() => expect(spy).toHaveBeenCalled()); expect(client.localSessionState()).toBe("unavailable");
+  const watch = client.watchEntities("tasks", ["one"]); const stop = watch.onUpdate(() => undefined); cleanups.push(stop);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(watch.getSnapshot().status).toBe("pending");
+  release();
+  await vi.waitFor(() => expect(client.localSessionState()).toBe("restored"));
+  await vi.waitFor(() => expect(watch.getSnapshot()).toMatchObject({ status: "ready", rows: [{ id: "one", value: 1 }] }));
+  expect(await client.localSessionReady).toBe(true);
+});
+
+it("falls back to legacy when worker session restoration fails after init answered", async () => {
+  const { init } = await setup(); const diagnostics: string[] = [];
+  vi.spyOn(IndexedDBLocalReplicaStorage.prototype, "loadSession").mockRejectedValueOnce(new Error("restore failed"));
+  const client = await workerModeClient(init, diagnostics);
+  await vi.waitFor(() => expect(client.engineMode).toBe("legacy"));
+  expect(diagnostics.some(message => message.includes("restore failed"))).toBe(true);
+  expect(diagnostics).toContain("Engine startup failed");
+  await vi.waitFor(() => expect(client.localSessionState()).toBe("restored"));
+});
+
+it("keeps a session event that races ahead of the init reply's continuation", async () => {
+  const endpoints = pair();
+  endpoints.worker.addEventListener("message", ({ data }) => {
+    if (!data.method) return;
+    endpoints.worker.postMessage({ generation: data.generation, scope: data.scope, id: data.id, result: data.method === "init" ? {
+      connection: { isWebSocketConnected: false, hasEverConnected: false, connectionCount: 0, connectionRetries: 0, hasInflightRequests: false, inflightReducers: 0, inflightActions: 0, inflightOneShotQueries: 0 }, session: "unavailable", commandScope: owner,
+    } : undefined });
+    // Restoration finishes immediately after init answered.
+    if (data.method === "init") endpoints.worker.postMessage({ generation: data.generation, scope: data.scope, id: "restored", event: "session", args: ["restored"] });
+  });
+  vi.stubGlobal("Worker", class {});
+  vi.stubGlobal("navigator", { locks: { request: (_name: string, _options: any, callback: any) => Promise.resolve(callback({ name: _name })), query: async () => ({ held: [] }) } });
+  const worker = Object.assign(endpoints.ui, { terminate: vi.fn() }) as unknown as Worker;
+  const client = await createEngineClient(url, { engine: { workerUrl: "worker.js", artifactHash: "artifact", workerFactory: () => worker }, auth,
+    storage: { replicaName: "race", outboxName: "race-outbox", contract: { version: 1, offlineMaxAgeMs: null }, initialVersion: 1 }, fallbackBinding: binding }); cleanups.push(() => client.close());
+  expect(client.engineMode).toBe("worker");
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(client.localSessionState()).toBe("restored");
+});
+
 it("coalesces a 500-call burst into one negotiated packet and retains the older 128-call limit", async () => {
   for (const limit of [undefined, 1024]) {
     const { ui } = pair(); const rpc = new EngineRpc(ui, "g", "s"); rpc.setAdmissionBatching(true, limit);
