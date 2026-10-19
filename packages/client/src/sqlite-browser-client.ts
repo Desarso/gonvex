@@ -26,7 +26,7 @@ export type SQLiteCollectionPageResult=SQLiteTypedPage&{generation:string};
 export type SQLiteLocalQueryPage=(SQLiteTypedPage&{supported:true;complete:boolean;generation:string})|{supported:false;reason:string;generation:string;rows?:never};
 type Page=SQLiteLocalQueryPage|SQLitePendingLivePage|SQLiteNativeWindowResult|SQLitePendingSnapshotPage|SQLiteNativeEntityResult|SQLiteCollectionPageResult|null;
 type WatchSnapshot={page:Page|undefined;stale:boolean;version:number};
-type Watch={kind:'replica'|'live';state:WatchSnapshot;retiring?:Promise<void>;key:string;lease:string;path:string;args:JsonValue;bytes:number;refs:number;source?:{id?:string;signature:string};bound:number;opening?:Promise<void>;listeners:Set<()=>void>;unpin?:()=>void;stale:boolean;version:number};
+type Watch={kind:'replica'|'live';state:WatchSnapshot;retiring?:Promise<void>;key:string;lease:string;path:string;args:JsonValue;bytes:number;refs:number;source?:{id?:string;signature:string};bound:number;opening?:Promise<void>;listeners:Set<()=>void>;unpin?:()=>void;stale:boolean;version:number;pendingDisplay?:boolean};
 export type SQLiteBrowserOptions={broker:Broker;artifactHash?:string;onUpdateRequired?:GonvexClientOptions['onUpdateRequired'];onLocalExecutionFallback?:GonvexClientOptions['onLocalExecutionFallback'];errorReporting?:GonvexClientOptions['errorReporting'];role?:'control';public?:{tenant:string};auth?:Auth;fetchToken?:GonvexClientAuth['fetchToken']};
 export type SQLiteWatchOptions={view?:JsonValue;deferStart?:boolean};
 export type SQLiteReplicaPageOptions={offset?:number;limit?:number;generation?:string;expected?:SQLiteNativeWindowResult['generation']};
@@ -76,9 +76,10 @@ export class SQLiteBrowserClient {
    if(scope==='@pending'){
     // Coalesce staging hints across sources without invalidating complete
     // cached pages. Canonical authority is published at its terminal cohort.
-    for(const watch of this.watches.values()){const page=this.pages.get(watch.key);if(page==null||'serverVerified'in page&&page.serverVerified===false){watch.stale=true;this.notify(watch);}}
-    // Staging advances storage read leases while canonical values stay intact.
-    this.entityView.refresh();void this.pollControls().catch(()=>{});return;
+    for(const watch of this.watches.values()){const page=this.pages.get(watch.key);if(watch.pendingDisplay||page&&'serverVerified'in page&&page.serverVerified===false){watch.stale=true;this.notify(watch);}}
+    // Staging can invalidate a still-unresolved entity batch's storage lease.
+    // Certified cached values only change on a canonical publication.
+    this.entityView.refresh(false);void this.pollControls().catch(()=>{});return;
    }
    if(scope!=='@control'){for(const watch of this.watches.values()){watch.stale=true;this.notify(watch);}this.entityView.refresh();}
    this.controlQueries.refresh();void this.pollControls().catch(()=>{});
@@ -235,6 +236,7 @@ export class SQLiteBrowserClient {
   const selected=watch;if(selected.refs>=64)fail('BUDGET','Native watch lease budget exhausted');selected.refs++;let closed=false;const listeners=new Set<()=>void>();void this.open(selected).catch(()=>{});
   const read=async<T extends Page>(method:string,options:unknown):Promise<T>=>{
    const revision=this.revision,dataRevision=this.dataRevision;if(closed)fail('FENCED','Native watch is closed');
+   if(method==='replicaPendingPage'||method==='livePendingPage')selected.pendingDisplay=true;
    const descriptor={watch:selected.key,version:selected.version,revision,dataRevision,method,options:options as JsonValue};const bytes=sqlitePayloadBytes(descriptor,131072)+256,key=stable(descriptor);let pending=this.reads.get(key);
    if(!pending){
     if(this.reads.size>=384||this.readBytes+bytes>524288)fail('BUDGET','Shared native read metadata exhausted');

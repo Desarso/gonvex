@@ -23,3 +23,14 @@ it('retains a 250-row grid in one view while every SQL RPC remains at most 128 I
  expect(f.calls.every(call=>call.ids.length<=128)).toBe(true);expect(f.view.counters().replicaRows).toBe(250);
  release();stop();expect(f.ledger.bytes).toBe(0);expect(f.errors).toEqual([]);f.view.close();
 });
+
+it('retries unresolved reads on staging progress without rereading certified mounted values',async()=>{
+ const f=fixture(),release=f.view.retain('tasks',['a']);await vi.waitFor(()=>expect(f.view.entity('tasks','a')).toBeDefined());
+ const original=f.view.entity('tasks','a');f.calls.length=0;
+ f.view.refresh(false);await new Promise(resolve=>setTimeout(resolve,0));expect(f.calls).toEqual([]);
+ let blocked=true;f.handler=async(_entity,ids)=>{if(blocked)throw Object.assign(Error('Generation changed'),{code:'PAGE_CHANGED'});return {generation:{epoch:1,sequence:2},rows:ids.map(id=>({id,value:{id,n:2}}))};};
+ const releaseNew=f.view.retain('tasks',['b']);await vi.waitFor(()=>expect(f.errors).toHaveLength(1));f.calls.length=0;blocked=false;
+ f.view.refresh(false);await vi.waitFor(()=>expect(f.view.entity('tasks','b')).toEqual({id:'b',n:2}));
+ expect(f.calls).toEqual([{entity:'tasks',ids:['b'],expected:undefined}]);expect(f.view.entity('tasks','a')).toBe(original);
+ f.view.refresh();await vi.waitFor(()=>expect(f.view.entity('tasks','a')?.n).toBe(2));release();releaseNew();f.view.close();
+});

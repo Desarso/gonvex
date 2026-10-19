@@ -73,9 +73,8 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
   this.stop();if(!input.directive){await this.options.sessions.activate(this.options.connection,input,isCurrent);return;}
   if(input.capabilities.replicaNativeRows!==1)throw Object.assign(Error('Server requires the legacy replica adapter'),{code:'UNSUPPORTED'});
   const {owner}=this.options;let state!:State;
-  let stagingScopes:string[]=[];
   const ingress=new SQLiteNativeIngress({database:owner.database,snapshots:owner.snapshots,scope:input.directive.visibilityScope,reserve:this.options.reserve,
-   runOwner:run=>{const scopes:string[]=['@pending'];return this.run(state,524288,async()=>{stagingScopes=scopes;await this.initialized;return run();},scopes);},
+   runOwner:run=>this.run(state,524288,async()=>{await this.initialized;return run();},['@pending']),
    commitProgress:async()=>{await markSQLiteStagingCommit(owner.database,()=>owner.engine.verifyOwner());},
    sendAck:ack=>{this.check(state);this.options.send(ack);},
    activateVerified:async receipt=>{
@@ -85,7 +84,8 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
     // disconnect or crash before that watermark.
     if(source.deferActivation)return;
     if(!receipt.progress.digest)fail('INVALID_ROW','Verified snapshot has no digest');
-    stagingScopes.splice(0,stagingScopes.length,state.scope);
+    // Cold activation is still part of an unfinished canonical cohort.
+    // Only pending display readers can use it before the terminal watermark.
     const header=this.snapshotHeader(source,start,receipt.progress.digest!);
     await owner.database.runAsync('INSERT INTO gv_native_feed_progress VALUES(?,?,0,0,?) ON CONFLICT(scope,epoch) DO UPDATE SET unclosed=CASE WHEN excluded.unclosed>applied THEN max(unclosed,excluded.unclosed) ELSE unclosed END',state.scope,state.epoch,start.cursor.revision);
     await this.mutate(state.scope,async()=>{await owner.activation.activate({scope:state.scope,subscription:source.id,snapshot:start.snapshotId,header});});
@@ -137,6 +137,10 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
   const revision=state.watermark;if([...this.sources.values()].some(source=>source.deferActivation&&source.start&&source.start.cursor.revision>revision))return;
   const readySources=new Set<string>();let applied=false;await this.run(state,0,()=>this.options.owner.database.withTransactionAsync(async()=>{
    const pending=await this.options.owner.database.getFirstAsync<{unclosed:number;applied:number}>('SELECT unclosed,applied FROM gv_native_feed_progress WHERE scope=? AND epoch=?',state.scope,state.epoch);if(pending&&pending.unclosed>revision||await this.groups.after(state.stream,revision))return;
+   const stages=[...this.sources.values()].some(source=>source.deferActivation&&source.start),groups=await this.groups.pending(state.stream),windows=await this.options.windowsPending?.(state.scope,state.cursorEpoch??state.epoch,revision);
+   // Repeated quiet watermarks do not change authority. Keep them read-only;
+   // new windows or Ready records at this same revision must still publish.
+   if(pending&&pending.applied>=revision&&!pending.unclosed&&!stages&&!groups&&!windows){applied=true;return;}
    const publish=async()=>{
    for(const source of this.sources.values())if(source.deferActivation&&source.start){
     const start=source.start,stage=await this.options.owner.database.getFirstAsync<{digest:string;complete:number}>('SELECT digest,complete FROM gv_snapshot_stages WHERE scope=? AND subscription=? AND snapshot=? AND discarded=0',state.scope,source.id,start.snapshotId);
@@ -157,7 +161,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
      (SELECT w.signature,w.generation FROM gv_windows w WHERE w.scope=? AND w.signature IN (SELECT value FROM json_each(?)))`,revision,state.scope,state.cursorEpoch??'',state.scope,JSON.stringify([...this.sources.values()].filter(source=>!source.closing).map(source=>source.signature)));
    await this.options.owner.database.runAsync('DELETE FROM gv_native_feed_resets WHERE scope=?',state.scope);
    await this.options.owner.database.runAsync('INSERT INTO gv_native_feed_progress VALUES(?,?,?, ?,0) ON CONFLICT(scope,epoch) DO UPDATE SET observed=max(observed,excluded.observed),applied=max(applied,excluded.applied),unclosed=0',state.scope,state.epoch,revision,revision);if(!pending||pending.applied<revision||pending.unclosed)await markSQLiteStagingCommit(this.options.owner.database,()=>this.options.owner.engine.verifyOwner());applied=true;
-   };if([...this.sources.values()].some(source=>source.deferActivation&&source.start)||pending?.unclosed||await this.groups.pending(state.stream)||await this.options.windowsPending?.(state.scope,state.cursorEpoch??state.epoch,revision))await this.mutate(state.scope,publish);else await publish();
+   };if(stages||pending?.unclosed||groups||windows)await this.mutate(state.scope,publish);else await publish();
   }));this.check(state);if(applied){for(const id of readySources){const source=this.sources.get(id);if(source?.deferActivation&&source.start){this.startBytes-=sqlitePayloadBytes(source.start,16384);source.start=undefined;source.deferActivation=false;}this.options.sourceReady?.(id);}this.options.advanceWatermark(revision);}
  }
  private async process(state:State,message:ServerMessage):Promise<void>{

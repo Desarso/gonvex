@@ -302,3 +302,29 @@ it('coalesces staging hints while publishing canonical notifications only when a
  expect(f.publications).toEqual([['@pending']]);
  f.feed.frame({type:'replica.watermark',revision:12},1);await f.feed.assertReadable();expect(f.publications).toEqual([['@pending'],['visible']]);expect(f.failures).toEqual([]);
 });
+
+it('does not notify canonical readers of a cold snapshot before its terminal cohort',async()=>{
+ const f=await fixture();await f.start();await f.append(rows,0,true);
+ await vi.waitFor(()=>expect(f.sends).toHaveLength(1));
+ expect(f.publications).toContainEqual(['@pending']);
+ expect(f.publications.some(scopes=>scopes.includes('visible'))).toBe(false);
+ await expect(f.feed.assertReadable()).rejects.toMatchObject({code:'PAGE_CHANGED'});
+ await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();
+ expect(f.publications.filter(scopes=>scopes.includes('visible'))).toHaveLength(1);
+ expect((await f.canonical.loadEntityRows('visible','tasks',['a','b'])).map(row=>row.row)).toEqual(rows);
+});
+
+it('does not rewrite disk certificates for an already published quiet watermark',async()=>{
+ const f=await fixture();await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();
+ const before=await f.db.getFirstAsync('SELECT total_changes() n');
+ f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();
+ expect(await f.db.getFirstAsync('SELECT total_changes() n')).toEqual(before);
+ expect(f.failures).toEqual([]);expect(await f.engine.integrity()).toBe('ok');
+ // A source first admitted at the same database revision is still authority.
+ f.feed.register({id:'second',signature:'second-window',entity:'tasks',key:'id',path:'tasks/second'});
+ const hash=await digest();f.feed.frame({type:'replica.snapshotStart',id:'second',snapshotId:'second-base',scope:'tenant',visibilityScope:'visible',cursor:cursor(10),key:'id',digest:hash,path:'tasks/second'},1);
+ f.feed.binary(new TextEncoder().encode(JSON.stringify({type:'replica.snapshotEncodedPage',id:'second',snapshotId:'second-base',scope:'tenant',visibilityScope:'visible',cursor:cursor(10),key:'id',sequence:0,last:true,canonicalRows:rows.map(stable),digest:hash,path:'tasks/second'})).buffer,1);
+ f.feed.frame({type:'replica.ready',id:'second',cursor:cursor(10),digest:hash},1);await f.feed.assertReadable();
+ expect((await new SQLiteWindowStore(f.db,()=>f.engine.verifyOwner()).header('visible','second-window'))?.header.aggregateDigest).toBe(hash);
+ expect(f.failures).toEqual([]);
+});

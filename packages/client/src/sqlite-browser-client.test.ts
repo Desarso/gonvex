@@ -202,3 +202,14 @@ it('refreshes pending display pages while coalesced staging hints preserve compl
  expect(two.snapshot().stale).toBe(false);expect(two.snapshot().page).toBe(second);expect(one.snapshot().page).toBe(first);expect(twoNotify).not.toHaveBeenCalled();
  f.change();expect(two.snapshot().stale).toBe(true);expect(twoNotify).toHaveBeenCalledOnce();stopOne();stopTwo();
 });
+
+it('waits for canonical publication after a null canonical page while explicit pending readers receive progress',async()=>{
+ const f=fixture(),canonical=f.client.watchReplica({path:'tasks/all'}),pending=f.client.watchReplica({path:'statuses/all'});
+ cleanup.push(()=>{canonical.close();pending.close();});
+ f.handler=input=>['replicaPage','replicaPendingPage'].includes(input.method)?null:undefined;
+ await canonical.page();await pending.pendingPage();
+ const canonicalNotify=vi.fn(),pendingNotify=vi.fn(),stopCanonical=canonical.subscribe(canonicalNotify),stopPending=pending.subscribe(pendingNotify);
+ f.change('@pending');expect(canonicalNotify).not.toHaveBeenCalled();expect(pendingNotify).toHaveBeenCalledOnce();
+ f.change();expect(canonicalNotify).toHaveBeenCalledOnce();
+ stopCanonical();stopPending();
+});
