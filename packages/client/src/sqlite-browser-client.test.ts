@@ -356,3 +356,10 @@ it('does not substitute a differently sized explicit page for a mounted collecti
  const two=f.client.watchReplica({path:'tasks/all'}),stop=two.onUpdate(()=>{});cleanup.push(()=>{stop();two.close();});await vi.waitFor(()=>expect(two.localReplicaResult()).toEqual([{id:'row'}]));
  expect(f.calls.filter(call=>call.input.method==='replicaPage').map(call=>call.input.limit)).toEqual([1,128]);
 });
+
+
+it('does not count another page read as a canonical invalidation',async()=>{
+ const f=fixture();let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});let started=false;
+ f.handler=async input=>{if(input.method!=='replicaPage')return;if(input.limit===128){started=true;await gate;}return {generation:{epoch:1,sequence:1},offset:0,nextOffset:null,rows:[{id:'row',value:{id:'row'}}],window:{generation:'one',total:1,header:{source:'server',completeness:'complete'}}};};
+ const watch=f.client.watchReplica({path:'tasks/all'});cleanup.push(()=>watch.close());const full=watch.page({limit:128});await vi.waitFor(()=>expect(started).toBe(true));await watch.page({limit:1});release();await full;expect(watch.snapshot().stale).toBe(false);
+});

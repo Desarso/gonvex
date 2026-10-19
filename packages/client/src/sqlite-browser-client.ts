@@ -26,7 +26,7 @@ export type SQLiteCollectionPageResult=SQLiteTypedPage&{generation:string};
 export type SQLiteLocalQueryPage=(SQLiteTypedPage&{supported:true;complete:boolean;generation:string})|{supported:false;reason:string;generation:string;rows?:never};
 type Page=SQLiteLocalQueryPage|SQLitePendingLivePage|SQLiteNativeWindowResult|SQLitePendingSnapshotPage|SQLiteNativeEntityResult|SQLiteCollectionPageResult|null;
 type WatchSnapshot={page:Page|undefined;stale:boolean;version:number};
-type Watch={kind:'replica'|'live';state:WatchSnapshot;retiring?:Promise<void>;key:string;lease:string;path:string;args:JsonValue;bytes:number;refs:number;source?:{id?:string;signature:string};bound:number;opening?:Promise<void>;listeners:Set<()=>void>;unpin?:()=>void;stale:boolean;version:number;pendingDisplay?:boolean;compatibleFirstPage?:boolean};
+type Watch={kind:'replica'|'live';state:WatchSnapshot;retiring?:Promise<void>;key:string;lease:string;path:string;args:JsonValue;bytes:number;refs:number;source?:{id?:string;signature:string};bound:number;opening?:Promise<void>;listeners:Set<()=>void>;unpin?:()=>void;stale:boolean;version:number;invalidation:number;pendingDisplay?:boolean;compatibleFirstPage?:boolean};
 export type SQLiteBrowserOptions={broker:Broker;artifactHash?:string;onUpdateRequired?:GonvexClientOptions['onUpdateRequired'];onLocalExecutionFallback?:GonvexClientOptions['onLocalExecutionFallback'];errorReporting?:GonvexClientOptions['errorReporting'];role?:'control';public?:{tenant:string};auth?:Auth;fetchToken?:GonvexClientAuth['fetchToken']};
 export type SQLiteWatchOptions={view?:JsonValue;deferStart?:boolean};
 export type SQLiteReplicaPageOptions={offset?:number;limit?:number;generation?:string;expected?:SQLiteNativeWindowResult['generation']};
@@ -77,12 +77,12 @@ export class SQLiteBrowserClient {
    if(scope==='@pending'){
     // Coalesce staging hints across sources without invalidating complete
     // cached pages. Canonical authority is published at its terminal cohort.
-    for(const watch of this.watches.values()){const page=this.pages.get(watch.key);if(watch.pendingDisplay||page&&'serverVerified'in page&&page.serverVerified===false){watch.stale=true;this.notify(watch);}}
+    for(const watch of this.watches.values()){const page=this.pages.get(watch.key);if(watch.pendingDisplay||page&&'serverVerified'in page&&page.serverVerified===false){watch.invalidation++;watch.stale=true;this.notify(watch);}}
     // Staging can invalidate a still-unresolved entity batch's storage lease.
     // Certified cached values only change on a canonical publication.
     this.entityView.refresh(false);void this.pollControls().catch(()=>{});return;
    }
-   if(scope!=='@control'){for(const watch of this.watches.values()){watch.stale=true;this.notify(watch);}this.entityView.refresh();}
+   if(scope!=='@control'){for(const watch of this.watches.values()){watch.invalidation++;watch.stale=true;this.notify(watch);}this.entityView.refresh();}
    this.controlQueries.refresh();void this.pollControls().catch(()=>{});
   });
   if(options.errorReporting&&this.auth.project){this.reporter=new GonvexErrorReporter({...options.errorReporting,project:this.auth.project,tenant:this.auth.tenant,client:this,transport:(kind,payload)=>this.reportError(kind,payload)});this.ledger.register('error-reporting',()=>this.reporter!.memoryBudget());}
@@ -90,12 +90,12 @@ export class SQLiteBrowserClient {
  private current(revision:number){if(this.closed||revision!==this.revision)fail('FENCED','Native browser session changed');}
  private notify(watch:Watch){watch.version++;watch.state={page:this.pages.get(watch.key),stale:watch.stale,version:watch.version};for(const listener of watch.listeners)try{listener();}catch{/* Observer only. */}}
  private invalidate(identity:boolean){this.revision++;this.dataRevision++;this.lastRejection=0;this.lastSupport=0;if(identity){this.admissionKey=undefined;this.lastAuthError=undefined;this.lastCredential=undefined;}this.handle=undefined;this.controlsValue=undefined;this.controlQueries.invalidate(identity);this.memberships.invalidate();this.entityView.invalidate(identity);
-  for(const watch of this.watches.values()){watch.bound=-1;watch.source=undefined;watch.opening=undefined;watch.stale=true;if(identity){watch.unpin?.();watch.unpin=undefined;this.pages.delete(watch.key);}this.notify(watch);}
+  for(const watch of this.watches.values()){watch.bound=-1;watch.source=undefined;watch.opening=undefined;watch.invalidation++;watch.stale=true;if(identity){watch.unpin?.();watch.unpin=undefined;this.pages.delete(watch.key);}this.notify(watch);}
  }
  private admit(key:string|null){
   if(this.admissionKey===key)return;
   const changed=this.admissionKey!==undefined||key===null;this.admissionKey=key;if(!changed)return;this.dataRevision++;this.controlQueries.invalidate(true);this.entityView.invalidate(true);
-  for(const watch of this.watches.values()){watch.unpin?.();watch.unpin=undefined;this.pages.delete(watch.key);watch.stale=true;this.notify(watch);}
+  for(const watch of this.watches.values()){watch.unpin?.();watch.unpin=undefined;this.pages.delete(watch.key);watch.invalidation++;watch.stale=true;this.notify(watch);}
  }
  connect():Promise<Handle>{
   if(this.closed)return Promise.reject(Object.assign(Error('Native browser client is closed'),{code:'FENCED'}));if(this.handle)return Promise.resolve(this.handle);if(this.connecting){const pending=this.connecting,pendingRevision=this.connectingRevision;return pending.then(handle=>this.handle?handle:this.connect(),error=>{if(!this.closed&&pendingRevision!==this.revision)return this.connect();throw error;});}
@@ -250,7 +250,7 @@ export class SQLiteBrowserClient {
  }
  private watchBounded(ref:Pick<FunctionReference,'path'>,args:JsonValue,options:{view?:JsonValue},kind:'replica'|'live'){
   sqlitePayloadBytes({path:ref.path,args,view:options.view??null},32768);const key=stable({kind,path:ref.path,args,view:options.view??null});let watch=this.watches.get(key);
-  if(!watch){const bytes=sqlitePayloadBytes({key,args,path:ref.path},65536)+2048;if(this.watches.size>=192||this.watchBytes+bytes>524288)fail('BUDGET','Native browser watch budget exhausted');watch={kind,state:{page:undefined,stale:true,version:0},key,lease:crypto.randomUUID(),path:ref.path,args:JSON.parse(stable(args)),bytes,refs:0,bound:-1,listeners:new Set(),stale:true,version:0};this.watches.set(key,watch);this.watchBytes+=bytes;}
+  if(!watch){const bytes=sqlitePayloadBytes({key,args,path:ref.path},65536)+2048;if(this.watches.size>=192||this.watchBytes+bytes>524288)fail('BUDGET','Native browser watch budget exhausted');watch={kind,state:{page:undefined,stale:true,version:0},key,lease:crypto.randomUUID(),path:ref.path,args:JSON.parse(stable(args)),bytes,refs:0,bound:-1,listeners:new Set(),stale:true,version:0,invalidation:0};this.watches.set(key,watch);this.watchBytes+=bytes;}
   const selected=watch;if(selected.refs>=64)fail('BUDGET','Native watch lease budget exhausted');selected.refs++;let closed=false;const listeners=new Set<()=>void>();void this.open(selected).catch(()=>{});
   const read=async<T extends Page>(method:string,options:unknown):Promise<T>=>{
    const revision=this.revision,dataRevision=this.dataRevision;if(closed)fail('FENCED','Native watch is closed');
@@ -258,7 +258,7 @@ export class SQLiteBrowserClient {
    const descriptor={watch:selected.key,version:selected.version,revision,dataRevision,method,options:options as JsonValue};const bytes=sqlitePayloadBytes(descriptor,131072)+256,key=stable(descriptor);let pending=this.reads.get(key);
    if(!pending){
     if(this.reads.size>=384||this.readBytes+bytes>524288)fail('BUDGET','Shared native read metadata exhausted');
-    const queryOptions=structuredClone(options);pending=(async()=>{await this.open(selected);const observed=selected.version,value=await this.rpc<Page>({method,signature:selected.source!.signature,...queryOptions as object});this.current(revision);if(dataRevision!==this.dataRevision||!selected.refs)fail('FENCED','Native watch admission changed');if(value!==null||this.pages.get(selected.key)===undefined){const pageOptions=queryOptions as SQLiteReplicaPageOptions,compatible=method==='replicaPage'&&pageOptions.limit===128&&(pageOptions.offset??0)===0&&pageOptions.generation===undefined&&pageOptions.expected===undefined;this.store(selected,value,compatible,selected.version!==observed);}return value;})();
+    const queryOptions=structuredClone(options);pending=(async()=>{await this.open(selected);const observed=selected.invalidation,value=await this.rpc<Page>({method,signature:selected.source!.signature,...queryOptions as object});this.current(revision);if(dataRevision!==this.dataRevision||!selected.refs)fail('FENCED','Native watch admission changed');if(value!==null||this.pages.get(selected.key)===undefined){const pageOptions=queryOptions as SQLiteReplicaPageOptions,compatible=method==='replicaPage'&&pageOptions.limit===128&&(pageOptions.offset??0)===0&&pageOptions.generation===undefined&&pageOptions.expected===undefined;this.store(selected,value,compatible,selected.invalidation!==observed);}return value;})();
     this.reads.set(key,pending);this.readBytes+=bytes;const operation=pending,release=()=>{if(this.reads.get(key)===operation){this.reads.delete(key);this.readBytes-=bytes;}};void operation.then(release,release);
    }
    const value=await pending;if(closed)fail('FENCED','Native watch closed during read');return value as T;
