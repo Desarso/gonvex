@@ -13,6 +13,7 @@ function isUiPath(value) {
   // Documentation applications and all Rust sources are explicitly outside UI review.
   if (/^apps\/(?:docs?|documentation)(?:\/|$)/i.test(p) || /\.(?:rs|md|mdx|rst|txt|ya?ml|toml)$/i.test(p)) return false;
   if (/(?:^|\/)[^/]*\.(?:test|spec|stories|story)\.[^/]+$/i.test(p) || /(?:^|\/)(?:readme|changelog|license)(?:\.|$)/i.test(p)) return false;
+  if (/^lib\/(?:main|app)\.dart$/i.test(p) || /^lib\/.*\.dart$/i.test(p) && /(?:^|\/)(?:widgets|screens|pages|views|layouts|components|presentation|ui|themes?|l10n|localization|i18n)(?:\/|$)/i.test(p)) return true;
   if (low === 'index.html' || /\.(?:css|scss|sass|less)$/i.test(p)) return true;
   const runtime = /^(?:src|web|client|frontend|public|app|pages|components|layouts|styles|locales|localization|translations|i18n)(?:\/|$)/i.test(p)
     || /^apps\/[^/]+\/(?:src|app|pages|components|public)(?:\/|$)/i.test(p)
