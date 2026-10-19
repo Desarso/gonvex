@@ -213,3 +213,19 @@ it('waits for canonical publication after a null canonical page while explicit p
  f.change();expect(canonicalNotify).toHaveBeenCalledOnce();
  stopCanonical();stopPending();
 });
+
+it('keeps connection snapshots stable across unchanged controls and publishes genuine session or admission changes',async()=>{
+ const f=fixture();let connected=true,session='authenticated',serverVersion=1;
+ f.handler=async input=>input.method==='controls'?{tokens:[],status:{isWebSocketConnected:connected,hasEverConnected:true,connectionCount:1,connectionRetries:0,hasInflightRequests:false,inflightReducers:0,inflightActions:0,inflightOneShotQueries:0},session,failure:null,serverInfo:{version:String(serverVersion)}}:undefined;
+ await f.client.connect();await f.client.pollControls();await new Promise(resolve=>setTimeout(resolve,0));
+ const original=f.client.connectionState(),seen:unknown[]=[],sessions:string[]=[],scopes:unknown[]=[];
+ const releases=[f.client.subscribeToConnectionState(value=>seen.push(value)),f.client.onLocalSessionChange(()=>sessions.push(f.client.localSessionState())),f.client.onSessionScopeChange(()=>scopes.push('scope'))];
+ await new Promise(resolve=>setTimeout(resolve,0));seen.length=0;sessions.length=0;
+ for(let n=0;n<10;n++)await f.client.pollControls();
+ expect(f.client.connectionState()).toBe(original);expect(seen).toEqual([]);expect(sessions).toEqual([]);
+ serverVersion++;await f.client.pollControls();expect(f.client.connectionState()).toBe(original);expect(f.client.serverInfo()).toMatchObject({version:'2'});
+ connected=false;session='restored';await f.client.pollControls();expect(f.client.connectionState()).not.toBe(original);expect(f.client.connectionState().isWebSocketConnected).toBe(false);expect(sessions.at(-1)).toBe('restored');
+ f.handler=async input=>input.method==='controls'?{tokens:[],status:f.client.connectionState(),session,failure:null,serverInfo:{version:'2'},admissionKey:'first'}:undefined;await f.client.pollControls();
+ f.handler=async input=>input.method==='controls'?{tokens:[],status:f.client.connectionState(),session,failure:null,serverInfo:{version:'2'},admissionKey:'changed'}:undefined;await f.client.pollControls();expect(scopes).toHaveLength(2);
+ for(const release of releases)release();
+});

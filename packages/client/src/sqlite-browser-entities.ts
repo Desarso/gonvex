@@ -23,7 +23,11 @@ export class SQLiteBrowserEntities {
  counters(){let rows=0,listeners=0;for(const entry of this.entries.values()){rows+=Number(!!entry.row);listeners+=entry.subscribers.size;}return {replicaRows:rows,replicaBytes:this.bytes,replicaMetadataBytes:this.entries.size*512,sdkListeners:listeners};}
  entityVersion(entity:string,id?:string){return id===undefined?this.entityVersions.get(entity)??0:this.entries.get(JSON.stringify([entity,id]))?.version??0;}
  private publish(entry:Entry){entry.version=++this.version;this.entityVersions.set(entry.entity,this.version);for(const listener of entry.subscribers)try{listener();}catch{/* Observer only. */}}
- refresh(all=true){if(this.closed)return;this.refreshAll||=all;if(this.refreshing){this.again=true;return;}const operation=this.drain();this.refreshing=operation;void operation.then(()=>{if(this.refreshing===operation)this.refreshing=undefined;},()=>{if(this.refreshing===operation)this.refreshing=undefined;});}
+ refresh(all=true){if(this.closed)return;this.refreshAll||=all;if(this.refreshing){this.again=true;return;}const operation=this.drain();this.refreshing=operation;const finished=()=>{if(this.refreshing!==operation)return;this.refreshing=undefined;
+  // An empty drain can settle synchronously. A mount in the same task must
+  // survive the gap before this promise's completion callback runs.
+  if(!this.closed&&(this.again||this.refreshAll))this.refresh(this.refreshAll);
+ };void operation.then(finished,finished);}
  private async drain(){do{this.again=false;const all=this.refreshAll;this.refreshAll=false;const revision=this.revision,groups=new Map<string,string[][]>();for(const entry of this.entries.values()){if(!all&&entry.encoded!==undefined)continue;let pages=groups.get(entry.entity);if(!pages)groups.set(entry.entity,pages=[[]]);let page=pages.at(-1)!;if(page.length>=128||sqlitePayloadBytes([...page,entry.id],262144)>16384)pages.push(page=[]);page.push(entry.id);}
   const work=[...groups].flatMap(([entity,pages])=>pages.map(ids=>({entity,ids})));if(!work.length)return;
   let generation:SQLiteCanonicalGeneration|undefined,next=0,failed=false,stagedBytes=0;

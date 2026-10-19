@@ -34,3 +34,11 @@ it('retries unresolved reads on staging progress without rereading certified mou
  expect(f.calls).toEqual([{entity:'tasks',ids:['b'],expected:undefined}]);expect(f.view.entity('tasks','a')).toBe(original);
  f.view.refresh();await vi.waitFor(()=>expect(f.view.entity('tasks','a')?.n).toBe(2));release();releaseNew();f.view.close();
 });
+
+it('does not lose a mounted read when an empty refresh has settled before its cleanup microtask',async()=>{
+ const f=fixture();f.view.refresh(false);
+ const release=f.view.retain('tasks',['a']);
+ await new Promise(resolve=>setTimeout(resolve,0));
+ expect(f.view.entity('tasks','a')).toEqual({id:'a',n:1});
+ expect(f.calls).toHaveLength(1);expect(f.errors).toEqual([]);release();f.view.close();
+});
