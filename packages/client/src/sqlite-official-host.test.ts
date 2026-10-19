@@ -116,10 +116,21 @@ it('profiles native transaction boundaries using fixed numeric counters and rese
   for (const value of Object.values(result)) {
     for (const number of typeof value==='object'?Object.values(value):[value]) expect(Number.isFinite(number) && number >= 0).toBe(true);
   }
-  const {sqlite: memory,...reset}=host.takeProfile();
+  const {sqlite: memory,writeStatements,...reset}=host.takeProfile();expect(writeStatements).toEqual({});
   expect(memory!.allocated).toBeGreaterThan(0);expect(memory!.peakAllocated).toBeGreaterThanOrEqual(memory!.allocated);
   expect(reset).toEqual({ vfs:{viewHits:0,viewMisses:0,heapResets:0,maxViewEntries:0,numberReadCalls:0,numberWriteCalls:0,viewEntries:0,viewMaxEntries:4096}, execCalls:0,execMs:0,ingressFoldCalls:0, ingressFoldUTF16Bytes:0, prepareMs: 0, prepares: 0, bindMs: 0, boundTextUTF16Bytes: 0, beginMs: 0, callbackMs: 0, commitMs: 0, rollbackMs: 0, commits: 0, rollbacks: 0 });
   expect((await host.database.getFirstAsync<{ n: number }>('SELECT count(*) n FROM profile_probe'))!.n).toBe(0);
+});
+
+it('attributes attempted writes without keeping SQL, row values or per-table profile keys',async()=>{
+ const {host}=fixture();await host.database.execAsync('CREATE TABLE gv_window_probe(value TEXT); CREATE TABLE arbitrary_private_table(value TEXT)');host.takeProfile();
+ await host.database.runAsync('INSERT INTO gv_window_probe VALUES(?)','private row payload');
+ await host.database.getFirstAsync('UPDATE gv_window_probe SET value=? RETURNING value','different private row payload');
+ await host.database.getAllAsync('SELECT value FROM gv_window_probe');
+ await expect(host.database.withTransactionAsync(async()=>{await host.database.runAsync('DELETE FROM gv_window_probe');throw Error('rollback');})).rejects.toThrow('rollback');
+ await host.database.runAsync('INSERT INTO arbitrary_private_table VALUES(?)','secret');
+ expect(host.takeProfile().writeStatements).toEqual({'window.insert':1,'window.update':1,'window.delete':1,'other.insert':1});
+ expect(host.takeProfile().writeStatements).toEqual({});
 });
 
 it.each([['full', false], ['column', false], ['none', false], ['full', true], ['column', true], ['none', true]] as const)('preserves literal substring queries and trigger maintenance with FTS detail=%s external=%s', async (searchDetail, external) => {

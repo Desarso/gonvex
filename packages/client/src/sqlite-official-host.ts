@@ -12,7 +12,7 @@ export type OfficialSQLiteHost = {
   readonly nativeHash:boolean;
   readonly nativeReceipt:boolean;
   readonly nativeSnapshot:boolean;
-  takeProfile(): { sqlite?:{allocated:number;peakAllocated:number;schema:number;cache:number;statements:number}; vfs?:Record<string,number>; ingressFoldCalls:number; ingressFoldUTF16Bytes:number; execMs:number;execCalls:number;prepareMs: number; prepares: number; bindMs: number; boundTextUTF16Bytes: number; beginMs: number; callbackMs: number; commitMs: number; rollbackMs: number; commits: number; rollbacks: number };
+  takeProfile(): { sqlite?:{allocated:number;peakAllocated:number;schema:number;cache:number;statements:number}; vfs?:Record<string,number>; writeStatements:Record<string,number>; ingressFoldCalls:number; ingressFoldUTF16Bytes:number; execMs:number;execCalls:number;prepareMs: number; prepares: number; bindMs: number; boundTextUTF16Bytes: number; beginMs: number; callbackMs: number; commitMs: number; rollbackMs: number; commits: number; rollbacks: number };
   close(): void;
 };
 
@@ -74,6 +74,16 @@ export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
   const textDecoder=new TextDecoder('utf-8',{fatal:true});
   let transaction = false, closed = false, statementBytes = 0;
   const profile = { execMs:0,execCalls:0,ingressFoldCalls:0, ingressFoldUTF16Bytes:0, prepareMs: 0, prepares: 0, bindMs: 0, boundTextUTF16Bytes: 0, beginMs: 0, callbackMs: 0, commitMs: 0, rollbackMs: 0, commits: 0, rollbacks: 0 };
+  // Attempted statements, including later rollbacks. Fixed table families and
+  // operation names bound these counters without retaining SQL or parameters.
+  const writeStatements:Record<string,number>={};
+  function noteWrite(sql:string,statement:PreparedStatement){
+    if(sqlite3.capi.sqlite3_stmt_readonly(statement.pointer!))return;
+    const match=sql.match(/\b(INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|UPDATE|DELETE\s+FROM)\s+"?(\w+)/i),table=match?.[2]?.toLowerCase()??'';
+    const family=table.startsWith('gv_storage')?'storage':table.startsWith('gv_session')?'session':table.startsWith('gv_window')||table==='gv_windows'?'window':table.startsWith('gv_snapshot')?'snapshot':table.startsWith('gv_feed')||table.startsWith('gv_native_feed')||table.startsWith('gv_deferred')?'feed':table.startsWith('gv_reducer')?'journal':table.startsWith('gv_prediction')?'prediction':table.startsWith('gv_entity')?'entity':table.startsWith('_gonvex_replica')?'canonical':table.startsWith('gv_t_')?'typed':'other';
+    const operation=match?.[1]?.split(/\s/)[0]?.toLowerCase()??'other',key=family+'.'+operation;
+    writeStatements[key]=(writeStatements[key]??0)+1;
+  }
   const statements = new Map<string, { statement: PreparedStatement; bytes: number }>();
   const statementBudget = 262144, maxStatements = 32;
   function retire(sql: string) {
@@ -117,6 +127,7 @@ export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
     const cached = cachedPlan(sql);
     const statement = cached?.statement ?? prepare(sql); let retain = !!cached;
     try {
+      noteWrite(sql,statement);
       bind(statement, values);
       const rows: T[] = []; let bytes = 0;
       const columns = statement.getColumnNames();
@@ -171,6 +182,7 @@ export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
       const statement = cached?.statement ?? prepare(sql);
       let retain = !!cached;
       try {
+        noteWrite(sql,statement);
         bind(statement, values); while (statement.step()) { /* No retained output. */ }
         retain = remember(sql, statement, cached);
       } catch (e) {
@@ -213,6 +225,6 @@ export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
     });
   }
   return { database, nativeFastFold,nativeHash,nativeReceipt,nativeSnapshot, memoryBytes: () => sqlite3.wasm.heap8u().buffer.byteLength, statementBytes: () => statementBytes, memoryStats:nativeMemory,
-    takeProfile() { const vfs=(sqlite3 as unknown as {__gonvexVFSProfile?:()=>Record<string,number>}).__gonvexVFSProfile?.();const result = { ...profile,sqlite:nativeMemory(),...(vfs?{vfs}:{}) }; for (const key of Object.keys(profile) as Array<keyof typeof profile>) profile[key] = 0; return result; },
+    takeProfile() { const vfs=(sqlite3 as unknown as {__gonvexVFSProfile?:()=>Record<string,number>}).__gonvexVFSProfile?.();const result = { ...profile,writeStatements:{...writeStatements},sqlite:nativeMemory(),...(vfs?{vfs}:{}) }; for (const key of Object.keys(profile) as Array<keyof typeof profile>) profile[key] = 0;for(const key of Object.keys(writeStatements))delete writeStatements[key];return result; },
     close() { if (!closed) { closed = true; for (const sql of statements.keys()) retire(sql); db.close(); } } };
 }
