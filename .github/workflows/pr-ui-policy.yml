@@ -1,0 +1,42 @@
+name: UI diff policy
+on:
+  pull_request_target:
+    branches: [main, staging]
+    types: [opened, reopened, synchronize, edited, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Existing PR to classify and reconcile
+        required: true
+        type: string
+permissions:
+  contents: read
+  pull-requests: read
+  issues: write
+  statuses: write
+jobs:
+  classify:
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 2
+    steps:
+      # Only trusted default-branch code runs. PR paths and descriptions are data.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - run: node --test .github/scripts/ui-diff-classifier.test.cjs scripts/pr-ui-policy.test.cjs
+      - uses: actions/github-script@v8
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+        with:
+          script: |
+            if (context.eventName === 'workflow_dispatch') {
+              if (!/^[0-9]+$/.test(process.env.PR_NUMBER || '')) throw new Error('Invalid PR number');
+              context.payload.pull_request = (await github.rest.pulls.get({ ...context.repo, pull_number: Number(process.env.PR_NUMBER) })).data;
+            }
+            const candidate = context.payload.pull_request;
+            if (candidate.state !== 'open' || candidate.draft || !['main', 'staging'].includes(candidate.base.ref)) return;
+            await github.rest.repos.createCommitStatus({ ...context.repo, sha: candidate.head.sha, context: `UI merge policy / ${candidate.base.ref}`, state: 'pending', description: 'Rechecking complete changed-file diff and current UI policy' });
+            const { reconcileBrowserLabels, reconcileUiMergeStatus } = require('./scripts/pr-ui-policy.cjs');
+            await reconcileBrowserLabels({ github, context, validate: () => ({ needsBrowser: true }) });
+            await reconcileUiMergeStatus({ github, context });
