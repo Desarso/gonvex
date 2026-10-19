@@ -182,3 +182,17 @@ it('blocks committed reads through an activated but unfinished bootstrap cohort 
  const guard=(epoch='e')=>f.runOwner(0,()=>f.db.withTransactionAsync(()=>f.feed.assertCommittedReadable({scope:'visible',epoch})));
  await expect(guard()).rejects.toMatchObject({code:'PAGE_CHANGED'});f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();await expect(guard()).resolves.toBeUndefined();await expect(guard('replacement')).rejects.toMatchObject({code:'PAGE_CHANGED'});
 });
+
+it('reclaims published staging metadata before repeated snapshots without waiting for idle maintenance',async()=>{
+ const f=await fixture();
+ for(let n=0;n<4;n++){
+  const snapshotId='reload-'+n;
+  f.feed.frame({type:'replica.snapshotStart',id:'source',snapshotId,scope:'tenant',visibilityScope:'visible',cursor:cursor(10),key:'id',digest:await digest(),path:'tasks/all'},1);
+  f.feed.binary(new TextEncoder().encode(JSON.stringify({type:'replica.snapshotEncodedPage',id:'source',snapshotId,scope:'tenant',visibilityScope:'visible',cursor:cursor(10),key:'id',sequence:0,last:true,canonicalRows:rows.map(stable),digest:await digest(),path:'tasks/all'})).buffer,1);
+  await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();
+  expect(f.failures).toEqual([]);
+  expect((await f.canonical.loadEntityRows('visible','tasks',['a','b'])).map(entry=>entry.row)).toEqual(rows);
+  expect((await f.db.getFirstAsync<{n:number}>('SELECT count(*) n FROM gv_snapshot_stages')).n).toBeLessThanOrEqual(1);
+ }
+ expect(await f.engine.integrity()).toBe('ok');
+});
