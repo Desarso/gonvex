@@ -2246,7 +2246,11 @@ export type UseReducerOptions = {
 
 export function useReducer(ref: FunctionReference, options: UseReducerOptions = {}) {
   const client = useGonvexClient();
-  useEffect(() => { void client.prepareReducer?.(ref)?.catch(() => undefined); }, [client, ref]);
+  useEffect(() => {
+    // Native invocation loads its generated body before executing the intent.
+    // Mounting an unused hook must not pull optional reducer chunks into boot.
+    if (!(client instanceof SQLiteBrowserClient)) void client.prepareReducer?.(ref)?.catch(() => undefined);
+  }, [client, ref]);
   const refRef = useRef(ref);
   refRef.current = ref;
   const timeoutMs = options.timeoutMs;

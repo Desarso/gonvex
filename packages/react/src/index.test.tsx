@@ -695,6 +695,29 @@ describe("useReducer", () => {
     expect(client.action).not.toHaveBeenCalled();
   });
 
+  it("loads native reducer work on intent instead of mounted unused hooks", async () => {
+    const { SQLiteBrowserClient } = await import('@gonvex/client/sqlite/browser');
+    const calls: any[] = [];
+    const broker = { subscribeChanges: () => () => {}, stats: () => ({ ownerEpoch: 1 }), close() {}, async request(_op: string, input: any) {
+      calls.push(input);
+      if (input.method === 'connect') return { connection: 'native', identityKey: 'identity' };
+      if (input.method === 'controls') return { tokens: [], status: { isWebSocketConnected: true }, session: 'authenticated', failure: null };
+      if (input.method === 'reducer') return { commandId: 'intent', result: 42 };
+      return null;
+    } };
+    const client = new SQLiteBrowserClient('ws://private.test/ws', { broker: broker as any });
+    const ref: FunctionReference = { kind: 'reducer', path: 'tasks.create', localExecution: 1 };
+    const wrapper = ({ children }: { children: ReactNode }) => <GonvexProvider client={client}>{children}</GonvexProvider>;
+    const hook = renderHook(() => useReducer(ref), { wrapper });
+    await act(async () => {});
+    expect(calls.some(call => call.method === 'prepareReducer' || call.method === 'reducer')).toBe(false);
+    await act(async () => { expect(await hook.result.current({ name: 'Intent' })).toBe(42); });
+    expect(calls.filter(call => call.method === 'reducer')).toHaveLength(1);
+    await client.prepareReducer(ref);
+    expect(calls.filter(call => call.method === 'prepareReducer')).toHaveLength(1);
+    hook.unmount(); client.close();
+  });
+
   it("forwards per-call timeout options to the client", async () => {
     const client = new FakeGonvexClient();
     const { result } = renderHook(
