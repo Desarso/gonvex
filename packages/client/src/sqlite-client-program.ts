@@ -28,6 +28,7 @@ import {sqliteCollectionPagePlan} from './sqlite-collection-plan.js';
 import {SQLiteWindowStore} from './sqlite-window-store.js';
 import {fail,sqlitePayloadBytes} from './sqlite-admission.js';
 type Auth=Pick<GonvexClientAuth,'project'|'tenant'|'token'|'identity'>;
+type NativeFunctionReference=FunctionReference&{localDependencyTables?:string};
 type Source={forceSnapshot?:boolean;id:string;signature:string;ref:FunctionReference;args:JsonValue;tabs:Set<string>;leases:Map<string,Set<string>>;eager:boolean;bytes:number;closing?:Promise<void>};
 type ControlSource={signature:string;ref:FunctionReference;args:JsonValue;tabs:Set<string>;value?:JsonValue;error?:string;version:number;bytes:number;resultBytes:number;close():void};
 type LiveSource={leases:Map<string,Set<string>>;signature:string;ref:FunctionReference;args:JsonValue;tabs:Set<string>;bytes:number;error?:string;close():void};
@@ -36,7 +37,7 @@ type Binding={artifactHash:string;clientContract?:ClientContract;runtime:Pick<Po
  /** Generated public refs plus SDK-owned __local collections. No app RPC
   * supplies its own function metadata, authorization, SQL or visibility plan. */
  legacyStorage?:{replicaName:string;outboxName:string};
- references:readonly FunctionReference[];collections:readonly string[];offlineMaxAgeMs:number|null;
+ references:readonly NativeFunctionReference[];collections:readonly string[];offlineMaxAgeMs:number|null;
 };
 const stable=(value:JsonValue):string=>value===null||typeof value!=='object'?JSON.stringify(value):Array.isArray(value)?'['+value.map(stable).join(',')+']':'{'+Object.keys(value).sort().map(key=>JSON.stringify(key)+':'+stable(value[key]!)).join(',')+'}';
 async function digest(value:string){return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))),byte=>byte.toString(16).padStart(2,'0')).join('');}
@@ -50,7 +51,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
  private readonly liveWindows:SQLiteLiveWindows;
  private readonly safety:SQLiteSessionJournal;private readonly sessions:SQLiteWorkerSessions;private readonly tokens:SQLiteWorkerTokens;
  private readonly reducer:SQLiteReducerOwner;private readonly windows:SQLiteWindowStore;
- private readonly references=new Map<string,FunctionReference>();private readonly connections=new Map<string,Connection>();private readonly tabs=new Map<string,string>();
+ private readonly references=new Map<string,NativeFunctionReference>();private readonly connections=new Map<string,Connection>();private readonly tabs=new Map<string,string>();
  private readonly maintenance:SQLiteOwnerMaintenance;private readonly legacy:SQLiteLegacyBootstrap;
  private readonly ledger=new ByteLedger(21495808);private readonly transient=new SQLiteTransientBudget();private readonly transport=new SQLiteTransientBudget(2097152,256);private readonly transportAuth=new SQLiteTransientBudget(524288,8);private readonly catalogBytes:number;
  private connecting=Promise.resolve();private closed=false;
@@ -154,6 +155,12 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
   connection.migrationTimer=setTimeout(()=>{connection.migrationTimer=undefined;const admitted=this.admission(connection),session=connection.migrationSession;if(!admitted||!session)return;if(connection.restoring){this.scheduleMigration(connection,100);return;}
    void this.legacy.step(admitted.intentScope,session).then(result=>{if(!result.verified)this.scheduleMigration(connection,100);},error=>{if(this.closed||this.connections.get(connection.id)!==connection)return;connection.failure={code:String((error as any)?.code??'SQLITE'),message:String((error as any)?.message??error).slice(0,512)};this.notify(connection);});
   },delay);
+ }
+ private async prepareReducer(connection:Connection,ref:NativeFunctionReference){
+  if(ref.localExecution!==1||connection.controlOnly||connection.public)return;
+  await this.reducer.core.prepare(ref.path);
+  const encoded=ref.localDependencyTables??'[]';sqlitePayloadBytes(encoded,32768);const tables:unknown=JSON.parse(encoded);if(!Array.isArray(tables)||tables.length>128||tables.some(entity=>typeof entity!=='string'||!entity||entity.length>256))fail('INVALID_ROW','Invalid generated reducer dependencies');
+  for(const entity of tables as string[]){const dependency=this.references.get('__local.'+entity);if(!dependency?.replica)fail('INVALID_ROW','Generated reducer dependency is unavailable');await this.addSource(connection,dependency!,{},undefined,true);}
  }
  private async watchControl(connection:Connection,ref:FunctionReference,args:JsonValue,tab:string){
   if(ref.scope!=='control'||ref.kind!=='query'||ref.delivery==='replica')fail('INVALID_ROW','Expected a generated Control query');
@@ -327,7 +334,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
    case 'replicaPage':{
     text(input.signature,128);const source=connection.sources.get(input.signature);if(!source||!source.eager&&!source.tabs.has(caller.tabID))fail('FENCED','Tab does not own that source');const admission=this.checkCaller(caller,connection);return this.readCommitted(connection,admission,caller,async()=>{this.checkCaller(caller,connection,admission.generation);const result=await this.owner.reader.window({scope:admission.scope,signature:source.signature,offset:input.offset,limit:input.limit,generation:input.generation,expected:input.expected});this.checkCaller(caller,connection,admission.generation);if(connection.sources.get(source.signature)!==source||!source.eager&&!source.tabs.has(caller.tabID))fail('FENCED','Native source was detached');return result??null;});
    }
-   case 'prepareReducer':{const ref=this.ref(input.path,'reducer');if(ref.localExecution===1)await this.reducer.core.prepare(ref.path);if(caller.signal.aborted||this.tabs.get(caller.tabID)!==connection.id)fail('FENCED','Reducer preparation caller detached');return null;}
+   case 'prepareReducer':{const ref=this.ref(input.path,'reducer');await this.prepareReducer(connection,ref);if(caller.signal.aborted||this.tabs.get(caller.tabID)!==connection.id)fail('FENCED','Reducer preparation caller detached');return null;}
    case 'localLivePage':{
     text(input.signature,128);const source=connection.sources.get(input.signature),ref=this.ref(input.path,'query');
     if(!source?.tabs.has(caller.tabID)||!source.ref.replica||!ref.live?.plan||ref.live.entity!==source.ref.replica.table)fail('FENCED','Local query has no admitted collection');
@@ -361,7 +368,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
      const page=await this.reducer.predictions.page(admitted.scope,lowered.plan,lowered.allowLocalInserts);owns();return {...page,generation:header.generation};
     });
    }
-   case 'reducer':{const ref=this.ref(input.path,'reducer');if(ref.scope==='control'||connection.public){const version=connection.authVersion,result=await connection.client.callOwnerReducer(ref,input.args??{},caller.requestID);if(caller.signal.aborted||this.tabs.get(caller.tabID)!==connection.id||version!==connection.authVersion)fail('FENCED','Control caller session changed');sqlitePayloadBytes(result,131072);return {commandId:caller.requestID,result};}if(input.expectedAdmissionKey!==undefined&&input.expectedAdmissionKey!==await this.admissionKey(connection))fail('FENCED','Reducer was issued under an older admission');await this.recover(connection);if(ref.localExecution!==1)fail('INVALID_ROW','Native reducer has no generated portable body');let receipt;try{receipt=await this.reducer.invoke({path:ref.path,args:input.args??{},now:input.now,intentEntropy:input.intentEntropy},caller);}catch(error){connection.recovered=false;throw error;}this.scheduleDelivery(connection);return receipt;}
+   case 'reducer':{const ref=this.ref(input.path,'reducer');if(ref.scope==='control'||connection.public){const version=connection.authVersion,result=await connection.client.callOwnerReducer(ref,input.args??{},caller.requestID);if(caller.signal.aborted||this.tabs.get(caller.tabID)!==connection.id||version!==connection.authVersion)fail('FENCED','Control caller session changed');sqlitePayloadBytes(result,131072);return {commandId:caller.requestID,result};}if(input.expectedAdmissionKey!==undefined&&input.expectedAdmissionKey!==await this.admissionKey(connection))fail('FENCED','Reducer was issued under an older admission');await this.recover(connection);if(ref.localExecution!==1)fail('INVALID_ROW','Native reducer has no generated portable body');await this.prepareReducer(connection,ref);let receipt;try{receipt=await this.reducer.invoke({path:ref.path,args:input.args??{},now:input.now,intentEntropy:input.intentEntropy},caller);}catch(error){connection.recovered=false;throw error;}this.scheduleDelivery(connection);return receipt;}
    case 'query':case 'action':{
     const ref=this.ref(input.path,input.method==='query'?'query':'action');if(ref.delivery==='replica'||ref.delivery==='live'&&ref.scope!=='control')fail('INVALID_ROW','Reactive reads require bounded native subscriptions');const version=connection.authVersion;if(caller.signal.aborted||this.tabs.get(caller.tabID)!==connection.id)fail('FENCED','Remote caller detached');const result=await (input.method==='query'?connection.client.query(ref,input.args??{}):connection.client.action(ref,input.args??{}));if(caller.signal.aborted||this.tabs.get(caller.tabID)!==connection.id||version!==connection.authVersion)fail('FENCED','Remote caller session changed');sqlitePayloadBytes(result,131072);return result;
    }

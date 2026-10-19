@@ -31,7 +31,7 @@ const sqlite=await initializePinnedSQLite(),cleanup:Array<()=>Promise<void>>=[];
 afterEach(async()=>{for(const close of cleanup.splice(0))await close();vi.unstubAllGlobals();vi.restoreAllMocks();});
 const typed={tasks:{key:'id',fields:{id:{kind:'text'},n:{kind:'number'}},indexes:[]}} as const;
 const identity={auth:{account:{id:'account'}},tenant:{id:'tenant'},member:{id:'member',accountId:'account',permissions:{}}};
-const refs:FunctionReference[]=[{kind:'query',path:'__local.tasks',delivery:'replica',replica:{table:'tasks',key:'id',columns:['id','n'],maxRows:1000,maxBytes:1000000}},{kind:'reducer',path:'tasks.increment',localExecution:1},{kind:'reducer',path:'tasks.addAll',localExecution:1}];
+const refs:Array<FunctionReference&{localDependencyTables?:string}>=[{kind:'query',path:'__local.tasks',delivery:'replica',replica:{table:'tasks',key:'id',columns:['id','n'],maxRows:1000,maxBytes:1000000}},{kind:'reducer',path:'tasks.increment',localExecution:1,localDependencyTables:'["tasks"]'},{kind:'reducer',path:'tasks.addAll',localExecution:1}];
 const caller=(tabID:string,requestID=crypto.randomUUID()):SQLiteOwnerCaller=>({tabID,requestID,signal:new AbortController().signal});
 const connect={method:'connect',url:'ws://synthetic-private.test/ws',auth:{project:'project',tenant:'tenant',identity:{sub:'provider-account'}}};
 const rowDigest=async(row:{id:string;n:number})=>replicaSumDigest(await replicaRowsHashes([row],'id'));
@@ -242,4 +242,14 @@ it('answers a hash request with a fresh snapshot open on the same admitted socke
  const reopened=first.socket.sent.filter(frame=>frame.type==='replica.open').at(-1);
  expect(reopened.cursor).toBeUndefined();expect(reopened.digest).toBe('sum128-v1:'+'0'.repeat(32));expect(Socket.instances).toHaveLength(1);
  expect((await f.call({method:'controls'}) as any).failure).toBeNull();
+});
+
+it('prepares generated disk dependencies without requiring a mounted replica consumer',async()=>{
+ const f=await fixture(false);await f.call(connect);
+ expect(f.program.budgets().find(value=>value.name==='native-source-interests')?.entries).toBe(0);
+ await f.call({method:'prepareReducer',path:'tasks.increment'});
+ expect(f.program.budgets().find(value=>value.name==='native-source-interests')?.entries).toBe(1);
+ const {socket}=await f.authenticate();socket.close();
+ const receipt:any=await f.call({method:'reducer',path:'tasks.increment',args:{},now:100},'one','prepared-offline');
+ expect(receipt.result).toBe(2);expect(receipt.queuedOnly).toBeUndefined();
 });

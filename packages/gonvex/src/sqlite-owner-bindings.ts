@@ -4,6 +4,7 @@ import type {Manifest} from './manifest-types.js';
 export function sqliteOwnerReferences(manifest:Manifest) {
  return Object.entries(manifest.functions).filter(([path,entry])=>!entry.internal||path.startsWith('__local.')&&!!entry.replica).sort(([a],[b])=>a<b?-1:a>b?1:0).map(([path,entry])=>({
   kind:entry.kind,path,...(entry.replica?{delivery:'replica' as const,replica:{...entry.replica,residency:entry.replica.residency??'paged'}}:entry.delivery?{delivery:entry.delivery}:{}),
+  ...(entry.kind==='reducer'&&entry.localDependencies?.length?{localDependencyTables:JSON.stringify(entry.localDependencies)}:{}),
   ...(entry.offline===undefined?{}:{offline:entry.offline}),...(entry.localExecution===undefined?{}:{localExecution:entry.localExecution}),
   ...(entry.delivery==='live'&&entry.dependencies?.liveQueryPlan?{live:{entity:entry.dependencies.liveQueryPlan.table,key:entry.dependencies.liveQueryPlan.key,resultPath:entry.dependencies.liveQueryPlan.resultPath??[],plan:entry.dependencies.liveQueryPlan}}:{}),
   ...(entry.kind==='reducer'&&entry.optimistic!==undefined?{optimistic:{transaction:entry.optimistic}}:{}),

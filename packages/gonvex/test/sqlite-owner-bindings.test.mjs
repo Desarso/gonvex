@@ -34,10 +34,12 @@ test('emits a plain public owner catalog without traversing the React API or adm
  input.functions.list.args={type:'object',properties:{huge:{type:'string'}}};
  input.functions.list.result={type:'array',items:{type:'string'}};
  input.functions.rename.offline={mode:'allowed'};
+ input.functions.rename.localDependencies=['things'];
  const refs=sqliteOwnerReferences(input);
  assert.deepEqual(refs.map(ref=>ref.path),['__local.things','list','rename']);
  assert.equal(refs.find(ref=>ref.path==='list').replica.residency,'paged');
  assert.deepEqual(refs.find(ref=>ref.path==='rename').offline,{mode:'allowed'});
+ assert.deepEqual(JSON.parse(refs.find(ref=>ref.path==='rename').localDependencyTables),['things']);
  assert.doesNotMatch(JSON.stringify(refs),/argsSchema|resultSchema|properties|huge|secret/);
  const worker=sqliteOwnerBindings(input)['sqlite-client-worker.ts'];
  assert.doesNotMatch(worker,/import.*api\.js|function visit|references\.set/);
