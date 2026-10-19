@@ -1,5 +1,5 @@
 import {sqliteRequestBytes,sqliteTransferRequest} from './sqlite-request-frame.js';
-import { sqliteWorkerOperations as publicOperations,sqliteWorkerProtocol } from './sqlite-worker-protocol.js';
+import { sqliteWorkerOperations as publicOperations,sqliteWorkerProtocol,sqliteOwnerRequestCapacity } from './sqlite-worker-protocol.js';
 import { sqlitePayloadBytes } from './sqlite-admission.js';
 import type { SQLiteTypedSchema } from './sqlite-typed-schema.js';
 
@@ -305,12 +305,16 @@ export class SQLiteReplicaBroker {
     if (!this.closed) this.setState('pending');
   }
   private rejectSingleShot(call:Call){
-    if(!this.pending.has(call.id))return;this.pending.delete(call.id);this.pendingBytes-=call.bytes;clearTimeout(call.timer);call.reject(error('FENCED','This request was interrupted after dispatch; its outcome is unknown','unknown'));
+    if(!this.pending.has(call.id))return;this.pending.delete(call.id);this.pendingBytes-=call.bytes;clearTimeout(call.timer);call.reject(error('FENCED','This request was interrupted after dispatch; its outcome is unknown','unknown'));this.wakeBlocked();
   }
   private fenceSingleShots(token:string){for(const call of this.pending.values())if(!call.replay&&call.sentToken===token)this.rejectSingleShot(call);}
   private send(call: Call) {
     if (!this.owner || this.owner.opening || this.closed) return;
     if(!call.replay&&call.sentToken){if(call.sentToken!==this.owner.token)this.rejectSingleShot(call);return;}
+    if(call.sentToken!==this.owner.token||call.busy){
+      let active=0;for(const pending of this.pending.values())if(pending.sentToken===this.owner.token&&!pending.busy)active++;
+      if(active>=sqliteOwnerRequestCapacity)return;
+    }
     call.busy=false;call.sentToken=this.owner.token;call.lastSent = Date.now();
     const m = { type: 'request', protocol, from: this.tabID, token: this.owner.token, id: call.id, op: call.op, args: call.args };
     if (this.owner.id === this.tabID) { void this.serve(m); return; }
@@ -337,7 +341,7 @@ export class SQLiteReplicaBroker {
     let bytes: number;
     try {
       bytes = sqliteRequestBytes(m.op,m.args,262144);
-      if (this.inflight.size >= 64 || this.inflightBytes + bytes > 2097152) throw error('BUSY', 'Storage queue is full');
+      if (this.inflight.size >= sqliteOwnerRequestCapacity || this.inflightBytes + bytes > 2097152) throw error('BUSY', 'Storage queue is full');
     } catch (e) { this.reply(m, undefined, e); return; }
     this.inflight.set(key, { generation: g, bytes }); this.inflightBytes += bytes;
     try {
@@ -350,11 +354,11 @@ export class SQLiteReplicaBroker {
   }
   private wakeBlocked() {
     if(this.closed||this.failed)return;
-    let waiting=false;for(const call of this.pending.values())if(call.busy){waiting=true;break;}if(!waiting)return;
-    // Completion/progress gives one waiting request a capacity opportunity.
+    let waiting=false;for(const call of this.pending.values())if(call.busy||call.sentToken!==this.owner?.token){waiting=true;break;}if(!waiting)return;
+    // Completion/progress gives one unsent or BUSY request a capacity opportunity.
     // BUSY alone never schedules retries, and the heartbeat remains recovery
     // for lost messages or an owner that has stopped reporting progress.
-    queueMicrotask(()=>{if(this.closed||this.failed)return;for(const call of this.pending.values())if(call.busy){this.send(call);break;}});
+    queueMicrotask(()=>{if(this.closed||this.failed)return;for(const call of this.pending.values())if(call.busy||call.sentToken!==this.owner?.token){this.send(call);break;}});
   }
   private receiveReply(m: any) {
     if (m?.protocol !== protocol || m.to !== this.tabID) return;
@@ -384,7 +388,7 @@ export class SQLiteReplicaBroker {
       const timer = setTimeout(() => {
         const call = this.pending.get(id); if (!call) return;
         this.pending.delete(id); this.pendingBytes -= call.bytes;
-        this.setState('pending'); reject(error('TIMEOUT', 'Storage commit outcome is unknown; retry the same intent ID', 'unknown'));
+        this.setState('pending'); reject(error('TIMEOUT', 'Storage commit outcome is unknown; retry the same intent ID', 'unknown'));this.wakeBlocked();
       }, timeoutMs);
       const replay=!(op==='clientCall'&&!!admitted&&typeof admitted==='object'&&['action','token'].includes(String((admitted as {method?:unknown}).method)));
       const call: Call = { id, op, args: admitted, bytes, replay,lastSent: 0, timer, resolve, reject };

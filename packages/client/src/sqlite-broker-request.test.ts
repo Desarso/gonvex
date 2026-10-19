@@ -175,3 +175,32 @@ it('uses each fresh owner progress hint for at most one blocked retry without sp
  busy();await Promise.resolve();await Promise.resolve();expect(broker.send).toHaveBeenCalledTimes(3);
  broker.receiveReply({protocol:2,to:'test',token:'owner',id:call.id,value:'rows'});await expect(pending).resolves.toBe('rows');
 });
+
+
+it('holds requests above owner capacity locally and dispatches the oldest after a reply',async()=>{
+ const broker=client() as any;broker.owner={id:'test',token:'owner',epoch:1,seen:Date.now()};broker.send=SQLiteReplicaBroker.prototype['send'];broker.serve=vi.fn(async()=>{});
+ const pending=Array.from({length:66},(_,n)=>broker.request('clientCall',{method:'replicaPage',signature:String(n)}));
+ const settled=Promise.allSettled(pending);
+ try{
+  expect(broker.serve).toHaveBeenCalledTimes(64);
+  const calls=[...broker.pending.values()];expect(calls[64].sentToken).toBeUndefined();expect(calls[65].sentToken).toBeUndefined();
+  broker.receiveReply({protocol:2,to:'test',token:'owner',id:calls[0].id,value:'rows'});await Promise.resolve();
+  expect(broker.serve).toHaveBeenCalledTimes(65);expect(calls[64].sentToken).toBe('owner');expect(calls[65].sentToken).toBeUndefined();
+  broker.receiveReply({protocol:2,to:'test',token:'owner',id:calls[1].id,value:'rows'});await Promise.resolve();
+  expect(broker.serve).toHaveBeenCalledTimes(66);expect(calls[65].sentToken).toBe('owner');
+ }finally{for(const call of [...broker.pending.values()]){clearTimeout(call.timer);call.reject(Error('test cleanup'));}broker.pending.clear();await settled;}
+});
+
+
+it('reapplies owner capacity after failover and preserves queued single-shot dispatch',async()=>{
+ const broker=client() as any;broker.owner={id:'test',token:'old',epoch:1,seen:Date.now()};broker.send=SQLiteReplicaBroker.prototype['send'];broker.serve=vi.fn(async()=>{});
+ const pending=Array.from({length:64},(_,n)=>broker.request('clientCall',{method:'replicaPage',signature:String(n)}));
+ const action=broker.request('clientCall',{method:'action',path:'external/run'});const settled=Promise.allSettled([...pending,action]);
+ try{
+  const calls=[...broker.pending.values()];expect(broker.serve).toHaveBeenCalledTimes(64);expect(calls[64].sentToken).toBeUndefined();
+  broker.owner.token='new';for(const call of broker.pending.values())broker.send(call);expect(broker.serve).toHaveBeenCalledTimes(128);expect(calls[64].sentToken).toBeUndefined();
+  broker.receiveReply({protocol:2,to:'test',token:'old',id:calls[0].id,value:'stale'});await Promise.resolve();expect(broker.serve).toHaveBeenCalledTimes(128);
+  broker.receiveReply({protocol:2,to:'test',token:'new',id:calls[0].id,value:'rows'});await Promise.resolve();expect(broker.serve).toHaveBeenCalledTimes(129);expect(calls[64].sentToken).toBe('new');
+  broker.send(calls[64]);expect(broker.serve).toHaveBeenCalledTimes(129);
+ }finally{for(const call of [...broker.pending.values()]){clearTimeout(call.timer);call.reject(Error('test cleanup'));}broker.pending.clear();await settled;}
+});
