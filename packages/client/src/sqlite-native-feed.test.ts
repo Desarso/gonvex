@@ -27,7 +27,7 @@ const digest=async(values=rows)=>replicaSumDigest(await replicaRowsHashes(values
 async function fixture(extra:Partial<ConstructorParameters<typeof SQLiteNativeFeed>[0]>={},completeEntity=false,moduleEpoch='e'){
  const raw=new sqlite.oo1.DB(':memory:'),host=officialSQLiteDatabase(sqlite,raw),db=sqliteOwnerTransactions(host.database),engine=new SQLiteTypedReplicaEngine(db,schema);await engine.open('feed');const canonical=sqliteTypedReplicaStorage(db,schema);await canonical.ready();
  const fence=()=>engine.verifyOwner(),snapshots=new SQLiteSnapshotPages(db,fence,schema),activation=new SQLiteSnapshotActivator(db,canonical,fence,schema);
- let lane=Promise.resolve();const runOwner=<T>(_bytes:number,run:()=>Promise<T>)=>{const next=lane.then(run);lane=next.then(()=>{},()=>{});return next;};
+ let lane=Promise.resolve();const publications:string[][]=[];const runOwner=<T>(_bytes:number,run:()=>Promise<T>,scopes:readonly string[]=[])=>{const next=lane.then(async()=>{const before=await engine.verifyOwner(),value=await run(),after=await engine.verifyOwner();if(before.sequence!==after.sequence)publications.push([...scopes]);return value;});lane=next.then(()=>{},()=>{});return next;};
  const owner={database:db,engine,canonical,snapshots,activation,runOwner} as SQLiteOwnerProgramContext;
  const safety=new SQLiteSessionJournal(owner);
  const sessions=new SQLiteWorkerSessions({artifactHash:'artifact',offlineMaxAgeMs:5000,database:db,canonical,safety,runOwner,fence});sessions.open('one');sessions.attachTab('tab','one');
@@ -40,7 +40,7 @@ async function fixture(extra:Partial<ConstructorParameters<typeof SQLiteNativeFe
  const append=async(part:typeof rows,sequence:number,last:boolean)=>{feed.binary(new TextEncoder().encode(JSON.stringify({type:'replica.snapshotEncodedPage',id:'source',snapshotId:'base',scope:'tenant',visibilityScope:'visible',cursor:cursor(10),key:'id',sequence,last,canonicalRows:part.map(stable),path:'tasks/all',...(last?{digest:await digest()}:{})})).buffer,1);};
  const ready=async(revision=10,values=rows)=>feed.frame({type:'replica.ready',id:'source',cursor:cursor(revision),digest:await digest(values)},1);
  const transaction=(revision=12)=>feed.frame({type:'replica.transactionEncoded',cursor:cursor(revision),originCommandId:'intent',canonicalChanges:[stable({entity:'tasks',id:'a',operation:'update',newValue:{...changed,n:revision}})]},1);
- return {owner,db,engine,canonical,feed,sends,watermarks,failures,start,append,ready,transaction,session,sessions,safety,runOwner};
+ return {owner,db,engine,canonical,feed,sends,watermarks,failures,publications,start,append,ready,transaction,session,sessions,safety,runOwner};
 }
 it('keeps the module admission epoch distinct from the database replica cursor epoch',async()=>{
  const f=await fixture({},false,'module-epoch');
@@ -289,4 +289,16 @@ it('rolls warm snapshot activation back with an invalid terminal certificate',as
  expect((await f.canonical.loadEntityRows('visible','tasks',['a','b'])).map(entry=>entry.row)).toEqual(rows);
  expect((await new SQLiteWindowStore(f.db,()=>f.engine.verifyOwner()).header('visible','tasks-all'))?.header.cursor).toEqual(cursor(10));
  await f.feed.assertReadable({scope:'visible',epoch:'e'});expect(await f.engine.integrity()).toBe('ok');
+});
+
+it('coalesces staging hints while publishing canonical notifications only when authority changes',async()=>{
+ const f=await fixture();await f.start();await f.append(rows.slice(0,1),0,false);await vi.waitFor(()=>expect(f.sends).toHaveLength(1));
+ expect(f.publications).toContainEqual(['@pending']);expect(f.publications.some(scopes=>scopes.includes('visible'))).toBe(false);
+ await f.append(rows.slice(1),1,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();expect(f.publications).toContainEqual(['visible']);
+ f.publications.length=0;const hash=await digest([changed,rows[1]]);
+ f.feed.frame({type:'replica.snapshotStart',id:'source',snapshotId:'warm-hints',scope:'tenant',visibilityScope:'visible',cursor:cursor(12),key:'id',digest:hash,path:'tasks/all'},1);
+ f.feed.binary(new TextEncoder().encode(JSON.stringify({type:'replica.snapshotEncodedPage',id:'source',snapshotId:'warm-hints',scope:'tenant',visibilityScope:'visible',cursor:cursor(12),key:'id',sequence:0,last:true,canonicalRows:[changed,rows[1]].map(stable),digest:hash,path:'tasks/all'})).buffer,1);
+ f.feed.frame({type:'replica.ready',id:'source',cursor:cursor(12),digest:hash},1);await vi.waitFor(()=>{expect(f.sends).toHaveLength(3);expect(f.feed.stats().opening).toBe(0);});
+ expect(f.publications).toEqual([['@pending']]);
+ f.feed.frame({type:'replica.watermark',revision:12},1);await f.feed.assertReadable();expect(f.publications).toEqual([['@pending'],['visible']]);expect(f.failures).toEqual([]);
 });

@@ -19,7 +19,7 @@ function fixture(fetchToken?:()=>Promise<string|null>){
   throw Error('Unexpected mock RPC '+input.method);
  },subscribeChanges(listener:(...args:any[])=>void){changes.add(listener);return ()=>{changes.delete(listener);};},stats(){return {ownerEpoch:epoch} as ReturnType<SQLiteReplicaBroker['stats']>;},close(){closed=true;}};
  const client=new SQLiteBrowserClient('ws://private-synthetic.test/ws',{broker,auth:{project:'project',tenant:'tenant',identity:{sub:'a'}},fetchToken});cleanup.push(()=>client.close());
- return {client,calls,responses,get closed(){return closed;},set handler(next:typeof handler){handler=next;},admit(key:string|null){admissionKey=key;for(const notify of changes)notify('*',1,true);},control(){for(const notify of changes)notify('@control',1);},change(){for(const notify of changes)notify('scope',1);},replaceOwner(){epoch++;connection='';tokenPending=false;for(const notify of changes)notify('*',1,true);}};
+ return {client,calls,responses,get closed(){return closed;},set handler(next:typeof handler){handler=next;},admit(key:string|null){admissionKey=key;for(const notify of changes)notify('*',1,true);},control(){for(const notify of changes)notify('@control',1);},change(scope='scope'){for(const notify of changes)notify(scope,1);},replaceOwner(){epoch++;connection='';tokenPending=false;for(const notify of changes)notify('*',1,true);}};
 }
 it('services a single selected-tab token request, shares a watch, retains a bounded stable page snapshot and restores after owner change',async()=>{
  const fetchToken=vi.fn(async()=> 'opaque'),f=fixture(fetchToken),one=f.client.watchReplica({path:'tasks/all'}),two=f.client.watchReplica({path:'tasks/all'});cleanup.push(()=>{one.close();two.close();});
@@ -192,4 +192,13 @@ it('captures a page request before asynchronous source opening',async()=>{
  const f=fixture(),watch=f.client.watchReplica({path:'tasks/all'});cleanup.push(()=>watch.close());
  const options={limit:10},pending=watch.page(options);options.limit=100;await pending;
  expect(f.calls.find(call=>call.input.method==='replicaPage')?.input.limit).toBe(10);
+});
+
+it('refreshes pending display pages while coalesced staging hints preserve complete cached pages',async()=>{
+ const f=fixture(),one=f.client.watchReplica({path:'tasks/all'}),two=f.client.watchReplica({path:'statuses/all'});cleanup.push(()=>{one.close();two.close();});
+ f.handler=input=>input.method==='replicaPage'&&input.signature==='a:tasks/all'?{complete:false,serverVerified:false,rows:[]}:undefined;
+ const first=await one.page(),second=await two.page(),oneNotify=vi.fn(),twoNotify=vi.fn(),stopOne=one.subscribe(oneNotify),stopTwo=two.subscribe(twoNotify);
+ f.change('@pending');expect(one.snapshot().stale).toBe(true);expect(oneNotify).toHaveBeenCalledOnce();
+ expect(two.snapshot().stale).toBe(false);expect(two.snapshot().page).toBe(second);expect(one.snapshot().page).toBe(first);expect(twoNotify).not.toHaveBeenCalled();
+ f.change();expect(two.snapshot().stale).toBe(true);expect(twoNotify).toHaveBeenCalledOnce();stopOne();stopTwo();
 });

@@ -73,8 +73,9 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
   this.stop();if(!input.directive){await this.options.sessions.activate(this.options.connection,input,isCurrent);return;}
   if(input.capabilities.replicaNativeRows!==1)throw Object.assign(Error('Server requires the legacy replica adapter'),{code:'UNSUPPORTED'});
   const {owner}=this.options;let state!:State;
+  let stagingScopes:string[]=[];
   const ingress=new SQLiteNativeIngress({database:owner.database,snapshots:owner.snapshots,scope:input.directive.visibilityScope,reserve:this.options.reserve,
-   runOwner:run=>this.run(state,524288,async()=>{await this.initialized;return run();}),
+   runOwner:run=>{const scopes:string[]=['@pending'];return this.run(state,524288,async()=>{stagingScopes=scopes;await this.initialized;return run();},scopes);},
    commitProgress:async()=>{await markSQLiteStagingCommit(owner.database,()=>owner.engine.verifyOwner());},
    sendAck:ack=>{this.check(state);this.options.send(ack);},
    activateVerified:async receipt=>{
@@ -84,6 +85,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
     // disconnect or crash before that watermark.
     if(source.deferActivation)return;
     if(!receipt.progress.digest)fail('INVALID_ROW','Verified snapshot has no digest');
+    stagingScopes.splice(0,stagingScopes.length,state.scope);
     const header=this.snapshotHeader(source,start,receipt.progress.digest!);
     await owner.database.runAsync('INSERT INTO gv_native_feed_progress VALUES(?,?,0,0,?) ON CONFLICT(scope,epoch) DO UPDATE SET unclosed=CASE WHEN excluded.unclosed>applied THEN max(unclosed,excluded.unclosed) ELSE unclosed END',state.scope,state.epoch,start.cursor.revision);
     await this.mutate(state.scope,async()=>{await owner.activation.activate({scope:state.scope,subscription:source.id,snapshot:start.snapshotId,header});});
@@ -108,9 +110,9 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
  observeCursor(cursor:ReplicaCursor){const state=this.state;if(!state)fail('FENCED','Native feed unavailable');this.check(state!);this.cursor(state!,cursor);}
  databaseEpoch(){return this.state?.cursorEpoch;}
  private cursor(state:State,cursor:ReplicaCursor){if(!cursor||typeof cursor.epoch!=='string'||!cursor.epoch||cursor.epoch.length>256||!Number.isSafeInteger(cursor.revision)||cursor.revision<0)fail('INVALID_ROW','Invalid native feed cursor');if(state.cursorEpoch===undefined)state.cursorEpoch=cursor.epoch;else if(cursor.epoch!==state.cursorEpoch)fail('FENCED','Native feed cursor changed epoch');}
- private async run<T>(state:State,bytes:number,run:()=>Promise<T>):Promise<T>{
+ private async run<T>(state:State,bytes:number,run:()=>Promise<T>,scopes:readonly string[]=[state.scope]):Promise<T>{
   const loaded=new Set<string>();let preparationBytes=0;
-  for(;;){try{return await waitForSQLiteOwnerAdmission(()=>this.options.owner.runOwner(bytes,async()=>{let value!:T;await this.options.owner.database.withTransactionAsync(async()=>{this.check(state);value=await run();this.check(state);});return value;},[state.scope]),()=>this.check(state));}
+  for(;;){try{return await waitForSQLiteOwnerAdmission(()=>this.options.owner.runOwner(bytes,async()=>{let value!:T;await this.options.owner.database.withTransactionAsync(async()=>{this.check(state);value=await run();this.check(state);});return value;},scopes),()=>this.check(state));}
    catch(error){if(!(error instanceof SQLiteReducerPreparationRequiredError)||!this.options.prepare)throw error;
     if(loaded.has(error.path))fail('FENCED','Prepared native feed reducer remains unavailable');preparationBytes+=error.path.length*2+128;
     if(loaded.size>=128||preparationBytes>131072)fail('BUDGET','Native feed reducer preparation exceeded budget');loaded.add(error.path);await this.options.prepare(error.path);

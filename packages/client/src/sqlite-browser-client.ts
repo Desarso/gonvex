@@ -73,6 +73,13 @@ export class SQLiteBrowserClient {
   this.ledger.register('browser-token-requests',()=>({name:'browser-token-requests',bytes:this.tokenRequests.size*40960,entries:this.tokenRequests.size,maxBytes:327680,maxEntries:8,evictions:0,refusals:0}));
   this.releaseChanges=options.broker.subscribeChanges((scope)=>{
    const epoch=options.broker.stats().ownerEpoch;if(epoch!==undefined&&this.epoch!==undefined&&epoch!==this.epoch)this.invalidate(false);if(epoch!==undefined)this.epoch=epoch;
+   if(scope==='@pending'){
+    // Coalesce staging hints across sources without invalidating complete
+    // cached pages. Canonical authority is published at its terminal cohort.
+    for(const watch of this.watches.values()){const page=this.pages.get(watch.key);if(page==null||'serverVerified'in page&&page.serverVerified===false){watch.stale=true;this.notify(watch);}}
+    // Staging advances storage read leases while canonical values stay intact.
+    this.entityView.refresh();void this.pollControls().catch(()=>{});return;
+   }
    if(scope!=='@control'){for(const watch of this.watches.values()){watch.stale=true;this.notify(watch);}this.entityView.refresh();}
    this.controlQueries.refresh();void this.pollControls().catch(()=>{});
   });
