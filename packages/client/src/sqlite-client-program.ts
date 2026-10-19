@@ -28,7 +28,7 @@ import {sqliteCollectionPagePlan} from './sqlite-collection-plan.js';
 import {SQLiteWindowStore} from './sqlite-window-store.js';
 import {fail,sqlitePayloadBytes} from './sqlite-admission.js';
 type Auth=Pick<GonvexClientAuth,'project'|'tenant'|'token'|'identity'>;
-type Source={id:string;signature:string;ref:FunctionReference;args:JsonValue;tabs:Set<string>;leases:Map<string,Set<string>>;eager:boolean;bytes:number;closing?:Promise<void>};
+type Source={forceSnapshot?:boolean;id:string;signature:string;ref:FunctionReference;args:JsonValue;tabs:Set<string>;leases:Map<string,Set<string>>;eager:boolean;bytes:number;closing?:Promise<void>};
 type ControlSource={signature:string;ref:FunctionReference;args:JsonValue;tabs:Set<string>;value?:JsonValue;error?:string;version:number;bytes:number;resultBytes:number;close():void};
 type LiveSource={leases:Map<string,Set<string>>;signature:string;ref:FunctionReference;args:JsonValue;tabs:Set<string>;bytes:number;error?:string;close():void};
 type Connection={supportCommands:Array<SupportCommand&{sequence:number}>;supportSequence:number;supportCursors:Map<string,number>;liveStream:string;lives:Map<string,LiveSource>;liveBytes:number;lastIdentity?:string;rejections:Array<ReducerRejectionEvent&{sequence:number}>;rejectionSequence:number;rejectionCursors:Map<string,number>;controlOnly:boolean;public:boolean;authVersion:number;authError?:{id:string;message:string;definitive:boolean;code?:string};developer?:{id:string;token:string;acked:Set<string>};route:Omit<Auth,'token'>;id:string;url:string;identityKey:string;client:SQLiteNativeTransport;feed:SQLiteNativeFeed;delivery:SQLiteReducerDelivery;tabs:Set<string>;sources:Map<string,Source>;sourceBytes:number;controls:Map<string,ControlSource>;controlBytes:number;restoring?:Promise<void>;migrationBlocked?:unknown;restoreScope?:string;restoreGeneration?:number;migrationTimer?:ReturnType<typeof setTimeout>;migrationSession?:LocalReplicaSession;denied?:boolean;admissionKey?:{generation:string;value:Promise<string>};recovered?:boolean;recovering?:Promise<void>;lastScope?:string;reconnectTimer?:ReturnType<typeof setTimeout>;reconnectAttempts?:number;timer?:ReturnType<typeof setTimeout>;failure?:{code:string;message:string}};
@@ -139,6 +139,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
   await connection.feed.assertReadable({scope:admitted.scope,epoch:saved.directive.epoch});return attempt();
  }
  private feedFailed(connection:Connection,error:unknown){
+  const resetSource=(error as {resetSource?:string})?.resetSource;if(resetSource)for(const source of connection.sources.values())if(source.id===resetSource)source.forceSnapshot=true;
   const code=String((error as any)?.code??'SQLITE');connection.failure={code,message:String((error as any)?.message??error).slice(0,512)};connection.client.close();this.notify(connection);
   if(!['PAGE_CHANGED','INVALID_ROW','BUDGET','INTENT_CONFLICT'].includes(code)||this.closed||this.connections.get(connection.id)!==connection)return;
   clearTimeout(connection.reconnectTimer);const attempts=Math.min(6,(connection.reconnectAttempts??0)+1);connection.reconnectAttempts=attempts;
@@ -213,7 +214,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
  private async openSource(connection:Connection,source:Source){
   const admitted=this.admission(connection),version=connection.authVersion,capabilities=connection.client.serverInfo(),sum=capabilities.replicaSetDigest===1;
   let cached:{cursor:import('@gonvex/protocol').ReplicaCursor;digest:string}|undefined;
-  if(admitted&&capabilities.replicaResume===1)await this.owner.runOwner(0,()=>this.owner.database.withTransactionAsync(async()=>{
+  if(admitted&&!source.forceSnapshot&&capabilities.replicaResume===1)await this.owner.runOwner(0,()=>this.owner.database.withTransactionAsync(async()=>{
    const saved=await this.owner.canonical.loadSession(admitted.intentScope);if(!saved||saved.directive.visibilityScope!==admitted.scope)return;
    try{await connection.feed.assertCommittedReadable({scope:admitted.scope,epoch:saved.directive.epoch});}catch(error){if((error as {code?:string})?.code==='PAGE_CHANGED')return;throw error;}
    const window=await this.windows.header(admitted.scope,source.signature),header=window?.header;
@@ -235,7 +236,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
    if(!connection){
     if(this.connections.size>=8)fail('BUDGET','Native connection allowance exceeded');this.sessions.open(id);
     let record!:Connection;
-    const feed=new SQLiteNativeFeed({owner:this.owner,sessions:this.sessions,connection:id,artifactHash:this.binding.artifactHash,windowsPending:(scope,epoch,revision)=>this.liveWindows.pending(record.liveStream,scope,epoch,revision),publishWindows:async(scope,epoch,revision)=>{await this.liveWindows.publish(record.liveStream,scope,epoch,revision);},reserve:bytes=>this.transient.reserve(bytes),prepare:path=>this.reducer.core.prepare(path),authority:(scope,mutate)=>this.reducer.core.rebase(scope,mutate).then(()=>{}),send:message=>record.client.sendOwnerMessage(message),advanceWatermark:revision=>{record.reconnectAttempts=0;record.failure=undefined;record.client.advanceOwnerWatermark(revision);this.notify(record);},failed:error=>this.feedFailed(record,error)});
+    const feed=new SQLiteNativeFeed({owner:this.owner,sessions:this.sessions,connection:id,artifactHash:this.binding.artifactHash,sourceReady:id=>{for(const source of record.sources.values())if(source.id===id)source.forceSnapshot=false;},windowsPending:(scope,epoch,revision)=>this.liveWindows.pending(record.liveStream,scope,epoch,revision),publishWindows:async(scope,epoch,revision)=>{await this.liveWindows.publish(record.liveStream,scope,epoch,revision);},reserve:bytes=>this.transient.reserve(bytes),prepare:path=>this.reducer.core.prepare(path),authority:(scope,mutate)=>this.reducer.core.rebase(scope,mutate).then(()=>{}),send:message=>record.client.sendOwnerMessage(message),advanceWatermark:revision=>{record.reconnectAttempts=0;record.failure=undefined;record.client.advanceOwnerWatermark(revision);this.notify(record);},failed:error=>this.feedFailed(record,error)});
     const restore=(scope:string,generation:number)=>{
      const retiredStream=record.liveStream;record.liveStream=crypto.randomUUID();void this.owner.runOwner(0,()=>this.owner.database.withTransactionAsync(()=>this.liveWindows.retire(retiredStream))).catch(()=>{});feed.authenticating(scope,generation);record.rejections.length=0;if(controlOnly||publicClient){record.restoring=undefined;return;}record.restoreScope=scope;record.restoreGeneration=generation;
      const current=()=>!this.closed&&this.connections.get(id)===record&&record.restoreScope===scope&&record.restoreGeneration===generation;

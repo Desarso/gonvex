@@ -226,3 +226,11 @@ it('resumes a verified disk replica with its cursor and aggregate digest without
  expect(open.cursor).toEqual({epoch:'e',revision:1});expect(open.digest).toBe(await rowDigest({id:'a',n:1}));
  expect(open.keys).toBeUndefined();expect(open.hashes).toBeUndefined();
 });
+
+it('reopens a server-reset source from a fresh snapshot instead of repeating its rejected resume',async()=>{
+ const f=await fixture();const first=await f.authenticate();const source:any=await f.call({method:'watchReplica',path:'__local.tasks',args:{}});await f.call({method:'replicaPage',signature:source.signature});
+ first.socket.receive({type:'replica.reset',id:first.open.id,reason:'recover'});
+ await vi.waitFor(()=>expect(Socket.instances.length).toBe(2),{timeout:3000});
+ const second=await f.authenticate();expect(second.open.cursor).toBeUndefined();expect(second.open.digest).toBe('sum128-v1:'+'0'.repeat(32));
+ expect((await f.call({method:'replicaPage',signature:source.signature}) as any).rows[0].value).toEqual({id:'a',n:1});
+});
