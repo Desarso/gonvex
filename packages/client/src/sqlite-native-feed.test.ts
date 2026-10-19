@@ -49,7 +49,7 @@ it('keeps the module admission epoch distinct from the database replica cursor e
  expect((await f.canonical.loadEntityRows('visible','tasks',['a','b'])).length).toBe(2);
 });
 it('joins auth, source start, binary staging, newer canonical data, disk deltas and terminal watermark without deadlock',async()=>{
- const f=await fixture();await f.start();await f.append(rows.slice(0,1),0,false);await vi.waitFor(()=>expect(f.sends).toHaveLength(1));
+ const f=await fixture({},false,'module-epoch');await f.start();await f.append(rows.slice(0,1),0,false);await vi.waitFor(()=>expect(f.sends).toHaveLength(1));
  f.transaction();f.feed.frame({type:'replica.delta',id:'source',cursor:cursor(12),canonicalUpserts:[stable(changed)],deleted:[],digest:await digest([changed,rows[1]])},1);
  f.feed.frame({type:'replica.watermark',revision:14},1);await vi.waitFor(async()=>{expect(f.failures).toEqual([]);expect((await f.runOwner(0,()=>new SQLiteDeferredReplicaFrames(f.db,'artifact',()=>f.engine.verifyOwner()).summary('visible'))).frames).toBe(1);});expect(f.watermarks).toEqual([]);await expect(f.feed.assertReadable()).rejects.toMatchObject({code:'PAGE_CHANGED'});
  await f.append(rows.slice(1),1,true);await f.ready(14,[changed,rows[1]]);await f.feed.assertReadable();expect(f.failures).toEqual([]);expect(f.watermarks).toEqual([14]);expect(f.sends.map(ack=>ack.sequence)).toEqual([0,1]);

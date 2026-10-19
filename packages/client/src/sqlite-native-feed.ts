@@ -92,6 +92,9 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
  }
  private reject(state:State,error:unknown){if(this.state!==state||state.closed)return;const sourceID=String((error as Error)?.message??error).match(/source:[0-9a-f]{64}/)?.[0],source=sourceID?this.sources.get(sourceID):undefined;
   if(source)error=Object.assign(new Error(`${String((error as Error).message)} (${source.path})`),{code:(error as {code?:string}).code});this.stop();this.options.failed(error);}
+ /** Live windows share the authenticated database clock with replica frames. */
+ observeCursor(cursor:ReplicaCursor){const state=this.state;if(!state)fail('FENCED','Native feed unavailable');this.check(state!);this.cursor(state!,cursor);}
+ databaseEpoch(){return this.state?.cursorEpoch;}
  private cursor(state:State,cursor:ReplicaCursor){if(!cursor||typeof cursor.epoch!=='string'||!cursor.epoch||cursor.epoch.length>256||!Number.isSafeInteger(cursor.revision)||cursor.revision<0)fail('INVALID_ROW','Invalid native feed cursor');if(state.cursorEpoch===undefined)state.cursorEpoch=cursor.epoch;else if(cursor.epoch!==state.cursorEpoch)fail('FENCED','Native feed cursor changed epoch');}
  private async run<T>(state:State,bytes:number,run:()=>Promise<T>):Promise<T>{
   const loaded=new Set<string>();let preparationBytes=0;
@@ -110,9 +113,9 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
  }
  private async replay(state:State,source:Source){
   const header=await this.windows.header(state.scope,source.signature);if(!header?.header.cursor)fail('PAGE_CHANGED','Native base publication missing');let after=header.header.cursor.revision;
-  for(;;){const page=await this.deferred.read(state.scope,source.deferredKey,state.epoch,after);if(!page.length)break;for(const entry of page){await this.applyDelta(state,source,entry.frame);await this.options.owner.database.runAsync('INSERT INTO gv_native_feed_progress VALUES(?,?,0,0,?) ON CONFLICT(scope,epoch) DO UPDATE SET unclosed=max(unclosed,excluded.unclosed)',state.scope,state.epoch,entry.revision);after=entry.revision;}}
+  for(;;){const page=await this.deferred.read(state.scope,source.deferredKey,state.cursorEpoch??state.epoch,after);if(!page.length)break;for(const entry of page){await this.applyDelta(state,source,entry.frame);await this.options.owner.database.runAsync('INSERT INTO gv_native_feed_progress VALUES(?,?,0,0,?) ON CONFLICT(scope,epoch) DO UPDATE SET unclosed=max(unclosed,excluded.unclosed)',state.scope,state.epoch,entry.revision);after=entry.revision;}}
   // Each iteration owns bounded records; callers already hold the owner FIFO.
-  while((await this.deferred.discardThrough(state.scope,source.deferredKey,state.epoch,after)).remaining){}
+  while((await this.deferred.discardThrough(state.scope,source.deferredKey,state.cursorEpoch??state.epoch,after)).remaining){}
  }
  private async publishWatermark(state:State){
   if(state.watermark===undefined||[...this.sources.values()].some(source=>source.opening))return;
@@ -125,7 +128,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
     else if(frame.type==='replica.delta')await this.applyDelta(state,this.source(frame.id),frame);
     else {await this.windows.confirmReady(state.scope,this.source(frame.id).signature,frame.cursor,frame.digest,frame.truncated??false);readySources.add(frame.id);}
    });
-   await this.options.publishWindows?.(state.scope,state.epoch,revision);
+   await this.options.publishWindows?.(state.scope,state.cursorEpoch??state.epoch,revision);
    // A terminal watermark certifies quiet active sources as well as changed
    // ones. Closed windows keep their last observed cursor and cannot grant
    // reducer completeness after authority has advanced beyond them.
@@ -134,7 +137,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
      (SELECT w.signature,w.generation FROM gv_windows w WHERE w.scope=? AND w.signature IN (SELECT value FROM json_each(?)))`,revision,state.scope,state.cursorEpoch??'',state.scope,JSON.stringify([...this.sources.values()].filter(source=>!source.closing).map(source=>source.signature)));
    await this.options.owner.database.runAsync('DELETE FROM gv_native_feed_resets WHERE scope=?',state.scope);
    await this.options.owner.database.runAsync('INSERT INTO gv_native_feed_progress VALUES(?,?,?, ?,0) ON CONFLICT(scope,epoch) DO UPDATE SET observed=max(observed,excluded.observed),applied=max(applied,excluded.applied),unclosed=0',state.scope,state.epoch,revision,revision);if(!pending||pending.applied<revision||pending.unclosed)await markSQLiteStagingCommit(this.options.owner.database,()=>this.options.owner.engine.verifyOwner());applied=true;
-   };if(pending?.unclosed||await this.groups.pending(state.stream)||await this.options.windowsPending?.(state.scope,state.epoch,revision))await this.mutate(state.scope,publish);else await publish();
+   };if(pending?.unclosed||await this.groups.pending(state.stream)||await this.options.windowsPending?.(state.scope,state.cursorEpoch??state.epoch,revision))await this.mutate(state.scope,publish);else await publish();
   }));this.check(state);if(applied){for(const id of readySources)this.options.sourceReady?.(id);this.options.advanceWatermark(revision);}
  }
  private async process(state:State,message:ServerMessage):Promise<void>{
