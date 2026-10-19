@@ -141,3 +141,15 @@ it('admits a normal metadata-heavy route beyond 64 watches within the same byte 
  for(const watch of watches)watch.close();await vi.waitFor(()=>expect(f.client.memoryCounters().replicaWindows).toBe(0));
  expect(f.client.budgets().find(value=>value.name==='browser-row-pages')?.bytes).toBe(0);
 });
+
+it('retains only canonical live IDs without opening an extra transport query and handles numeric display IDs',async()=>{
+ const f=fixture(),ref={kind:'query' as const,path:'tasks/window',delivery:'live' as const,live:{entity:'tasks',key:'_id',resultPath:['page']}};
+ const signature=f.client.replicaSignature(ref,{limit:250}),release=f.client.retainReplicaWindow(signature),notify=vi.fn(),stop=f.client.subscribeReplicaWindow(signature,notify);
+ expect(f.client.replicaWindowMembership(signature)).toBeUndefined();expect(f.calls.some(call=>call.input.method==='watchLive')).toBe(false);
+ f.handler=async input=>{if(input.method==='watchLive')return {signature:'server'};if(input.method==='livePage')return {generation:{epoch:1,sequence:1},window:{generation:'window',total:1,header:{resultSkeleton:{page:[],total:10000,offset:0,limit:250},resultPath:['page']}},offset:0,nextOffset:null,rows:[{id:'canonical',value:{_id:'canonical',id:42,name:'Visible'}}]};if(input.method==='unwatchLive')return null;};
+ const watch=f.client.watchLiveQuery(ref,{limit:250}),unwatch=watch.onUpdate(()=>{});
+ await vi.waitFor(()=>expect(watch.localLiveQueryResult()).toEqual({page:[{_id:'canonical',id:42,name:'Visible'}],total:10000,offset:0,limit:250}));
+ expect(f.client.replicaWindowMembership(signature)).toMatchObject({entity:'tasks',ids:['canonical'],total:10000,limit:250});
+ expect(f.calls.filter(call=>call.input.method==='watchLive')).toHaveLength(1);expect(notify).toHaveBeenCalled();
+ unwatch();watch.close();stop();release();expect(f.client.budgets().find(value=>value.name==='browser-live-memberships')?.bytes).toBe(0);
+});

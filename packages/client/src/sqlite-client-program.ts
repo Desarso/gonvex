@@ -1,3 +1,4 @@
+import {GonvexClientError} from './client-error.js';
 import {SQLiteReducerPreparationRequiredError} from './sqlite-reducer-core.js';
 import {waitForSQLiteOwnerAdmission} from './sqlite-owner-transactions.js';
 import {SQLiteLiveWindows} from './sqlite-live-windows.js';
@@ -97,7 +98,8 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
      AND json_extract(g.header,'$.cursor.revision')>=coalesce((SELECT applied FROM gv_native_feed_progress p WHERE p.scope=w.scope AND p.epoch=json_extract(g.header,'$.cursor.epoch')),0) GROUP BY json_extract(g.header,'$.entity'),json_extract(g.header,'$.key')`,scope,saved.directive.epoch,this.binding.artifactHash);
    for(const row of rows)coverage[row.entity]={key:row.key,complete:true,columns:JSON.parse(row.columns) as string[]};
    const pending=await this.owner.database.getFirstAsync<{unclosed:number;applied:number}>('SELECT unclosed,applied FROM gv_native_feed_progress WHERE scope=? AND epoch=?',scope,saved.directive.epoch);
-   return {intentScope:admitted.intentScope,identity:admitted.identity,coverage,...(pending&&pending.unclosed>pending.applied?{predictionBlocked:true}:{})};
+   const resetting=await this.owner.database.getFirstAsync('SELECT 1 FROM gv_native_feed_resets WHERE scope=?',scope);
+   return {intentScope:admitted.intentScope,identity:admitted.identity,coverage,...(resetting||pending&&pending.unclosed>pending.applied?{predictionBlocked:true}:{})};
   }fail('FENCED','Native reducer scope is not admitted');
  }
  private recover(connection:Connection):Promise<void>{
@@ -207,7 +209,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
   void (async()=>{const loaded=new Set<string>();for(;;){try{await run();return;}catch(error){if(!(error instanceof SQLiteReducerPreparationRequiredError))throw error;if(loaded.has(error.path)||loaded.size>=128)fail('BUDGET','Live rebase preparation exceeded budget');loaded.add(error.path);await this.reducer.core.prepare(error.path);current();}}})().then(()=>this.notify(connection),error=>{if(connection.liveStream===stream&&connection.lives.get(source.signature)===source)this.feedFailed(connection,error);}).finally(release);
  }
  private unwatchLive(connection:Connection,source:LiveSource,tab:string,lease?:string){const leases=source.leases.get(tab);if(!leases)return;if(lease===undefined){connection.liveBytes-=leases.size*192;leases.clear();}else if(leases.delete(lease))connection.liveBytes-=192;if(!leases.size){source.leases.delete(tab);source.tabs.delete(tab);}if(source.tabs.size)return;source.close();connection.lives.delete(source.signature);connection.liveBytes-=source.bytes;const stream=connection.liveStream;void this.owner.runOwner(0,()=>this.owner.database.withTransactionAsync(()=>this.liveWindows.retire(stream,source.signature))).catch(()=>{});}
- private openSource(connection:Connection,source:Source){connection.client.sendOwnerMessage({type:'replica.open',id:source.id,path:source.ref.path,args:source.args,digest:new ReplicaSetDigest().digest()});}
+ private openSource(connection:Connection,source:Source){connection.client.sendOwnerMessage({type:'replica.open',id:source.id,path:source.ref.path,args:source.args,digest:connection.client.serverInfo().replicaSetDigest===1?new ReplicaSetDigest().digest():new ReplicaSetDigest().legacyDigest()});}
  private connect(input:any,caller:SQLiteOwnerCaller):Promise<unknown>{
   const work=this.connecting.then(async()=>{
    if(this.closed||caller.signal.aborted)fail('FENCED','Native client is closed');if(input.artifactHash!==undefined&&input.artifactHash!==this.binding.artifactHash)fail('SCHEMA_MISMATCH','Browser and owner module artifacts differ');await this.maintenance.ready();text(input.url,2048);const url=new URL(input.url);if(!['ws:','wss:'].includes(url.protocol)||url.username||url.password||url.hash)throw new TypeError('Invalid native WebSocket URL');
@@ -257,7 +259,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
  async call(value:unknown,caller:SQLiteOwnerCaller):Promise<unknown>{
   sqlitePayloadBytes(value,131072);if(!value||typeof value!=='object'||Array.isArray(value))throw new TypeError('Invalid native client request');const input=structuredClone(value) as any;if(this.closed||caller.signal.aborted)fail('FENCED','Native client is closed');
   if(input.method==='connect')return this.connect(input,caller);
-  const connection=this.connection(caller.tabID),callerAuthVersion=connection.authVersion;if((connection.controlOnly||connection.public)&&['entities','replicaPage','replicaPendingPage','collectionPage','livePage','livePendingPage'].includes(input.method))fail('INVALID_ROW','This connection has no tenant replica');if(connection.controlOnly&&['query','action','reducer','prepareReducer'].includes(input.method)&&this.ref(input.path).scope!=='control')fail('INVALID_ROW','Control connections cannot invoke tenant functions');if(['entities','replicaPage','replicaPendingPage','collectionPage','livePage','livePendingPage','reducer'].includes(input.method)){await connection.restoring;if(connection.authVersion!==callerAuthVersion)fail('FENCED','Caller authentication changed during restoration');if(connection.migrationBlocked)throw connection.migrationBlocked;}
+  const connection=this.connection(caller.tabID),callerAuthVersion=connection.authVersion;if((connection.controlOnly||connection.public)&&['resetLocalReplica','entities','replicaPage','replicaPendingPage','collectionPage','livePage','livePendingPage'].includes(input.method))fail('INVALID_ROW','This connection has no tenant replica');if(connection.controlOnly&&['query','action','reducer','prepareReducer'].includes(input.method)&&this.ref(input.path).scope!=='control')fail('INVALID_ROW','Control connections cannot invoke tenant functions');if(['resetLocalReplica','entities','replicaPage','replicaPendingPage','collectionPage','livePage','livePendingPage','reducer'].includes(input.method)){await connection.restoring;if(connection.authVersion!==callerAuthVersion)fail('FENCED','Caller authentication changed during restoration');if(connection.migrationBlocked)throw connection.migrationBlocked;}
   switch(input.method){
    case 'controls':{
     const admitted=this.admission(connection);let key:string|null|undefined;
@@ -266,6 +268,23 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
    }
    case 'reportError':{const version=connection.authVersion;await connection.client.reportError(input.type,input.payload);if(caller.signal.aborted||this.tabs.get(caller.tabID)!==connection.id||version!==connection.authVersion)fail('FENCED','Error report caller session changed');return null;}
    case 'restoreSession':await connection.restoring;if(connection.migrationBlocked)throw connection.migrationBlocked;return !!this.admission(connection);
+   case 'resetLocalReplica':{
+    if(input.keepOutbox!==undefined&&typeof input.keepOutbox!=='boolean')throw new TypeError('Invalid cache reset option');
+    const admitted=this.checkCaller(caller,connection),version=connection.authVersion;
+    if(!admitted.online||!connection.client.connectionState().isWebSocketConnected)throw new GonvexClientError('Cannot reset local data while offline. Reconnect and try again; cached data was kept.',{code:'disconnected'});
+    connection.client.close();let discardedIntents=0;
+    try{await this.owner.runOwner(0,()=>this.owner.database.withTransactionAsync(async()=>{
+     const current=this.checkCaller(caller,connection);if(version!==connection.authVersion||current.intentScope!==admitted.intentScope||current.scope!==admitted.scope)fail('FENCED','Cache reset admission changed');
+     if(input.keepOutbox===false)discardedIntents=await this.reducer.journal.discardUnsent(admitted.intentScope);
+     await this.owner.database.runAsync('INSERT OR IGNORE INTO gv_native_feed_resets VALUES(?)',admitted.scope);
+     await this.owner.canonical.clear(admitted.scope);
+     await this.owner.database.runAsync('UPDATE gv_snapshot_stages SET discarded=1 WHERE scope=?',admitted.scope);
+     await this.owner.database.runAsync('DELETE FROM gv_native_feed_progress WHERE scope=?',admitted.scope);
+     await this.reducer.core.rebase(admitted.scope);
+    }),[admitted.scope]);connection.recovered=false;}
+    finally{if(!this.closed&&this.connections.get(connection.id)===connection)connection.client.connect();}
+    return {discardedIntents,resubscribed:connection.sources.size+connection.lives.size};
+   }
    case 'outboxCount':{const admitted=this.admission(connection);return admitted?(await this.reducer.journal.summary(admitted.intentScope)).queued:0;}
    case 'rejectionsAck':if(!Number.isSafeInteger(input.sequence)||input.sequence<0||input.sequence>connection.rejectionSequence)throw new TypeError('Invalid rejection notification ACK');connection.rejectionCursors.set(caller.tabID,Math.max(connection.rejectionCursors.get(caller.tabID)??0,input.sequence));return null;
    case 'supportAck':if(!Number.isSafeInteger(input.sequence)||input.sequence<0||input.sequence>connection.supportSequence)throw new TypeError('Invalid support notification ACK');connection.supportCursors.set(caller.tabID,Math.max(connection.supportCursors.get(caller.tabID)??0,input.sequence));return null;

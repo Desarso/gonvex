@@ -2482,3 +2482,28 @@ it('keeps an offline hook snapshot stable when only unrelated dependencies chang
   actAtPaint(()=>{token='tasks:2';client.updateReplica();});
   expect(result.current).not.toBe(first);expect(result.current.rows[0]!.value).toBe('tasks:2');
 });
+
+describe('native retained Live Query membership',()=>{
+ it('observes canonical IDs and normalized values without opening an additional server query',async()=>{
+  const {SQLiteBrowserClient}=await import('@gonvex/client/sqlite/browser');
+  const calls:any[]=[];const row={_id:'canonical-key',id:42,name:'Visible task'};
+  const broker={subscribeChanges:()=>()=>{},stats:()=>({ownerEpoch:1}),close(){},async request(_op:string,input:any){calls.push(input);switch(input.method){
+   case 'connect':return {connection:'native',identityKey:'identity'};
+   case 'controls':return {tokens:[],status:{isWebSocketConnected:true},session:'authenticated',failure:null};
+   case 'watchLive':return {signature:'server-window'};
+   case 'livePage':return {generation:{epoch:1,sequence:1},window:{generation:'generation',total:1,header:{resultSkeleton:{page:[],total:1,limit:250},resultPath:['page']}},offset:0,nextOffset:null,rows:[{id:row._id,value:row}]};
+   case 'entities':return {generation:{epoch:1,sequence:1},rows:input.ids.map((id:string)=>({id,value:id===row._id?row:null}))};
+   default:return null;
+  }}};
+  const client=new SQLiteBrowserClient('ws://private.test/ws',{broker:broker as any});
+  const ref={kind:'query' as const,path:'tasks/grid',delivery:'live' as const,live:{entity:'tasks',key:'_id',resultPath:['page']}};
+  const wrapper=({children}:{children:ReactNode})=><GonvexProvider client={client}>{children}</GonvexProvider>;
+  const hook=renderHook(()=>useRetainedLiveQuery(ref,{limit:250}),{wrapper});
+  expect(hook.result.current.ids).toEqual([]);expect(calls.filter(call=>call.method==='watchLive')).toHaveLength(0);
+  let stop!:()=>void;act(()=>{stop=client.subscribeLiveQuery(ref,{limit:250},()=>{});});
+  await act(async()=>{await vi.waitFor(()=>expect(hook.result.current.rows).toEqual([row]));});
+  expect(hook.result.current.ids).toEqual(['canonical-key']);expect(calls.filter(call=>call.method==='watchLive')).toHaveLength(1);
+  act(()=>{stop();hook.unmount();});await vi.waitFor(()=>expect(client.memoryCounters().replicaWindows).toBe(0));
+  expect(client.memoryCounters().replicaRows).toBe(0);expect(client.budgets().find(value=>value.name==='browser-live-memberships')?.bytes).toBe(0);client.close();
+ });
+});

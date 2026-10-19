@@ -7,11 +7,11 @@ import { SQLiteBrowserClient } from "@gonvex/client/sqlite/browser";
 export { GonvexClientError, type ConnectionState, type EntityIntentStatus, type LocalExecutionFallbackEvent, type OutboxIntent, type ResetLocalReplicaOptions, type ResetLocalReplicaResult } from "@gonvex/client";
 export { createFirebaseAuthAdapter, type GonvexExternalAuthAdapter, type GonvexExternalIdentityHint, type GonvexFirebaseAuthAdapterOptions } from "@gonvex/client";
 
-const GonvexContext = createContext<GonvexClient | null>(null);
+const GonvexContext = createContext<GonvexClient | SQLiteBrowserClient | null>(null);
 const GonvexAuthContext = createContext<AuthState>({ isLoading: false, isAuthenticated: true });
 
 export function GonvexProvider(props: { client: GonvexClient | SQLiteBrowserClient; children: ReactNode }) {
-  return <GonvexContext.Provider value={props.client as GonvexClient}>{props.children}</GonvexContext.Provider>;
+  return <GonvexContext.Provider value={props.client}>{props.children}</GonvexContext.Provider>;
 }
 
 export type AuthState = {
@@ -1700,7 +1700,7 @@ type QueryResultState<T> = {
   isStale: boolean;
 };
 
-function useSessionScopeGeneration(client: GonvexClient): number {
+function useSessionScopeGeneration(client: Pick<GonvexClient,'onSessionScopeChange'>): number {
   const [generation, setGeneration] = useState(0);
   useEffect(() => {
     const unsubscribe = client.onSessionScopeChange(() => {
@@ -1940,6 +1940,7 @@ export function useRetainedLiveQuery<T extends ReplicaRow = ReplicaRow>(
   args: JsonValue = {},
 ): LiveQueryResult<T> {
   const client = useGonvexClient();
+  if(client instanceof SQLiteBrowserClient)return useNativeRetainedLiveQuery<T>(client,signatureOrReference,args);
   const argsKey = JSON.stringify(args);
   const signature = typeof signatureOrReference === "string"
     ? signatureOrReference
@@ -1950,6 +1951,14 @@ export function useRetainedLiveQuery<T extends ReplicaRow = ReplicaRow>(
     useCallback(() => client.localReplica.liveQuerySnapshot<T>(signature), [client, signature, argsKey]),
     () => emptyLiveQuery as LiveQueryResult<T>,
   );
+}
+
+function useNativeRetainedLiveQuery<T extends ReplicaRow>(client:SQLiteBrowserClient,ref:string|FunctionReference,args:JsonValue):LiveQueryResult<T>{
+ const signature=typeof ref==='string'?ref:client.replicaSignature(ref,args);
+ useEffect(()=>client.retainReplicaWindow(signature),[client,signature]);
+ const membership=useSyncExternalStore(useCallback(notify=>client.subscribeReplicaWindow(signature,notify),[client,signature]),useCallback(()=>client.replicaWindowMembership(signature),[client,signature]),()=>undefined);
+ const values=useReplicaEntities<T>(membership?.entity??'',membership?.ids??[]);
+ return useMemo(()=>membership?{...membership,rows:values.filter((row):row is T=>row!==undefined),completeness:values.some(row=>row===undefined)?'partial':membership.completeness}:emptyLiveQuery as LiveQueryResult<T>,[membership,values]);
 }
 
 const emptyLiveQuery: LiveQueryResult = {rows:[],ids:[],source:'cache',completeness:'partial',freshness:'verifying'};
@@ -2011,7 +2020,7 @@ function useNativeLiveQueryState<T extends ReplicaRow>(client:SQLiteBrowserClien
  const record=parent&&typeof parent==="object"&&!Array.isArray(parent)?parent as Record<string,JsonValue>:undefined,selected=path.length?record?.[path.at(-1)!]:value;
  if(!Array.isArray(selected))return emptyLiveQuery as LiveQueryResult<T>;
  const rows=selected as T[];
- return {rows,ids:rows.map(row=>String(row.id??row._id??"")),...(typeof record?.total==="number"?{total:record.total}:{}),...(typeof record?.offset==="number"?{offset:record.offset}:{}),...(typeof record?.limit==="number"?{limit:record.limit}:{}),source:"server",completeness:"complete",freshness:client.connectionState().isWebSocketConnected?"current":"offline"};
+ return {rows,ids:rows.map(row=>String(row[ref.live?.key??"_id"]??row._id??row.id??"")),...(typeof record?.total==="number"?{total:record.total}:{}),...(typeof record?.offset==="number"?{offset:record.offset}:{}),...(typeof record?.limit==="number"?{limit:record.limit}:{}),source:"server",completeness:"complete",freshness:client.connectionState().isWebSocketConnected?"current":"offline"};
 }
 
 /** Execute a read-only Query once. Queries never subscribe or rerun. */
@@ -2296,11 +2305,11 @@ const NO_SUBSCRIPTION = () => () => undefined;
 export function useOutboxIntents(): readonly OutboxIntent[] {
   const client = useGonvexClient();
   const subscribe = useMemo(
-    () => (typeof client.subscribeIntents === "function" ? client.subscribeIntents.bind(client) : NO_SUBSCRIPTION),
+    () => ("subscribeIntents" in client && typeof client.subscribeIntents === "function" ? client.subscribeIntents.bind(client) : NO_SUBSCRIPTION),
     [client],
   );
   const getSnapshot = useCallback(
-    () => (typeof client.intentsSnapshot === "function" ? client.intentsSnapshot() : EMPTY_INTENTS),
+    () => ("intentsSnapshot" in client && typeof client.intentsSnapshot === "function" ? client.intentsSnapshot() : EMPTY_INTENTS),
     [client],
   );
   return useReactSyncExternalStore(subscribe, getSnapshot, () => EMPTY_INTENTS);

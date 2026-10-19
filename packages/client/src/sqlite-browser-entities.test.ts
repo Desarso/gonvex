@@ -16,3 +16,10 @@ it('fences all mounted entity batches to one SQL generation and never publishes 
 it('clears old identity rows immediately, rejects late reads and handles teardown after close',async()=>{
  const f=fixture(),release=f.view.retain('tasks',['a']),stop=f.view.subscribe(()=>{},{entity:'tasks',ids:['a']});await vi.waitFor(()=>expect(f.view.entity('tasks','a')).toBeDefined());let finish!:(value:SQLiteNativeEntityResult)=>void;const barrier=new Promise<SQLiteNativeEntityResult>(resolve=>{finish=resolve;});let reads=0;f.handler=async(_entity,ids)=>{if(!reads++)return barrier;return {generation:{epoch:1,sequence:3},rows:ids.map(id=>({id,value:{id,n:3}}))};};f.view.refresh();await vi.waitFor(()=>expect(reads).toBe(1));f.view.invalidate(true);expect(f.view.entity('tasks','a')).toBeUndefined();finish({generation:{epoch:1,sequence:2},rows:[{id:'a',value:{id:'a',n:999}}]});await vi.waitFor(()=>expect(f.view.entity('tasks','a')?.n).toBe(3));f.view.close();release();stop();expect(f.ledger.bytes).toBe(0);
 });
+it('retains a 250-row grid in one view while every SQL RPC remains at most 128 IDs',async()=>{
+ const f=fixture(),ids=Array.from({length:250},(_,n)=>String(n));
+ const release=f.view.retain('tasks',ids),stop=f.view.subscribe(()=>{},{entity:'tasks',ids});
+ await vi.waitFor(()=>expect(f.view.entity('tasks','249')).toEqual({id:'249',n:1}));
+ expect(f.calls.every(call=>call.ids.length<=128)).toBe(true);expect(f.view.counters().replicaRows).toBe(250);
+ release();stop();expect(f.ledger.bytes).toBe(0);expect(f.errors).toEqual([]);f.view.close();
+});

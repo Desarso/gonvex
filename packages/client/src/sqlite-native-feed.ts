@@ -25,7 +25,7 @@ type Options={owner:SQLiteOwnerProgramContext;sessions:SQLiteWorkerSessions;conn
  /** Portable chunks are fetched outside the SQL FIFO before atomic retry. */
  prepare?(path:string):Promise<void>;
 };
-const progressSchema=`CREATE TABLE IF NOT EXISTS gv_native_feed_progress(scope TEXT NOT NULL,epoch TEXT NOT NULL,observed INTEGER NOT NULL,applied INTEGER NOT NULL,unclosed INTEGER NOT NULL,PRIMARY KEY(scope,epoch)) WITHOUT ROWID;`;
+const progressSchema=`CREATE TABLE IF NOT EXISTS gv_native_feed_progress(scope TEXT NOT NULL,epoch TEXT NOT NULL,observed INTEGER NOT NULL,applied INTEGER NOT NULL,unclosed INTEGER NOT NULL,PRIMARY KEY(scope,epoch)) WITHOUT ROWID; CREATE TABLE IF NOT EXISTS gv_native_feed_resets(scope TEXT PRIMARY KEY) WITHOUT ROWID;`;
 const empty={entities:{},liveQueries:{}};
 /** One authenticated socket's ordered native feed. Its bounded control lane
  * never waits for future snapshot bytes. Membership changes preceding the last
@@ -131,6 +131,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
    await this.options.owner.database.runAsync(`UPDATE gv_window_generations AS g SET header=json_set(g.header,'$.cursor.revision',max(json_extract(g.header,'$.cursor.revision'),?))
     WHERE g.scope=? AND json_extract(g.header,'$.cursor.epoch')=? AND (g.signature,g.generation) IN
      (SELECT w.signature,w.generation FROM gv_windows w WHERE w.scope=? AND w.signature IN (SELECT value FROM json_each(?)))`,revision,state.scope,state.cursorEpoch??'',state.scope,JSON.stringify([...this.sources.values()].filter(source=>!source.closing).map(source=>source.signature)));
+   await this.options.owner.database.runAsync('DELETE FROM gv_native_feed_resets WHERE scope=?',state.scope);
    await this.options.owner.database.runAsync('INSERT INTO gv_native_feed_progress VALUES(?,?,?, ?,0) ON CONFLICT(scope,epoch) DO UPDATE SET observed=max(observed,excluded.observed),applied=max(applied,excluded.applied),unclosed=0',state.scope,state.epoch,revision,revision);if(!pending||pending.applied<revision||pending.unclosed)await markSQLiteStagingCommit(this.options.owner.database,()=>this.options.owner.engine.verifyOwner());applied=true;
    };if(pending?.unclosed||await this.groups.pending(state.stream)||await this.options.windowsPending?.(state.scope,state.epoch,revision))await this.mutate(state.scope,publish);else await publish();
   }));this.check(state);if(applied)this.options.advanceWatermark(revision);
@@ -196,7 +197,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
   }
   await state.gate;await state.ingress.flush();await this.run(state,0,async()=>{await this.readableEpoch(state.scope,state.epoch,state.cursorEpoch);if(await this.groups.pending(state.stream))fail('PAGE_CHANGED','Native feed awaits its terminal watermark');const progress=await this.options.owner.database.getFirstAsync<{unclosed:number}>('SELECT unclosed FROM gv_native_feed_progress WHERE scope=? AND epoch=?',state.scope,state.epoch);if(progress?.unclosed)fail('PAGE_CHANGED','Native feed awaits its terminal watermark');});
  }
- private async readableEpoch(scope:string,epoch:string,cursorEpoch?:string){const current=await this.options.owner.database.getFirstAsync<{value:string}>("SELECT value FROM _gonvex_replica_meta WHERE scope=? AND key='currentEpoch'",scope);if(!current)return;if(cursorEpoch&&current.value!==cursorEpoch)fail('PAGE_CHANGED','Canonical rows need the newly admitted database epoch');const progress=await this.options.owner.database.getFirstAsync('SELECT 1 FROM gv_native_feed_progress WHERE scope=? AND epoch=?',scope,epoch);if(!progress&&current.value!==epoch)fail('PAGE_CHANGED','Canonical rows have no committed admission epoch');}
+ private async readableEpoch(scope:string,epoch:string,cursorEpoch?:string){if(await this.options.owner.database.getFirstAsync('SELECT 1 FROM gv_native_feed_resets WHERE scope=?',scope))fail('PAGE_CHANGED','Cache reset awaits its terminal watermark');const current=await this.options.owner.database.getFirstAsync<{value:string}>("SELECT value FROM _gonvex_replica_meta WHERE scope=? AND key='currentEpoch'",scope);if(!current)return;if(cursorEpoch&&current.value!==cursorEpoch)fail('PAGE_CHANGED','Canonical rows need the newly admitted database epoch');const progress=await this.options.owner.database.getFirstAsync('SELECT 1 FROM gv_native_feed_progress WHERE scope=? AND epoch=?',scope,epoch);if(!progress&&current.value!==epoch)fail('PAGE_CHANGED','Canonical rows have no committed admission epoch');}
  /** Only an authenticated registered source can select a pending disk stage.
   * This is display metadata, never a complete replica coverage certificate. */
  pendingSource(id:string){

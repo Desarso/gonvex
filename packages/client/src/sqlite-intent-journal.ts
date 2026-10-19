@@ -96,6 +96,14 @@ export class SQLiteIntentJournal {
  /** Legacy cutover rows lack invocation receipts until an admitted owner can
   * bind their original command to the current visibility scope. Metadata is
   * selected before bounded bodies; native receipts skip this work on reload. */
+ async discardUnsent(ownerScope:string):Promise<number>{
+  scope(ownerScope);await this.ready();let removed=0;
+  await this.db.withTransactionAsync(async()=>{await this.fence();
+   removed=(await this.db.getFirstAsync<{n:number}>("SELECT count(*) n FROM gv_reducer_journal WHERE scope=? AND state IN ('pending','failed','rejected')",ownerScope))?.n??0;
+   await this.db.runAsync("DELETE FROM gv_reducer_journal_dependencies WHERE scope=? AND intent_id IN (SELECT id FROM gv_reducer_journal WHERE scope=? AND state IN ('pending','failed','rejected'))",ownerScope,ownerScope);
+   await this.db.runAsync("DELETE FROM gv_reducer_journal WHERE scope=? AND state IN ('pending','failed','rejected')",ownerScope);
+  });return removed;
+ }
  async unrecovered(ownerScope:string):Promise<ReducerOutboxEntry[]>{
   scope(ownerScope);await this.ready();return this.select(`SELECT j.id,length(CAST(j.value AS BLOB))*2+128 bytes FROM gv_reducer_journal j WHERE j.scope=? AND NOT EXISTS(SELECT 1 FROM gv_reducer_invocations i WHERE i.scope=j.scope AND i.command_id=j.intent_key) ORDER BY j.id LIMIT 8`,[ownerScope]);
  }

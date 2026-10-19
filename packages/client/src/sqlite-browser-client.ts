@@ -1,6 +1,7 @@
+import {SQLiteBrowserMemberships,type SQLiteBrowserMembership} from './sqlite-browser-memberships.js';
 import type {SQLitePendingLivePage} from './sqlite-live-windows.js';
 import type {JsonValue} from '@gonvex/protocol';
-import type {FunctionReference,GonvexClientAuth,ConnectionState,QueuedReducerOutcome,CallOptions,GonvexClientOptions,ReducerRejectionEvent,LocalExecutionFallbackEvent,GonvexTelemetryEvent,SupportCommand} from './index.js';
+import type {FunctionReference,GonvexClientAuth,ConnectionState,QueuedReducerOutcome,CallOptions,GonvexClientOptions,ReducerRejectionEvent,LocalExecutionFallbackEvent,GonvexTelemetryEvent,SupportCommand,ResetLocalReplicaOptions,ResetLocalReplicaResult} from './index.js';
 import type {SQLiteReplicaBroker} from './sqlite-broker.js';
 import type {SQLiteNativeWindowResult,SQLiteNativeEntityResult} from './sqlite-native-replica-reader.js';
 import type {SQLitePendingSnapshotPage} from './sqlite-pending-snapshot-reader.js';
@@ -28,7 +29,7 @@ type Watch={kind:'replica'|'live';state:WatchSnapshot;retiring?:Promise<void>;ke
 export type SQLiteBrowserOptions={broker:Broker;artifactHash?:string;onUpdateRequired?:GonvexClientOptions['onUpdateRequired'];onLocalExecutionFallback?:GonvexClientOptions['onLocalExecutionFallback'];errorReporting?:GonvexClientOptions['errorReporting'];role?:'control';public?:{tenant:string};auth?:Auth;fetchToken?:GonvexClientAuth['fetchToken']};
 export type SQLiteWatchOptions={view?:JsonValue;deferStart?:boolean};
 export type SQLiteReplicaPageOptions={offset?:number;limit?:number;generation?:string;expected?:SQLiteNativeWindowResult['generation']};
-export type SQLiteReplicaWatch<T extends ReplicaRow=ReplicaRow>={
+export type SQLiteReplicaWatch<T extends JsonValue=ReplicaRow>={
  /** A mounted watch retains one bounded page, never a collection-sized list. */
  page(options?:SQLiteReplicaPageOptions):Promise<SQLiteNativeWindowResult|null>;
  queryPage(plan:SQLiteCollectionPageOptions,generation?:string):Promise<(SQLiteTypedPage&{generation:string})|null>;
@@ -38,7 +39,7 @@ export type SQLiteReplicaWatch<T extends ReplicaRow=ReplicaRow>={
  /** Bounded compatibility surface for existing small-collection React hooks. */
  onUpdate(listener:()=>void):()=>void;
  localReplicaResult():T[]|undefined;
- localReplicaState():ReplicaCollectionSubscriptionState<T>|undefined;
+ localReplicaState():ReplicaCollectionSubscriptionState<T & ReplicaRow>|undefined;
  close():void;
 };
 const stable=(value:JsonValue):string=>value===null||typeof value!=='object'?JSON.stringify(value):Array.isArray(value)?'['+value.map(stable).join(',')+']':'{'+Object.keys(value).sort().map(key=>JSON.stringify(key)+':'+stable(value[key]!)).join(',')+'}';
@@ -51,6 +52,7 @@ export class SQLiteBrowserClient {
  private readonly publicTenant?:string;private auth:Auth;private closed=false;private revision=0;private dataRevision=0;private admissionKey?:string|null;private epoch?:number;private handle?:Handle;private connecting?:Promise<Handle>;private connectingRevision=0;
  private readonly watches=new Map<string,Watch>();private watchBytes=0;
  private readonly ledger=new ByteLedger(12582912);private readonly entityView:SQLiteBrowserEntities;private readonly controlQueries:SQLiteBrowserControls;
+ private readonly memberships=new SQLiteBrowserMemberships();
  private readonly requests=new SQLiteTransientBudget(2097152,128);
  private readonly pages=new BoundedByteCache<string,Page>('browser-row-pages',2097152,192,this.ledger);
  private readonly tokenRequests=new Set<string>();private readonly tokenCancels=new Map<string,()=>void>();private polling?:Promise<void>;private pollAgain=false;
@@ -58,6 +60,7 @@ export class SQLiteBrowserClient {
  constructor(readonly url:string,private readonly options:SQLiteBrowserOptions){
   const parsed=new URL(url);if(!['ws:','wss:'].includes(parsed.protocol)||parsed.username||parsed.password||parsed.hash)throw new TypeError('Invalid native browser URL');
   sqlitePayloadBytes(options.auth??{},65536);this.auth=structuredClone(options.auth??{});if(options.public){if(options.role==='control'||!options.public.tenant.trim()||!this.auth.project?.trim()||this.auth.token||this.auth.identity||this.auth.tenant||options.fetchToken)throw new TypeError('Public clients require fixed project/tenant routing without account credentials');this.publicTenant=options.public.tenant.trim();this.auth.tenant=this.publicTenant;parsed.searchParams.set('public','1');this.url=parsed.href;}this.fetchToken=options.fetchToken;if(options.onLocalExecutionFallback)this.fallbackListeners.add(options.onLocalExecutionFallback);this.controlQueries=new SQLiteBrowserControls(input=>this.rpc(input),this.ledger);this.entityView=new SQLiteBrowserEntities((entity,ids,expected)=>this.entities(entity,ids,expected),this.ledger,error=>{if(this.closed)return;this.controlsValue={...this.controlsValue,status:this.controlsValue?.status,session:this.controlsValue?.session??'unavailable',failure:{code:String((error as any)?.code??'SQLITE'),message:String((error as any)?.message??error).slice(0,512)}};for(const listener of this.controlListeners)try{listener();}catch{/* Observer only. */}});
+  this.ledger.register('browser-live-memberships',()=>this.memberships.stats());
   this.ledger.register('browser-watch-metadata',()=>({name:'browser-watch-metadata',bytes:this.watchBytes,entries:this.watches.size,maxBytes:524288,maxEntries:192,evictions:0,refusals:0}));
   this.ledger.register('browser-request-admission',()=>({...this.requests.stats(),name:'browser-request-admission'}));
   this.ledger.register('browser-observers',()=>({name:'browser-observers',bytes:(this.controlListeners.size+this.authListeners.size+this.credentialListeners.size+this.rejectionListeners.size+this.fallbackListeners.size+this.telemetryListeners.size)*128+this.authWaiters.size*256,entries:this.controlListeners.size+this.authListeners.size+this.credentialListeners.size+this.rejectionListeners.size+this.fallbackListeners.size+this.telemetryListeners.size+this.authWaiters.size,maxBytes:26624,maxEntries:200,evictions:0,refusals:0}));
@@ -72,7 +75,7 @@ export class SQLiteBrowserClient {
  }
  private current(revision:number){if(this.closed||revision!==this.revision)fail('FENCED','Native browser session changed');}
  private notify(watch:Watch){watch.version++;watch.state={page:this.pages.get(watch.key),stale:watch.stale,version:watch.version};for(const listener of watch.listeners)try{listener();}catch{/* Observer only. */}}
- private invalidate(identity:boolean){this.revision++;this.dataRevision++;this.lastRejection=0;this.lastSupport=0;if(identity){this.admissionKey=undefined;this.lastAuthError=undefined;this.lastCredential=undefined;}this.handle=undefined;this.controlsValue=undefined;this.controlQueries.invalidate(identity);this.entityView.invalidate(identity);
+ private invalidate(identity:boolean){this.revision++;this.dataRevision++;this.lastRejection=0;this.lastSupport=0;if(identity){this.admissionKey=undefined;this.lastAuthError=undefined;this.lastCredential=undefined;}this.handle=undefined;this.controlsValue=undefined;this.controlQueries.invalidate(identity);this.memberships.invalidate();this.entityView.invalidate(identity);
   for(const watch of this.watches.values()){watch.bound=-1;watch.source=undefined;watch.opening=undefined;watch.stale=true;if(identity){watch.unpin?.();watch.unpin=undefined;this.pages.delete(watch.key);}this.notify(watch);}
  }
  private admit(key:string|null){
@@ -96,7 +99,7 @@ export class SQLiteBrowserClient {
   if(identity!==old||!this.auth.identity&&Object.hasOwn(auth,'token')){this.invalidate(true);await this.connect();return;}
   const revision=this.revision;await this.connect();this.current(revision);await this.options.broker.request('clientCall',{method:'auth',auth:{token:this.auth.token}});this.current(revision);void this.pollControls().catch(()=>{});
  }
- private async rpc<T>(input:unknown,commandID?:string):Promise<T>{const revision=this.revision,dataRevision=this.dataRevision,tenant=!!input&&typeof input==='object'&&'method'in input&&['entities','replicaPage','replicaPendingPage','collectionPage','livePage','livePendingPage','reducer'].includes(String(input.method));this.current(revision);const bytes=sqlitePayloadBytes(input,131072),owned=structuredClone(input) as any,release=await this.requests.acquire(bytes+512);try{this.current(revision);if(tenant&&owned.method==='reducer'&&this.admissionKey!==undefined)owned.expectedAdmissionKey=this.admissionKey;await this.connect();this.current(revision);const value=await this.options.broker.request<T>('clientCall',owned,90000,commandID);this.current(revision);if(tenant&&dataRevision!==this.dataRevision)fail('FENCED','Native page admission changed');return value;}finally{release();}}
+ private async rpc<T>(input:unknown,commandID?:string):Promise<T>{const revision=this.revision,dataRevision=this.dataRevision,tenant=!!input&&typeof input==='object'&&'method'in input&&['resetLocalReplica','entities','replicaPage','replicaPendingPage','collectionPage','livePage','livePendingPage','reducer'].includes(String(input.method));this.current(revision);const bytes=sqlitePayloadBytes(input,131072),owned=structuredClone(input) as any,release=await this.requests.acquire(bytes+512);try{this.current(revision);if(tenant&&owned.method==='reducer'&&this.admissionKey!==undefined)owned.expectedAdmissionKey=this.admissionKey;await this.connect();this.current(revision);const value=await this.options.broker.request<T>('clientCall',owned,90000,commandID);this.current(revision);if(tenant&&dataRevision!==this.dataRevision)fail('FENCED','Native page admission changed');return value;}finally{release();}}
  pollControls():Promise<void>{
   if(this.closed)return Promise.resolve();if(this.polling){this.pollAgain=true;return this.polling;}
   const operation=(async()=>{do{this.pollAgain=false;const revision=this.revision;try{const handle=await this.connect(),controls=await this.options.broker.request<Controls>('clientCall',{method:'controls'});this.current(revision);sqlitePayloadBytes(controls,65536);if(controls.admissionKey!==undefined)this.admit(controls.admissionKey);this.controlsValue={status:controls.status,serverInfo:controls.serverInfo,authentication:controls.authentication,session:controls.session,failure:controls.failure};
@@ -112,7 +115,7 @@ export class SQLiteBrowserClient {
  }
  get localReplica(){return this.entityView;}
  retainReplicaEntities(entity:string,ids:readonly string[]){return this.entityView.retain(entity,ids);}
- watchControlQuery<T extends JsonValue=JsonValue>(ref:FunctionReference,args:JsonValue={}){if(ref.scope!=='control'||ref.kind!=='query'||ref.delivery!=='live')throw new TypeError('Expected a generated live Control query');return this.controlQueries.watch<T>(ref,args);}
+ watchControlQuery<T extends JsonValue=JsonValue,Args extends JsonValue=JsonValue>(ref:FunctionReference<Args,T>,args:Args={} as Args){if(ref.scope!=='control'||ref.kind!=='query'||ref.delivery!=='live')throw new TypeError('Expected a generated live Control query');return this.controlQueries.watch<T>(ref,args);}
  async restoreSession(auth:GonvexClientAuth){await this.setAuth(auth);const restored=await this.rpc<boolean>({method:'restoreSession'});await this.pollControls();return restored;}
  authenticate(auth:GonvexClientAuth):Promise<void>{
   if(this.closed)return Promise.reject(new GonvexClientError('Native browser client is closed',{code:'closed'}));
@@ -130,9 +133,13 @@ export class SQLiteBrowserClient {
  serverInfo(){return this.controlsValue?.serverInfo??{};}
  activeArtifactHash(){return this.options.artifactHash??'';}
  get localSessionReady(){return this.rpc<boolean>({method:'restoreSession'});}
+ async resetLocalReplica(options:ResetLocalReplicaOptions={}):Promise<ResetLocalReplicaResult>{
+  const result=await this.rpc<ResetLocalReplicaResult>({method:'resetLocalReplica',keepOutbox:options.keepOutbox!==false});
+  this.invalidate(true);await this.connect();return result;
+ }
  outboxCount(){return this.rpc<number>({method:'outboxCount'});}
  replicaEntities<T extends import('./local-replica.js').ReplicaRow>(entity:string,ids:readonly string[]){if(ids.length>128)throw new RangeError('Entity views are bounded');return ids.map(id=>this.entityView.entity<T>(entity,id));}
- memoryCounters(){const entities=this.entityView.counters();let pageRows=0;for(const watch of this.watches.values())pageRows+=watch.state.page?.rows.length??0;return {...entities,replicaRows:entities.replicaRows+pageRows,replicaBytes:entities.replicaBytes+this.pages.stats().bytes,replicaWindows:this.watches.size,retainedWindows:this.watches.size,pendingCommands:0,queuedStorageOperations:this.requests.stats().entries,querySubscriptions:this.controlQueries.count(),replicaSubscriptions:this.watches.size,pendingCalls:this.requests.stats().entries,outboxHead:0};}
+ memoryCounters(){const entities=this.entityView.counters();let pageRows=0;for(const watch of this.watches.values())pageRows+=watch.state.page?.rows.length??0;return {...entities,replicaRows:entities.replicaRows+pageRows,replicaMetadataBytes:entities.replicaMetadataBytes+this.memberships.stats().bytes,replicaBytes:entities.replicaBytes+this.pages.stats().bytes,replicaWindows:this.watches.size,retainedWindows:this.watches.size,pendingCommands:0,queuedStorageOperations:this.requests.stats().entries,querySubscriptions:this.controlQueries.count(),replicaSubscriptions:this.watches.size,pendingCalls:this.requests.stats().entries,outboxHead:0};}
  status(){return this.controlsValue;}
 
 
@@ -170,26 +177,35 @@ export class SQLiteBrowserClient {
  }
  /** Compatibility with structured Live Query hooks. The result is capped at
   * 256 rows and is rebuilt from fenced owner pages after each change. */
- watchLiveQuery<T extends JsonValue=JsonValue>(ref:FunctionReference,args:JsonValue={},options:SQLiteWatchOptions={}){
+ replicaSignature(ref:Pick<FunctionReference,'path'>,args:JsonValue={}){return stable({path:ref.path,args});}
+ retainReplicaWindow(signature:string){return this.memberships.retain(signature);}
+ subscribeReplicaWindow(signature:string,listener:()=>void){return this.memberships.subscribe(signature,listener);}
+ replicaWindowMembership(signature:string):SQLiteBrowserMembership|undefined{return this.memberships.read(signature);}
+ subscribeLiveQuery(ref:FunctionReference,args:JsonValue,listener:()=>void){const watch=this.watchLiveQuery(ref,args,{deferStart:true}),release=watch.onUpdate(listener);return ()=>{release();watch.close();};}
+ watchLiveQuery<T extends JsonValue=JsonValue,Args extends JsonValue=JsonValue>(ref:FunctionReference<Args,T>,args:Args={} as Args,options:SQLiteWatchOptions={}){
+  const signature=this.replicaSignature(ref,args);let releaseMembership:(()=>void)|undefined;
   const watch=this.watchLiveWindow(ref,args,{...options,deferStart:true}),listeners=new Set<()=>void>();let result:T|undefined,closed=false,loading=false,again=false,stop:(()=>void)|undefined;
   const publish=()=>{for(const listener of listeners)try{listener();}catch{/* Observer only. */}};
   const refresh=async()=>{if(closed||!listeners.size)return;if(loading){again=true;return;}loading=true;try{do{again=false;let offset=0,generation:string|undefined,header:SQLiteNativeWindowResult['window']['header']|undefined;const rows:JsonValue[]=[];for(;;){const page=await watch.page({offset,limit:128,...(generation?{generation}:{})});if(!page){result=undefined;publish();break;}if(closed||!listeners.size)return;generation??=page.window.generation;header=page.window.header;for(const slot of page.rows)if(slot.value!==null)rows.push(slot.value as JsonValue);if(page.nextOffset===null){
       const skeleton=header.resultSkeleton??[],path=header.resultPath??ref.live?.resultPath??[];const base:JsonValue=structuredClone(skeleton);let value:JsonValue=base;if(path.length){for(const key of path.slice(0,-1)){if(!value||typeof value!=='object'||Array.isArray(value))fail('INVALID_ROW','Live result path is not an object');value=(value as Record<string,JsonValue>)[key]!;}if(!value||typeof value!=='object'||Array.isArray(value)||!Array.isArray((value as Record<string,JsonValue>)[path.at(-1)!]))fail('INVALID_ROW','Live result path is not an array');(value as Record<string,JsonValue>)[path.at(-1)!]=rows;value=base;}else value=rows;
-      sqlitePayloadBytes(value,2097152);result=value as T;publish();break;
+      sqlitePayloadBytes(value,2097152);result=value as T;
+      const record=base&&typeof base==='object'&&!Array.isArray(base)?base as Record<string,JsonValue>:undefined;
+      this.memberships.publish(signature,{entity:ref.live!.entity,ids:rows.map(row=>String((row as Record<string,JsonValue>)[ref.live!.key])),...(typeof record?.total==='number'?{total:record.total}:{}),...(typeof record?.offset==='number'?{offset:record.offset}:{}),...(typeof record?.limit==='number'?{limit:record.limit}:{}),source:'server',completeness:'complete',freshness:this.connectionState().isWebSocketConnected?'current':'offline'});
+      publish();break;
      }if(page.nextOffset<=offset||page.nextOffset>256)fail('BUDGET','Structured live result exceeds its bounded row allowance');offset=page.nextOffset;}
    }while(again&&!closed);}catch(error){if((error as {code?:string})?.code==='PAGE_CHANGED'){again=true;}else{result=undefined;publish();}}finally{loading=false;if(again&&!closed&&listeners.size)setTimeout(()=>{void refresh();},25);}};
-  return {localLiveQueryResult:()=>result,onUpdate:(listener:()=>void)=>{if(closed)fail('FENCED','Native live watch is closed');listeners.add(listener);if(!stop){stop=watch.subscribe(()=>{if(watch.snapshot().stale)void refresh();});void refresh();}return ()=>{listeners.delete(listener);if(!listeners.size){stop?.();stop=undefined;result=undefined;}};},close:()=>{if(closed)return;closed=true;stop?.();listeners.clear();result=undefined;watch.close();}};
+  return {localLiveQueryResult:()=>result,onUpdate:(listener:()=>void)=>{if(closed)fail('FENCED','Native live watch is closed');listeners.add(listener);if(!stop){releaseMembership=this.memberships.retain(signature);stop=watch.subscribe(()=>{if(watch.snapshot().stale)void refresh();});void refresh();}return ()=>{listeners.delete(listener);if(!listeners.size){stop?.();stop=undefined;releaseMembership?.();releaseMembership=undefined;result=undefined;}};},close:()=>{if(closed)return;closed=true;stop?.();releaseMembership?.();releaseMembership=undefined;listeners.clear();result=undefined;watch.close();}};
  }
- watchReplica<T extends ReplicaRow=ReplicaRow>(ref:Pick<FunctionReference,'path'>,args:JsonValue={},options:SQLiteWatchOptions={}):SQLiteReplicaWatch<T>{
+ watchReplica<T extends JsonValue=JsonValue,Args extends JsonValue=JsonValue>(ref:FunctionReference<Args,T>,args:Args={} as Args,options:SQLiteWatchOptions={}):SQLiteReplicaWatch<T>{
   if(options.deferStart){const watch=this.deferredBounded(ref,args,options,'replica');return this.compatibleReplica<T>({page:options=>watch.read(value=>value.page(options)),queryPage:(plan,generation)=>watch.read(value=>value.queryPage(plan,generation)),pendingPage:options=>watch.read(value=>value.pendingReplica(options)),snapshot:watch.snapshot,subscribe:watch.subscribe,close:watch.close});}
   const watch=this.watchBounded(ref,args,options,'replica');return this.compatibleReplica<T>({...watch,pendingPage:watch.pendingReplica});
  }
- private compatibleReplica<T extends ReplicaRow>(base:Pick<SQLiteReplicaWatch,'page'|'queryPage'|'pendingPage'|'snapshot'|'subscribe'|'close'>):SQLiteReplicaWatch<T>{
-  let state:ReplicaCollectionSubscriptionState<T>|undefined,loading=false,again=false,closed=false,stop:(()=>void)|undefined;
+ private compatibleReplica<T extends JsonValue>(base:Pick<SQLiteReplicaWatch,'page'|'queryPage'|'pendingPage'|'snapshot'|'subscribe'|'close'>):SQLiteReplicaWatch<T>{
+  let state:ReplicaCollectionSubscriptionState<T & ReplicaRow>|undefined,loading=false,again=false,closed=false,stop:(()=>void)|undefined;
   const listeners=new Set<()=>void>();
   const publish=()=>{for(const listener of listeners)try{listener();}catch{/* Observer only. */}};
   const refresh=async()=>{if(closed||!listeners.size)return;if(loading){again=true;return;}loading=true;try{do{again=false;const page=await base.page({limit:128});if(closed||!listeners.size)return;
-    if(page){const rows=page.rows.filter(slot=>slot.value!==null).map(slot=>slot.value as T),header=page.window.header,truncated=Boolean(header.truncated||page.nextOffset!==null),complete=header.completeness==='complete'&&!truncated;
+    if(page){const rows=page.rows.filter(slot=>slot.value!==null).map(slot=>slot.value as T & ReplicaRow),header=page.window.header,truncated=Boolean(header.truncated||page.nextOffset!==null),complete=header.completeness==='complete'&&!truncated;
      state={rows,ids:page.rows.map(slot=>slot.id),total:page.window.total,source:header.source,completeness:complete?'complete':'partial',freshness:this.connectionState().isWebSocketConnected?'current':'offline',truncated,isUpToDate:complete,computedRevision:page.generation.sequence};publish();}
    }while(again&&!closed);}catch(error){if((error as {code?:string})?.code==='PAGE_CHANGED'||(error as {code?:string})?.code==='FENCED'){again=true;}else{state=undefined;publish();}}finally{loading=false;if(again&&!closed&&listeners.size)queueMicrotask(()=>{void refresh();});}};
   return {...base,onUpdate:(listener:()=>void)=>{if(closed)fail('FENCED','Native watch is closed');listeners.add(listener);if(!stop){stop=base.subscribe(()=>{if(base.snapshot().stale)void refresh();});void refresh();}return ()=>{listeners.delete(listener);if(!listeners.size){stop?.();stop=undefined;state=undefined;}};},localReplicaResult:()=>state?.rows,localReplicaState:()=>state,close:()=>{if(closed)return;closed=true;stop?.();stop=undefined;listeners.clear();state=undefined;base.close();}};
@@ -208,8 +224,8 @@ export class SQLiteBrowserClient {
  reducer<T extends JsonValue=JsonValue,Args extends JsonValue=JsonValue>(ref:FunctionReference<Args,T>,args?:Args,options?:CallOptions):Promise<T>;
  async reducer<T extends JsonValue=JsonValue>(ref:FunctionReference,args:JsonValue={},_options:CallOptions={}):Promise<T|QueuedReducerOutcome>{if(this.publicTenant&&(_options.offline==='queue'||_options.optimistic?.length))throw new GonvexClientError('Public reducers are online-only',{code:'disconnected',path:ref.path,operation:'reducer'});const receipt=await this.invokeReducer(ref,args);return receipt.queuedOnly?{status:'queued',reducerId:receipt.commandId}:receipt.result as T;}
  prepareReducer(ref:Pick<FunctionReference,'path'>):Promise<void>{return this.rpc({method:'prepareReducer',path:ref.path});}
- query<T extends JsonValue>(ref:Pick<FunctionReference,'path'>,args:JsonValue={}):Promise<T>{return this.rpc({method:'query',path:ref.path,args});}
- action<T extends JsonValue>(ref:Pick<FunctionReference,'path'>,args:JsonValue={}):Promise<T>{return this.rpc({method:'action',path:ref.path,args});}
+ query<T extends JsonValue=JsonValue,Args extends JsonValue=JsonValue>(ref:FunctionReference<Args,T>,args:Args={} as Args,_options:CallOptions={}):Promise<T>{return this.rpc({method:'query',path:ref.path,args});}
+ action<T extends JsonValue=JsonValue,Args extends JsonValue=JsonValue>(ref:FunctionReference<Args,T>,args:Args={} as Args,_options:CallOptions={}):Promise<T>{return this.rpc({method:'action',path:ref.path,args});}
  budgets(){return this.ledger.snapshot();}
- close(){if(this.closed)return;this.closed=true;this.revision++;this.requests.close();this.controlQueries.close();this.entityView.close();this.reporter?.close();for(const cancel of this.authWaiters)cancel();this.authWaiters.clear();this.releaseChanges();for(const watch of this.watches.values()){watch.refs=0;watch.state={page:undefined,stale:true,version:watch.version+1};watch.unpin?.();watch.listeners.clear();}this.watches.clear();this.watchBytes=0;for(const cancel of this.tokenCancels.values())cancel();this.tokenCancels.clear();this.tokenRequests.clear();this.auth={};this.fetchToken=undefined;this.controlListeners.clear();this.authListeners.clear();this.credentialListeners.clear();this.rejectionListeners.clear();this.supportListeners.clear();this.fallbackListeners.clear();this.telemetryListeners.clear();this.controlsValue=undefined;this.pages.close();this.options.broker.close();}
+ close(){if(this.closed)return;this.closed=true;this.revision++;this.requests.close();this.memberships.close();this.controlQueries.close();this.entityView.close();this.reporter?.close();for(const cancel of this.authWaiters)cancel();this.authWaiters.clear();this.releaseChanges();for(const watch of this.watches.values()){watch.refs=0;watch.state={page:undefined,stale:true,version:watch.version+1};watch.unpin?.();watch.listeners.clear();}this.watches.clear();this.watchBytes=0;for(const cancel of this.tokenCancels.values())cancel();this.tokenCancels.clear();this.tokenRequests.clear();this.auth={};this.fetchToken=undefined;this.controlListeners.clear();this.authListeners.clear();this.credentialListeners.clear();this.rejectionListeners.clear();this.supportListeners.clear();this.fallbackListeners.clear();this.telemetryListeners.clear();this.controlsValue=undefined;this.pages.close();this.options.broker.close();}
 }

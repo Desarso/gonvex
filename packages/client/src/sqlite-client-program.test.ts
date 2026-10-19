@@ -13,7 +13,7 @@ import {SQLiteNativeReplicaReader} from './sqlite-native-replica-reader.js';
 import {SQLitePendingSnapshotReader} from './sqlite-pending-snapshot-reader.js';
 import {reducerOutboxScope} from './client-auth-wire.js';
 import {SQLiteClientProgram} from './sqlite-client-program.js';
-import {replicaRowsHashes,replicaSumDigest} from './replica-integrity.js';
+import {replicaRowsHashes,replicaSumDigest,replicaAggregateDigest} from './replica-integrity.js';
 import type {SQLiteOwnerProgramContext,SQLiteOwnerCaller} from './sqlite-owner-actor.js';
 import type {FunctionReference} from './index.js';
 class Socket {
@@ -42,9 +42,9 @@ async function fixture(autoEager=true,background=false,extraReferences:FunctionR
  const runtime=new PortableReducerRuntime({schema:{tasks:{key:'id',columns:{id:{type:'text',nullable:false},n:{type:'bigint',nullable:false}}}},artifactHash:'artifact',reducers:{'tasks.increment':reducer({args:schema.any(),result:schema.any(),run:async ctx=>{executions++;const row=await getRow<{id:string;n:number}>(ctx.db,'tasks','id','a');await ctx.db.update('tasks','a',{n:row!.n+1});return row!.n+1;}}),'tasks.addAll':reducer({args:schema.any(),result:schema.any(),run:async ctx=>{const rows=await ctx.db.select<{id:string;n:number}>({table:'tasks'}),n=rows.reduce((total,row)=>total+row.n,0)+1;await ctx.db.update('tasks','a',{n});return n;}})}});
  const program=new SQLiteClientProgram(owner,{artifactHash:'artifact',runtime,references:[...(background?[...refs,{...refs[0]!,path:'__local.backgroundTasks'}]:refs),...extraReferences],collections:autoEager?background?['__local.backgroundTasks','__local.tasks']:['__local.tasks']:[],offlineMaxAgeMs:5000});cleanup.push(async()=>{program.close();await lane;await new Promise(resolve=>setTimeout(resolve,0));raw.close();});
  const call=(input:unknown,tab='one',request?:string)=>program.call(input,caller(tab,request));
- async function authenticate(withholdFinal=false){
-  const response=await call(connect);if(!autoEager)await call({method:'watchReplica',path:'__local.tasks',args:{}});const socket=Socket.instances.at(-1)!;socket.open();await vi.waitFor(async()=>expect((await call({method:'controls'}) as any).tokens).toHaveLength(1));const request=(await call({method:'controls'}) as any).tokens[0];expect(hints).toContain('one');await call({method:'token',response:{...request,token:'opaque'}});await vi.waitFor(()=>expect(socket.sent.some(message=>message.type==='auth')).toBe(true));const auth=socket.sent.find(message=>message.type==='auth');socket.receive({type:'session.ready',capabilities:{replicaNativeRows:1,replicaWatermark:1}});socket.receive({type:'auth.result',id:auth.id,result:{artifactHash:'artifact',localIdentity:identity,replica:{protocolVersion:1,scope:'tenant',visibilityScope:'visible',epoch:'e'}}});await vi.waitFor(()=>expect(socket.sent.some(message=>message.type==='replica.open')).toBe(true));
-  const snapshot=Socket.instances.length===1?'base':'base-'+Socket.instances.length,open=socket.sent.find(message=>message.type==='replica.open'),row={id:'a',n:1},digest=await rowDigest(row);expect(open.digest).toBe('sum128-v1:00000000000000000000000000000000');socket.receive({type:'replica.watermark',revision:1});socket.receive({type:'replica.snapshotStart',id:open.id,snapshotId:snapshot,scope:'tenant',visibilityScope:'visible',cursor:{epoch:'e',revision:1},key:'id',digest,path:'__local.tasks'});socket.receive(new TextEncoder().encode(JSON.stringify({type:'replica.snapshotEncodedPage',id:open.id,snapshotId:snapshot,scope:'tenant',visibilityScope:'visible',cursor:{epoch:'e',revision:1},key:'id',sequence:0,last:!withholdFinal,canonicalRows:[JSON.stringify(row)],...(!withholdFinal?{digest}:{}),path:'__local.tasks'})).buffer);if(!withholdFinal)socket.receive({type:'replica.ready',id:open.id,cursor:{epoch:'e',revision:1},digest});await vi.waitFor(()=>expect(socket.sent.filter(message=>message.type==='replica.snapshotAck')).toHaveLength(1));return {socket,open,response};
+ async function authenticate(withholdFinal=false,setDigest=true){
+  const response=await call(connect);if(!autoEager)await call({method:'watchReplica',path:'__local.tasks',args:{}});const socket=Socket.instances.at(-1)!;socket.open();await vi.waitFor(async()=>expect((await call({method:'controls'}) as any).tokens).toHaveLength(1));const request=(await call({method:'controls'}) as any).tokens[0];expect(hints).toContain('one');await call({method:'token',response:{...request,token:'opaque'}});await vi.waitFor(()=>expect(socket.sent.some(message=>message.type==='auth')).toBe(true));const auth=socket.sent.find(message=>message.type==='auth');socket.receive({type:'session.ready',capabilities:{replicaNativeRows:1,replicaWatermark:1,...(setDigest?{replicaSetDigest:1}:{})}});socket.receive({type:'auth.result',id:auth.id,result:{artifactHash:'artifact',localIdentity:identity,replica:{protocolVersion:1,scope:'tenant',visibilityScope:'visible',epoch:'e'}}});await vi.waitFor(()=>expect(socket.sent.some(message=>message.type==='replica.open')).toBe(true));
+  const snapshot=Socket.instances.length===1?'base':'base-'+Socket.instances.length,open=socket.sent.find(message=>message.type==='replica.open'),row={id:'a',n:1},digest=setDigest?await rowDigest(row):replicaAggregateDigest(await replicaRowsHashes([row],'id'));expect(open.digest).toBe(setDigest?'sum128-v1:00000000000000000000000000000000':'xor1:'+'0'.repeat(64));socket.receive({type:'replica.watermark',revision:1});socket.receive({type:'replica.snapshotStart',id:open.id,snapshotId:snapshot,scope:'tenant',visibilityScope:'visible',cursor:{epoch:'e',revision:1},key:'id',digest,path:'__local.tasks'});socket.receive(new TextEncoder().encode(JSON.stringify({type:'replica.snapshotEncodedPage',id:open.id,snapshotId:snapshot,scope:'tenant',visibilityScope:'visible',cursor:{epoch:'e',revision:1},key:'id',sequence:0,last:!withholdFinal,canonicalRows:[JSON.stringify(row)],...(!withholdFinal?{digest}:{}),path:'__local.tasks'})).buffer);if(!withholdFinal)socket.receive({type:'replica.ready',id:open.id,cursor:{epoch:'e',revision:1},digest});await vi.waitFor(()=>expect(socket.sent.filter(message=>message.type==='replica.snapshotAck')).toHaveLength(1));return {socket,open,response};
  }
  return {owner,program,call,authenticate,engine,db,canonical,hints,get executions(){return executions;}};
 }
@@ -173,4 +173,36 @@ it('preserves the storage failure when a delivery wait is superseded by reconnec
  vi.spyOn(f.program as any,'recover').mockRejectedValueOnce(Object.assign(Error('Intent delivery admission changed'),{code:'FENCED'}));
  f.program['scheduleDelivery'](connection);await new Promise(resolve=>setTimeout(resolve,20));
  expect((await f.call({method:'controls'}) as any).failure).toEqual({code:'INVALID_ROW',message:'Original snapshot verification failure'});
+});
+
+it('negotiates the incremental digest and keeps legacy integrity for a native runtime without that capability',async()=>{
+ const f=await fixture();const {open}=await f.authenticate(false,false);
+ expect(open.digest).toBe('xor1:'+'0'.repeat(64));
+ const source:any=await f.call({method:'watchReplica',path:'__local.tasks',args:{}});
+ expect((await f.call({method:'replicaPage',signature:source.signature,limit:10}) as any).rows).toEqual([{id:'a',value:{id:'a',n:1}}]);
+ expect(await f.engine.integrity()).toBe('ok');
+});
+
+it('refuses cache reset offline and preserves both cached rows and the durable intent',async()=>{
+ const f=await fixture(),{socket}=await f.authenticate();socket.close();
+ const receipt=await f.call({method:'reducer',path:'tasks.increment',args:{},now:100},'one','offline-reset-command');
+ const before=await f.call({method:'entities',entity:'tasks',ids:['a']});
+ await expect(f.call({method:'resetLocalReplica',keepOutbox:false})).rejects.toMatchObject({code:'disconnected'});
+ expect(await f.call({method:'entities',entity:'tasks',ids:['a']})).toEqual(before);
+ expect(await f.call({method:'reducer',path:'tasks.increment',args:{},now:100},'one','offline-reset-command')).toEqual(receipt);
+ expect(f.executions).toBe(1);expect(await f.engine.integrity()).toBe('ok');
+});
+it('resets the canonical cache online while preserving unknown inflight commands and their original receipts',async()=>{
+ const f=await fixture();await f.authenticate();
+ const receipt=await f.call({method:'reducer',path:'tasks.increment',args:{},now:100},'one','reset-command');
+ const result=await f.call({method:'resetLocalReplica'});
+ expect(result).toMatchObject({discardedIntents:0,resubscribed:1});
+ expect(await f.owner.runOwner(0,()=>f.canonical.loadEntityRows('visible','tasks',['a']))).toEqual([]);
+ expect(await f.owner.runOwner(0,()=>f.db.getFirstAsync('SELECT 1 FROM gv_reducer_invocations WHERE command_id=?','reset-command'))).not.toBeNull();
+ expect((await f.owner.runOwner(0,()=>f.db.getFirstAsync<{n:number}>('SELECT count(*) n FROM gv_reducer_journal')))?.n).toBe(1);
+ expect(Socket.instances).toHaveLength(2);expect(f.executions).toBe(1);expect(receipt).toMatchObject({result:2});
+ expect(await f.owner.runOwner(0,()=>f.db.getFirstAsync('SELECT 1 FROM gv_native_feed_resets WHERE scope=?','visible'))).not.toBeNull();
+ await f.authenticate();
+ await vi.waitFor(async()=>expect(await f.owner.runOwner(0,()=>f.db.getFirstAsync('SELECT 1 FROM gv_native_feed_resets WHERE scope=?','visible'))).toBeNull());
+ expect(await f.engine.integrity()).toBe('ok');
 });
