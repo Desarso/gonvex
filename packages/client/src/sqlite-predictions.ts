@@ -126,7 +126,16 @@ export class SQLitePredictions {
   * durable and are replayed in bounded pages within the same owner operation. */
  async reset(ownerScope:string):Promise<void>{
   scope(ownerScope);await this.ready();await this.db.withTransactionAsync(async()=>{
-   await this.fence();for(const entity of Object.keys(this.tables))await this.db.runAsync(`DELETE FROM ${q(sqliteTableName(entity))} WHERE scope=?`,physical(ownerScope));
+   await this.fence();let after:string|undefined,changed=false;
+   // apply() atomically records a marker with every derived row, including
+   // deletions. Walk only those entity names, never every application table.
+   for(;;){
+    const entities=await this.db.getAllAsync<{entity:string}>('SELECT DISTINCT entity FROM gv_prediction_members WHERE scope=?'+(after===undefined?'':' AND entity>?')+' ORDER BY entity LIMIT 128',ownerScope,...(after===undefined?[]:[after]));
+    if(!entities.length)break;
+    for(const {entity} of entities){if(!Object.hasOwn(this.tables,entity))fail('INTENT_CORRUPT','Prediction marker has no generated entity');await this.db.runAsync(`DELETE FROM ${q(sqliteTableName(entity))} WHERE scope=?`,physical(ownerScope));changed=true;}
+    after=entities.at(-1)!.entity;
+   }
+   if(!changed)return;
    await this.db.runAsync('DELETE FROM gv_canonical_tombstones WHERE scope=?',physical(ownerScope));await this.db.runAsync('DELETE FROM gv_prediction_fields WHERE scope=?',ownerScope);await this.db.runAsync('DELETE FROM gv_prediction_members WHERE scope=?',ownerScope);await this.touch(ownerScope);
   });
  }
