@@ -22,7 +22,7 @@ type Options={
  runtime:Pick<PortableReducerRuntime,'execute'|'prepare'|'isPrepared'>;artifactHash:string;
  /** Captured by the worker from its authenticated session and admitted plans.
   * Application arguments never select an identity or grant replica coverage. */
- context(scope:string):Promise<SQLiteReducerContext>;
+ context(scope:string,includeCoverage?:boolean):Promise<SQLiteReducerContext>;
  settledReply?(input:SQLiteReducerInvocation,context:SQLiteReducerRecoveryContext):Promise<SQLiteReducerReceipt|undefined>;
 };
 const schema=`CREATE TABLE IF NOT EXISTS gv_reducer_invocations(scope TEXT NOT NULL,command_id TEXT NOT NULL,hash TEXT NOT NULL,receipt TEXT NOT NULL,PRIMARY KEY(scope,command_id)) WITHOUT ROWID;
@@ -42,7 +42,7 @@ export class SQLiteReducerCore {
    await this.options.journal.ready();await this.options.predictions.ready();await this.options.database.withTransactionAsync(async()=>{await this.options.engine.verifyOwner();await this.options.database.execAsync(schema);});
   })().catch(error=>{this.initialized=undefined;throw error;});}return this.initialized;
  }
- private async context(scope:string){const captured=await this.options.context(scope);sqlitePayloadBytes(captured,524288);if(typeof captured.intentScope!=='string'||!captured.intentScope||captured.intentScope.length>512)throw new TypeError('Invalid durable identity scope');return captured;}
+ private async context(scope:string,includeCoverage=true){const captured=await this.options.context(scope,includeCoverage);sqlitePayloadBytes(captured,524288);if(typeof captured.intentScope!=='string'||!captured.intentScope||captured.intentScope.length>512)throw new TypeError('Invalid durable identity scope');return captured;}
  private async stored(scope:string,command:string,hash:string,admission:SQLiteReducerContext,visibilityScope:string):Promise<SQLiteReducerReceipt|undefined>{
   const old=await this.options.database.getFirstAsync<{hash:string;receipt:string;context_hash?:string}>('SELECT i.hash,i.receipt,c.hash context_hash FROM gv_reducer_invocations i LEFT JOIN gv_reducer_reply_context c USING(scope,command_id) WHERE i.scope=? AND i.command_id=?',scope,command);
   if(!old)return;if(old.hash!==hash)fail('INTENT_CONFLICT','Reducer command reused with different invocation');decodedJSONBytes(old.receipt,131072);const receipt=JSON.parse(old.receipt) as SQLiteReducerReceipt;return old.context_hash===await digest(canonicalContext(visibilityScope,this.options.artifactHash,admission.identity))?receipt:{...receipt,result:null,queuedOnly:true};
@@ -125,9 +125,12 @@ export class SQLiteReducerCore {
   if(typeof scope!=='string'||!scope||scope.length>512||scope.includes('\u0000'))throw new TypeError('Invalid reducer scope');
   await this.ready();let result!:{replayed:number;retained:number;unavailable:number;generation:{epoch:number;sequence:number}};
   await this.options.database.withTransactionAsync(async()=>{
-   await this.options.engine.verifyOwner();const before=await this.context(scope);await authority?.();
-   const captured=await this.context(scope);if(captured.intentScope!==before.intentScope)fail('FENCED','Rebase durable identity changed');
-   const pending=await this.options.journal.summary(captured.intentScope),hasPredictions=await this.options.database.getFirstAsync('SELECT 1 FROM gv_prediction_members WHERE scope=? LIMIT 1',scope);
+   await this.options.engine.verifyOwner();const before=await this.context(scope,false);await authority?.();
+   // Snapshot publication still verifies admission on both sides of authority.
+   // Coverage is only consumed when a durable intent might need replay. During
+   // ordinary first sync there is no reason to aggregate every window column.
+   const pending=await this.options.journal.summary(before.intentScope),captured=await this.context(scope,pending.count>0);if(captured.intentScope!==before.intentScope)fail('FENCED','Rebase durable identity changed');
+   const hasPredictions=await this.options.database.getFirstAsync('SELECT 1 FROM gv_prediction_members WHERE scope=? LIMIT 1',scope);
    if(pending.count||hasPredictions)await this.options.predictions.reset(scope);let after=0,replayed=0,retained=0,unavailable=0;
    for(;pending.count;){
     const page=await this.options.journal.page(captured.intentScope,after,8);

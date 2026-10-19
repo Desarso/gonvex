@@ -174,6 +174,43 @@ it('does not reset every typed prediction table during first sync when there are
  const f=await fixture();try{const reset=vi.spyOn(f.predictions,'reset');expect(await f.core.rebase('s',async()=>{await f.canonical.applyTransaction({cursor:{epoch:'e',revision:2},changes:[{entity:'tasks',id:'a',operation:'update',newValue:{id:'a',n:2}}]},{entities:{},liveQueries:{}},'s');})).toMatchObject({replayed:0,retained:0});expect(reset).not.toHaveBeenCalled();expect((await f.canonical.loadEntityRows('s','tasks',['a']))[0].row.n).toBe(2);}finally{f.sql.close();}
 });
 
+it('publishes first-sync authority without capturing unused reducer read coverage',async()=>{
+ const f=await fixture();try{
+  const modes:boolean[]=[];
+  const core=new SQLiteReducerCore({...f.options,async context(scope,includeCoverage=true){modes.push(includeCoverage);if(includeCoverage)throw Error('No reducer requires coverage');return {...await f.options.context(scope),coverage:{}};}});
+  expect(await core.rebase('s',async()=>{await f.canonical.applyTransaction({cursor:{epoch:'e',revision:2},changes:[{entity:'tasks',id:'a',operation:'update',newValue:{id:'a',n:10}}]},{entities:{},liveQueries:{}},'s');})).toMatchObject({replayed:0,retained:0});
+  expect(modes).toEqual([false,false]);expect((await f.canonical.loadEntityRows('s','tasks',['a']))[0].row.n).toBe(10);
+ }finally{f.sql.close();}
+});
+
+it('captures coverage after authority when an unsent prediction still needs replay',async()=>{
+ const f=await fixture();try{
+  await f.core.invoke({scope:'s',path:'increment',commandId:'coverage-replay',now:100,args:{id:'a'}});
+  const modes:boolean[]=[];let published=false;
+  const core=new SQLiteReducerCore({...f.options,async context(scope,includeCoverage=true){modes.push(includeCoverage);if(includeCoverage)expect(published).toBe(true);return {...await f.options.context(scope),...(!includeCoverage?{coverage:{}}:{})};}});
+  expect(await core.rebase('s',async()=>{await f.canonical.applyTransaction({cursor:{epoch:'e',revision:2},changes:[{entity:'tasks',id:'a',operation:'update',newValue:{id:'a',n:10}}]},{entities:{},liveQueries:{}},'s');published=true;})).toMatchObject({replayed:1});
+  expect(modes).toEqual([false,true]);expect((await f.predictions.entities('s','tasks',['a']))[0].row.n).toBe(11);
+ }finally{f.sql.close();}
+});
+
+it('clears acknowledged predictions without building coverage for an empty remaining journal',async()=>{
+ const f=await fixture();try{
+  const receipt=await f.core.invoke({scope:'s',path:'increment',commandId:'coverage-ack',now:100,args:{id:'a'}});
+  const core=new SQLiteReducerCore({...f.options,async context(scope,includeCoverage=true){if(includeCoverage)throw Error('Acknowledged reducer requires no coverage');return {...await f.options.context(scope),coverage:{}};}});
+  expect(await core.rebase('s',async()=>{await f.journal.acknowledge('s',[receipt.intentId]);await f.canonical.applyTransaction({cursor:{epoch:'e',revision:2},changes:[{entity:'tasks',id:'a',operation:'update',newValue:{id:'a',n:20}}]},{entities:{},liveQueries:{}},'s');})).toMatchObject({replayed:0,retained:0});
+  expect((await f.predictions.entities('s','tasks',['a']))[0].row.n).toBe(20);expect((await f.journal.summary('s')).count).toBe(0);
+ }finally{f.sql.close();}
+});
+
+it('rolls authority back when identity changes even with no prediction coverage to capture',async()=>{
+ const f=await fixture();try{
+  let changed=false;const generation=await f.engine.verifyOwner();
+  const core=new SQLiteReducerCore({...f.options,async context(scope){return {...await f.options.context(scope),coverage:{},intentScope:changed?'other-account':'s'};}});
+  await expect(core.rebase('s',async()=>{await f.canonical.applyTransaction({cursor:{epoch:'e',revision:2},changes:[{entity:'tasks',id:'a',operation:'update',newValue:{id:'a',n:20}}]},{entities:{},liveQueries:{}},'s');changed=true;})).rejects.toMatchObject({code:'FENCED'});
+  expect((await f.canonical.loadEntityRows('s','tasks',['a']))[0].row.n).toBe(1);expect(await f.engine.verifyOwner()).toEqual(generation);
+ }finally{f.sql.close();}
+});
+
 it('keeps prepared commands queueable across an artifact or permission change without exposing stale predictions or replies',async()=>{
  const before=await fixture(),after=await fixture();try{
   const input={scope:'s',path:'increment',commandId:'updated-artifact',now:100,args:{id:'a'}};let prepared!:SQLitePreparedReducer;await before.core.invoke(input,async(_input,_context,value)=>{prepared=structuredClone(value);});

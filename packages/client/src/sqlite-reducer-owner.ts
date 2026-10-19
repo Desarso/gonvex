@@ -10,7 +10,7 @@ export type SQLiteReducerOwnerOptions={
  runtime:Pick<PortableReducerRuntime,'prepare'|'execute'|'isPrepared'>;artifactHash:string;
  /** Owned by the authenticated worker session registry, never by call args. */
  resolveTab(tabID:string):SQLiteTabAdmission;
- context(scope:string):Promise<SQLiteReducerContext>;
+ context(scope:string,includeCoverage?:boolean):Promise<SQLiteReducerContext>;
  settledReply?(input:SQLiteReducerInvocation,context:SQLiteReducerRecoveryContext):Promise<SQLiteReducerReceipt|undefined>;
  /** Independent local recovery durability, before the SQLite intent commits. */
  persistIntent?(input:Readonly<SQLiteReducerInvocation>,context:SQLiteReducerRecoveryContext,prepared:SQLitePreparedReducer):Promise<void>;

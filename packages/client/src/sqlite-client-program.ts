@@ -65,7 +65,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
   this.sessions=new SQLiteWorkerSessions({artifactHash:binding.artifactHash,offlineMaxAgeMs:binding.offlineMaxAgeMs,database:owner.database,canonical:owner.canonical,safety:this.safety,runOwner:owner.runOwner,fence:()=>owner.engine.verifyOwner()});
   this.windows=new SQLiteWindowStore(owner.database,()=>owner.engine.verifyOwner());this.liveWindows=new SQLiteLiveWindows(owner,binding.artifactHash);void owner.runOwner(0,()=>this.liveWindows.ready()).catch(()=>{});
   this.tokens=new SQLiteWorkerTokens({recipient:(id,key,exclude)=>[...(this.connections.get(id)?.tabs??[])].find(tab=>tab!==exclude&&this.tabs.get(tab)===id&&this.connections.get(id)?.identityKey===key),eligible:(tab,id,key)=>this.tabs.get(tab)===id&&this.connections.get(id)?.identityKey===key,notifyTab:tab=>owner.notifyTab(tab)});
-  this.reducer=new SQLiteReducerOwner(owner,{runtime:binding.runtime,artifactHash:binding.artifactHash,resolveTab:tab=>this.sessions.resolveTab(tab,true),context:scope=>this.context(scope)});
+  this.reducer=new SQLiteReducerOwner(owner,{runtime:binding.runtime,artifactHash:binding.artifactHash,resolveTab:tab=>this.sessions.resolveTab(tab,true),context:(scope,includeCoverage)=>this.context(scope,includeCoverage)});
   this.legacy=new SQLiteLegacyBootstrap({owner,journal:this.reducer.journal,artifactHash:binding.artifactHash,replicaName:binding.legacyStorage?.replicaName??'gonvex-local-replica',outboxName:binding.legacyStorage?.outboxName??'gonvex-outbox'});
   this.ledger.register('native-function-catalog',()=>({name:'native-function-catalog',bytes:this.catalogBytes,entries:this.references.size,maxBytes:2097152,maxEntries:4096,evictions:0,refusals:0}));
   this.ledger.register('native-source-interests',()=>({name:'native-source-interests',bytes:[...this.connections.values()].reduce((sum,value)=>sum+value.sourceBytes,0),entries:[...this.connections.values()].reduce((sum,value)=>sum+value.sources.size,0),maxBytes:2097152,maxEntries:2048,evictions:0,refusals:0}));
@@ -89,10 +89,11 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
   if(connection.admissionKey?.generation!==admitted.generation){const encoded=stable({scope:admitted.scope,identity:admitted.identity as JsonValue,artifact:this.binding.artifactHash}),release=this.transient.reserve(encoded.length*8+1024),value=digest(encoded).finally(release);connection.admissionKey={generation:admitted.generation,value};void value.catch(()=>{if(connection.admissionKey?.value===value)connection.admissionKey=undefined;});}
   const key=await connection.admissionKey!.value;if(this.admission(connection)?.generation!==admitted.generation)fail('FENCED','Native admission changed');return key;
  }
- private async context(scope:string){
+ private async context(scope:string,includeCoverage=true){
   for(const connection of this.connections.values()){
    const admitted=this.admission(connection);if(admitted?.scope!==scope)continue;const saved=await this.owner.canonical.loadSession(admitted.intentScope);if(!saved||saved.directive.visibilityScope!==scope)continue;
    const coverage:Record<string,ReadCoverage[string]>={};
+   if(!includeCoverage)return {intentScope:admitted.intentScope,identity:admitted.identity,coverage};
    const rows=await this.owner.database.getAllAsync<{entity:string;key:string;columns:string}>(`SELECT json_extract(g.header,'$.entity') entity,json_extract(g.header,'$.key') key,json_group_array(DISTINCT c.value) columns
     FROM gv_windows w JOIN gv_window_generations g USING(scope,signature,generation),json_each(g.header,'$.columns') c
     WHERE w.scope=? AND json_extract(g.header,'$.entityCoverage')='complete' AND json_extract(g.header,'$.completeness')='complete'
