@@ -48,7 +48,12 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
  register(input:SQLiteFeedSource){
   sqlitePayloadBytes(input,16384);if(input.completeEntity!==undefined&&input.completeEntity!==true||!input.id||input.id.length>256||!input.signature||input.signature.length>4096||!input.path||input.path.length>1024||!Object.hasOwn(this.options.owner.engine.schema,input.entity)||this.options.owner.engine.schema[input.entity]!.key!==input.key)throw new TypeError('Invalid generated native source');
   if(input.columns!==undefined&&(!Array.isArray(input.columns)||input.columns.length>128||new Set(input.columns).size!==input.columns.length||!input.columns.includes(input.key)||input.columns.some(column=>typeof column!=='string'||!Object.hasOwn(this.options.owner.engine.schema[input.entity]!.fields,column))))throw new TypeError('Invalid generated source projection');
-  const owned:SQLiteFeedSource={id:input.id,signature:input.signature,entity:input.entity,key:input.key,path:input.path,...(input.completeEntity?{completeEntity:true}:{}),...(input.columns?{columns:[...input.columns]}:{})},bytes=sqlitePayloadBytes(owned,16384)+256;
+  // Column names belong to the immutable generated schema. Retain canonical
+  // references, rather than another charged copy of every column string.
+  const names=new Map(Object.keys(this.options.owner.engine.schema[input.entity]!.fields).map(name=>[name,name]));
+  const columns=input.columns?Object.freeze(input.columns.map(name=>names.get(name)!)):undefined;
+  const descriptor={id:input.id,signature:input.signature,entity:input.entity,key:input.key,path:input.path,...(input.completeEntity?{completeEntity:true as const}: {})};
+  const owned:SQLiteFeedSource={...descriptor,...(columns?{columns}:{})},bytes=sqlitePayloadBytes(descriptor,16384)+256+(columns?.length??0)*8;
   if(this.sources.has(input.id))throw new TypeError('Native source already registered');if(this.sources.size>=256||this.sourceBytes+this.startBytes+this.closingBytes+bytes>262144)fail('BUDGET','Native source registry exceeded budget');
   this.sources.set(input.id,{...owned,deferredKey:crypto.randomUUID(),bytes,opening:true});this.sourceBytes+=bytes;
  }

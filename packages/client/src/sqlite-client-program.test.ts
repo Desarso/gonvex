@@ -244,12 +244,12 @@ it('answers a hash request with a fresh snapshot open on the same admitted socke
  expect((await f.call({method:'controls'}) as any).failure).toBeNull();
 });
 
-it('prepares generated disk dependencies without requiring a mounted replica consumer',async()=>{
- const f=await fixture(false);await f.call(connect);
+it('demands generated disk sources on intent while code preparation opens no broad subscriptions',async()=>{
+ const f=await fixture(false),{socket}=await f.authenticate();socket.close();f.program.detachTab('one');await f.call(connect);
  expect(f.program.budgets().find(value=>value.name==='native-source-interests')?.entries).toBe(0);
  await f.call({method:'prepareReducer',path:'tasks.increment'});
- expect(f.program.budgets().find(value=>value.name==='native-source-interests')?.entries).toBe(1);
- const {socket}=await f.authenticate();socket.close();
+ expect(f.program.budgets().find(value=>value.name==='native-source-interests')?.entries).toBe(0);
  const receipt:any=await f.call({method:'reducer',path:'tasks.increment',args:{},now:100},'one','prepared-offline');
  expect(receipt.result).toBe(2);expect(receipt.queuedOnly).toBeUndefined();
+ expect(f.program.budgets().find(value=>value.name==='native-source-interests')?.entries).toBe(1);
 });

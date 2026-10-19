@@ -156,7 +156,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
    void this.legacy.step(admitted.intentScope,session).then(result=>{if(!result.verified)this.scheduleMigration(connection,100);},error=>{if(this.closed||this.connections.get(connection.id)!==connection)return;connection.failure={code:String((error as any)?.code??'SQLITE'),message:String((error as any)?.message??error).slice(0,512)};this.notify(connection);});
   },delay);
  }
- private async prepareReducer(connection:Connection,ref:NativeFunctionReference){
+ private async demandReducerDependencies(connection:Connection,ref:NativeFunctionReference){
   if(ref.localExecution!==1||connection.controlOnly||connection.public)return;
   await this.reducer.core.prepare(ref.path);
   const encoded=ref.localDependencyTables??'[]';sqlitePayloadBytes(encoded,32768);const tables:unknown=JSON.parse(encoded);if(!Array.isArray(tables)||tables.length>128||tables.some(entity=>typeof entity!=='string'||!entity||entity.length>256))fail('INVALID_ROW','Invalid generated reducer dependencies');
@@ -186,7 +186,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
    const bytes=sqlitePayloadBytes({path:ref.path,args},16384)+1024;if(connection.sources.size>=256||connection.sourceBytes+bytes+(tab?192:0)>262144)fail('BUDGET','Native subscription allowance exceeded');
    source={id:'source:'+signature,signature,ref,args:JSON.parse(encoded),tabs:new Set(),leases:new Map(),eager,bytes};
    const completeEntity=!Object.keys(ref.replica.equalFilters??{}).length&&!ref.replica.excludeWhenSet?.length;
-   connection.feed.register({id:source.id,signature,entity:ref.replica.table,key:ref.replica.key,path:ref.path,...(completeEntity?{completeEntity:true}:{}),...(ref.replica.columns?{columns:[...ref.replica.columns]}:{})});
+   connection.feed.register({id:source.id,signature,entity:ref.replica.table,key:ref.replica.key,path:ref.path,...(completeEntity?{completeEntity:true}:{}),...(ref.replica.columns?{columns:ref.replica.columns}:{})});
    connection.sources.set(signature,source);connection.sourceBytes+=bytes;
    if(connection.client.localSessionState()==='authenticated')await this.openSource(connection,source);
   }
@@ -334,7 +334,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
    case 'replicaPage':{
     text(input.signature,128);const source=connection.sources.get(input.signature);if(!source||!source.eager&&!source.tabs.has(caller.tabID))fail('FENCED','Tab does not own that source');const admission=this.checkCaller(caller,connection);return this.readCommitted(connection,admission,caller,async()=>{this.checkCaller(caller,connection,admission.generation);const result=await this.owner.reader.window({scope:admission.scope,signature:source.signature,offset:input.offset,limit:input.limit,generation:input.generation,expected:input.expected});this.checkCaller(caller,connection,admission.generation);if(connection.sources.get(source.signature)!==source||!source.eager&&!source.tabs.has(caller.tabID))fail('FENCED','Native source was detached');return result??null;});
    }
-   case 'prepareReducer':{const ref=this.ref(input.path,'reducer');await this.prepareReducer(connection,ref);if(caller.signal.aborted||this.tabs.get(caller.tabID)!==connection.id)fail('FENCED','Reducer preparation caller detached');return null;}
+   case 'prepareReducer':{const ref=this.ref(input.path,'reducer');if(ref.localExecution===1)await this.reducer.core.prepare(ref.path);if(caller.signal.aborted||this.tabs.get(caller.tabID)!==connection.id)fail('FENCED','Reducer preparation caller detached');return null;}
    case 'localLivePage':{
     text(input.signature,128);const source=connection.sources.get(input.signature),ref=this.ref(input.path,'query');
     if(!source?.tabs.has(caller.tabID)||!source.ref.replica||!ref.live?.plan||ref.live.entity!==source.ref.replica.table)fail('FENCED','Local query has no admitted collection');
@@ -368,7 +368,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
      const page=await this.reducer.predictions.page(admitted.scope,lowered.plan,lowered.allowLocalInserts);owns();return {...page,generation:header.generation};
     });
    }
-   case 'reducer':{const ref=this.ref(input.path,'reducer');if(ref.scope==='control'||connection.public){const version=connection.authVersion,result=await connection.client.callOwnerReducer(ref,input.args??{},caller.requestID);if(caller.signal.aborted||this.tabs.get(caller.tabID)!==connection.id||version!==connection.authVersion)fail('FENCED','Control caller session changed');sqlitePayloadBytes(result,131072);return {commandId:caller.requestID,result};}if(input.expectedAdmissionKey!==undefined&&input.expectedAdmissionKey!==await this.admissionKey(connection))fail('FENCED','Reducer was issued under an older admission');await this.recover(connection);if(ref.localExecution!==1)fail('INVALID_ROW','Native reducer has no generated portable body');await this.prepareReducer(connection,ref);let receipt;try{receipt=await this.reducer.invoke({path:ref.path,args:input.args??{},now:input.now,intentEntropy:input.intentEntropy},caller);}catch(error){connection.recovered=false;throw error;}this.scheduleDelivery(connection);return receipt;}
+   case 'reducer':{const ref=this.ref(input.path,'reducer');if(ref.scope==='control'||connection.public){const version=connection.authVersion,result=await connection.client.callOwnerReducer(ref,input.args??{},caller.requestID);if(caller.signal.aborted||this.tabs.get(caller.tabID)!==connection.id||version!==connection.authVersion)fail('FENCED','Control caller session changed');sqlitePayloadBytes(result,131072);return {commandId:caller.requestID,result};}if(input.expectedAdmissionKey!==undefined&&input.expectedAdmissionKey!==await this.admissionKey(connection))fail('FENCED','Reducer was issued under an older admission');await this.recover(connection);if(ref.localExecution!==1)fail('INVALID_ROW','Native reducer has no generated portable body');await this.demandReducerDependencies(connection,ref);let receipt;try{receipt=await this.reducer.invoke({path:ref.path,args:input.args??{},now:input.now,intentEntropy:input.intentEntropy},caller);}catch(error){connection.recovered=false;throw error;}this.scheduleDelivery(connection);return receipt;}
    case 'query':case 'action':{
     const ref=this.ref(input.path,input.method==='query'?'query':'action');if(ref.delivery==='replica'||ref.delivery==='live'&&ref.scope!=='control')fail('INVALID_ROW','Reactive reads require bounded native subscriptions');const version=connection.authVersion;if(caller.signal.aborted||this.tabs.get(caller.tabID)!==connection.id)fail('FENCED','Remote caller detached');const result=await (input.method==='query'?connection.client.query(ref,input.args??{}):connection.client.action(ref,input.args??{}));if(caller.signal.aborted||this.tabs.get(caller.tabID)!==connection.id||version!==connection.authVersion)fail('FENCED','Remote caller session changed');sqlitePayloadBytes(result,131072);return result;
    }

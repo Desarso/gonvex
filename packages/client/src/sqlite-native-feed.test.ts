@@ -208,3 +208,12 @@ it('verifies resumed ready only after its changed membership publishes at the te
  expect(f.failures).toEqual([]);expect((await f.canonical.loadEntityRows('visible','tasks',['a','b'])).map(entry=>entry.row)).toEqual([changed,rows[1]]);
  expect((await new SQLiteWindowStore(f.db,()=>f.engine.verifyOwner()).header('visible','tasks-all'))?.header.aggregateDigest).toBe(await digest([changed,rows[1]]));
 });
+
+it('accounts shared schema column names as references under the unchanged source registry cap',()=>{
+ const fields=Object.fromEntries(['id',...Array.from({length:100},(_,n)=>'shared_generated_column_name_'+n)].map(name=>[name,{kind:'text'}]));
+ const owner={database:{},engine:{schema:{tasks:{key:'id',fields,indexes:[]}}},runOwner:async()=>undefined} as unknown as SQLiteOwnerProgramContext;
+ const feed=new SQLiteNativeFeed({owner,sessions:{} as SQLiteWorkerSessions,connection:'metadata',artifactHash:'artifact',send:()=>{},advanceWatermark:()=>{},failed:()=>{}});
+ try{for(let n=0;n<100;n++)feed.register({id:'source-'+n,signature:'signature-'+n,path:'tasks/ref-'+n,entity:'tasks',key:'id',columns:Object.keys(fields)});
+  expect(feed.stats().sources).toBe(100);expect(feed.stats().sourceBytes).toBeLessThan(262144);
+ }finally{feed.close();}
+});
