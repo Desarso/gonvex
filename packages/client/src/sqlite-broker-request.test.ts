@@ -151,3 +151,27 @@ it('fails unsupported startup without selecting a different storage engine',asyn
  try{await vi.waitFor(()=>expect(broker.stats()).toMatchObject({state:'unavailable',adapter:'sqlite'}),{timeout:3000});expect(workers.map(worker=>worker.kind)).toEqual(['sqlite']);expect(workers[0]?.terminated).toBe(true);}
  finally{broker.close();vi.unstubAllGlobals();if(originalDocument)vi.stubGlobal('document',originalDocument);if(originalNavigator)vi.stubGlobal('navigator',originalNavigator);for(const channel of channels)channel.close();}
 });
+
+it('retries one capacity-blocked request on completion instead of waiting for the heartbeat',async()=>{
+ const broker=client() as any;broker.owner={id:'test',token:'owner',epoch:1,seen:Date.now()};broker.send=vi.fn();
+ const blocked=broker.request('clientCall',{method:'replicaPage',signature:'grid'}),first=broker.send.mock.calls[0][0];
+ const active=broker.request('clientCall',{method:'controls'}),second=broker.send.mock.calls[1][0];
+ broker.receiveReply({protocol:2,to:'test',token:'owner',id:first.id,error:{code:'BUSY',message:'full'}});
+ await Promise.resolve();expect(broker.send).toHaveBeenCalledTimes(2);
+ broker.receiveReply({protocol:2,to:'test',token:'owner',id:second.id,value:'ready'});await expect(active).resolves.toBe('ready');
+ expect(broker.send).toHaveBeenCalledTimes(3);expect(broker.send.mock.calls[2][0]).toBe(first);
+ broker.receiveReply({protocol:2,to:'test',token:'owner',id:first.id,value:'cached rows'});await expect(blocked).resolves.toBe('cached rows');
+ expect(broker.stats()).toMatchObject({pending:0,pendingBytes:0});
+});
+
+it('uses each fresh owner progress hint for at most one blocked retry without spinning on BUSY or duplicates',async()=>{
+ const broker=client() as any;broker.owner={id:'test',token:'owner',epoch:1,seen:Date.now()};broker.options={};broker.acknowledgeChange=vi.fn();broker.send=vi.fn();
+ const pending=broker.request('clientCall',{method:'replicaPage',signature:'grid'}),call=broker.send.mock.calls[0][0];
+ const busy=()=>broker.receiveReply({protocol:2,to:'test',token:'owner',id:call.id,error:{code:'BUSY',message:'full'}});
+ busy();await Promise.resolve();expect(broker.send).toHaveBeenCalledTimes(1);
+ const hint={protocol:2,type:'change',scope:'s',sequence:1,epoch:1};broker.receiveControl(hint);await Promise.resolve();expect(broker.send).toHaveBeenCalledTimes(2);
+ busy();broker.receiveControl(hint);await Promise.resolve();expect(broker.send).toHaveBeenCalledTimes(2);
+ broker.receiveControl({...hint,sequence:2});await Promise.resolve();expect(broker.send).toHaveBeenCalledTimes(3);
+ busy();await Promise.resolve();await Promise.resolve();expect(broker.send).toHaveBeenCalledTimes(3);
+ broker.receiveReply({protocol:2,to:'test',token:'owner',id:call.id,value:'rows'});await expect(pending).resolves.toBe('rows');
+});

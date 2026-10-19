@@ -21,7 +21,7 @@ export type SQLiteBrokerOptions = {
 };
 type Owner = { id: string; token: string; epoch: number; seen: number; opening?: boolean };
 type Generation = { token: string; worker: Worker; adapter:'sqlite';ready: boolean; epoch: number; release(): void; channel: BroadcastChannel; lastProgress: number;announced?:boolean };
-type Call = { promise?:Promise<any>;id: string; op: string; args: unknown; bytes: number; lastSent: number; replay:boolean;sentToken?:string; timer: ReturnType<typeof setTimeout>; resolve(value: any): void; reject(error: unknown): void };
+type Call = { promise?:Promise<any>;id: string; op: string; args: unknown; bytes: number; lastSent: number; busy?:boolean; replay:boolean;sentToken?:string; timer: ReturnType<typeof setTimeout>; resolve(value: any): void; reject(error: unknown): void };
 type WorkerCall = { generation: Generation; resolve(value: any): void; reject(error: unknown): void };
 export class SQLiteBrokerError extends Error {
   constructor(readonly code: string, message: string, readonly outcome: 'rejected' | 'unknown' = 'rejected') { super(message); this.name = 'SQLiteBrokerError'; }
@@ -140,6 +140,7 @@ export class SQLiteReplicaBroker {
         while(this.lastChanges.size>=128||this.lastChangeBytes+bytes>262144){const key=this.lastChanges.keys().next().value!;this.lastChangeBytes-=this.lastChanges.get(key)!.bytes;this.lastChanges.delete(key);}
         this.lastChanges.set(changeKey,{epoch:m.epoch,sequence:m.sequence,bytes,...(Number.isSafeInteger(m.notification)?{notification:m.notification}:{})});this.lastChangeBytes+=bytes;
       }
+      this.wakeBlocked();
       try { this.options.onChange?.(m.scope, m.sequence,m.reset===true); } catch { /* Observer only. */ }
       for(const listener of this.changeListeners)try{listener(m.scope,m.sequence,m.reset===true);}catch{/* Observer only. */}
       }finally{this.acknowledgeChange(m);}
@@ -310,7 +311,7 @@ export class SQLiteReplicaBroker {
   private send(call: Call) {
     if (!this.owner || this.owner.opening || this.closed) return;
     if(!call.replay&&call.sentToken){if(call.sentToken!==this.owner.token)this.rejectSingleShot(call);return;}
-    call.sentToken=this.owner.token;call.lastSent = Date.now();
+    call.busy=false;call.sentToken=this.owner.token;call.lastSent = Date.now();
     const m = { type: 'request', protocol, from: this.tabID, token: this.owner.token, id: call.id, op: call.op, args: call.args };
     if (this.owner.id === this.tabID) { void this.serve(m); return; }
     if (this.direct?.ready && this.direct.token === this.owner.token) { const outgoing=sqliteTransferRequest(call.op,call.args);this.direct.port.postMessage({...m,args:outgoing.args},outgoing.transfer); }
@@ -347,15 +348,24 @@ export class SQLiteReplicaBroker {
     } catch (e) { if (this.generation === g) this.reply(m, undefined, e); }
     finally { const retained = this.inflight.get(key); if (retained?.generation === g) { this.inflightBytes -= retained.bytes; this.inflight.delete(key); } }
   }
+  private wakeBlocked() {
+    if(this.closed||this.failed)return;
+    let waiting=false;for(const call of this.pending.values())if(call.busy){waiting=true;break;}if(!waiting)return;
+    // Completion/progress gives one waiting request a capacity opportunity.
+    // BUSY alone never schedules retries, and the heartbeat remains recovery
+    // for lost messages or an owner that has stopped reporting progress.
+    queueMicrotask(()=>{if(this.closed||this.failed)return;for(const call of this.pending.values())if(call.busy){this.send(call);break;}});
+  }
   private receiveReply(m: any) {
     if (m?.protocol !== protocol || m.to !== this.tabID) return;
     if(m.type==='change'||m.type==='tab-pong'){if(m.token!==this.owner?.token)return;this.noteOwner(m.sentAt);if(m.type==='change')this.receiveControl(m);else this.heartbeatToken=undefined;return;}
     const call = this.pending.get(m.id); if (!call) return;
     if (m.token !== this.owner?.token) return;this.noteOwner(m.sentAt);
-    if (m.error?.code === 'BUSY' || m.error?.code === 'FENCED') { if(!call.replay){this.rejectSingleShot(call);return;}call.lastSent = Date.now(); return; }
+    if (m.error?.code === 'BUSY' || m.error?.code === 'FENCED') { if(!call.replay){this.rejectSingleShot(call);return;}call.busy=m.error.code==='BUSY';call.lastSent = Date.now(); return; }
     this.pending.delete(call.id); this.pendingBytes -= call.bytes; clearTimeout(call.timer);
     if (m.error) call.reject(error(m.error.code, m.error.message, m.error.outcome));
     else call.resolve(m.value);
+    this.wakeBlocked();
   }
   request<T = unknown>(op: string, args: unknown = {}, timeoutMs = 90000,requestID?:string): Promise<T> {
     if (this.closed || this.failed) return Promise.reject(error('UNAVAILABLE', 'Storage is unavailable'));
