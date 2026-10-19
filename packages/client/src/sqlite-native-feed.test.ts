@@ -235,3 +235,58 @@ it('admits the declared source certificate burst plus a watermark within unchang
  for(let n=0;n<255;n++){const id='small-'+n;f.feed.register({id,signature:'tasks-all',entity:'tasks',key:'id',path:'tasks/all'});f.feed.frame({type:'replica.ready',id,cursor:cursor(10),digest:certificate},1);}
  await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();expect(f.failures).toEqual([]);expect(f.feed.stats().opening).toBe(0);expect(await f.engine.integrity()).toBe('ok');
 });
+
+it('keeps a committed cohort readable when a verified warm snapshot loses its terminal watermark',async()=>{
+ const f=await fixture();await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();
+ const next=[changed,rows[1]],nextDigest=await digest(next);
+ f.feed.frame({type:'replica.snapshotStart',id:'source',snapshotId:'warm',scope:'tenant',visibilityScope:'visible',cursor:cursor(12),key:'id',digest:nextDigest,path:'tasks/all'},1);
+ f.feed.binary(new TextEncoder().encode(JSON.stringify({type:'replica.snapshotEncodedPage',id:'source',snapshotId:'warm',scope:'tenant',visibilityScope:'visible',cursor:cursor(12),key:'id',sequence:0,last:true,canonicalRows:next.map(stable),digest:nextDigest,path:'tasks/all'})).buffer,1);
+ f.feed.frame({type:'replica.ready',id:'source',cursor:cursor(12),digest:nextDigest},1);
+ await vi.waitFor(()=>{expect(f.sends).toHaveLength(2);expect(f.feed.stats().opening).toBe(0);});
+ await f.runOwner(0,()=>f.db.withTransactionAsync(()=>f.feed.assertCommittedReadable({scope:'visible',epoch:'e'})));
+ expect((await f.canonical.loadEntityRows('visible','tasks',['a','b'])).map(entry=>entry.row)).toEqual(rows);
+ f.feed.disconnected();await f.feed.assertReadable({scope:'visible',epoch:'e'});
+ expect((await f.canonical.loadEntityRows('visible','tasks',['a','b'])).map(entry=>entry.row)).toEqual(rows);
+ expect((await new SQLiteWindowStore(f.db,()=>f.engine.verifyOwner()).header('visible','tasks-all'))?.header.cursor).toEqual(cursor(10));
+ expect(f.failures).toEqual([]);expect(await f.engine.integrity()).toBe('ok');
+});
+
+it('publishes a warm snapshot, later canonical changes and membership certificates in one terminal cohort',async()=>{
+ const f=await fixture();await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();
+ const next=[changed,rows[1]],nextDigest=await digest(next),later={...changed,n:14},laterDigest=await digest([later,rows[1]]);
+ f.feed.frame({type:'replica.snapshotStart',id:'source',snapshotId:'warm',scope:'tenant',visibilityScope:'visible',cursor:cursor(12),key:'id',digest:nextDigest,path:'tasks/all'},1);
+ f.feed.binary(new TextEncoder().encode(JSON.stringify({type:'replica.snapshotEncodedPage',id:'source',snapshotId:'warm',scope:'tenant',visibilityScope:'visible',cursor:cursor(12),key:'id',sequence:0,last:true,canonicalRows:next.map(stable),digest:nextDigest,path:'tasks/all'})).buffer,1);
+ f.transaction(14);f.feed.frame({type:'replica.delta',id:'source',cursor:cursor(14),canonicalUpserts:[stable(later)],deleted:[],digest:laterDigest},1);
+ f.feed.frame({type:'replica.ready',id:'source',cursor:cursor(14),digest:laterDigest},1);
+ await vi.waitFor(()=>expect(f.sends).toHaveLength(2));expect((await f.canonical.loadEntityRows('visible','tasks',['a','b'])).map(entry=>entry.row)).toEqual(rows);
+ f.feed.frame({type:'replica.watermark',revision:14},1);await f.feed.assertReadable();
+ expect(f.failures).toEqual([]);expect((await f.canonical.loadEntityRows('visible','tasks',['a','b'])).map(entry=>entry.row)).toEqual([later,rows[1]]);
+ expect((await new SQLiteWindowStore(f.db,()=>f.engine.verifyOwner()).header('visible','tasks-all'))?.header.cursor).toEqual(cursor(14));expect(f.watermarks).toEqual([10,14]);expect(await f.engine.integrity()).toBe('ok');
+});
+
+it('keeps an existing cohort available while a newly mounted empty source waits for its watermark',async()=>{
+ const f=await fixture();await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();
+ f.feed.register({id:'new-source',signature:'scoped-tasks',entity:'tasks',key:'id',path:'tasks/scoped'});
+ const hash=await digest([]);
+ f.feed.frame({type:'replica.snapshotStart',id:'new-source',snapshotId:'empty',scope:'tenant',visibilityScope:'visible',cursor:cursor(12),key:'id',digest:hash,path:'tasks/scoped'},1);
+ f.feed.binary(new TextEncoder().encode(JSON.stringify({type:'replica.snapshotEncodedPage',id:'new-source',snapshotId:'empty',scope:'tenant',visibilityScope:'visible',cursor:cursor(12),key:'id',sequence:0,last:true,canonicalRows:[],digest:hash,path:'tasks/scoped'})).buffer,1);
+ f.feed.frame({type:'replica.ready',id:'new-source',cursor:cursor(12),digest:hash},1);
+ await vi.waitFor(()=>{expect(f.sends).toHaveLength(2);expect(f.feed.stats().opening).toBe(0);});
+ await f.runOwner(0,()=>f.db.withTransactionAsync(()=>f.feed.assertCommittedReadable({scope:'visible',epoch:'e'})));
+ expect(await new SQLiteWindowStore(f.db,()=>f.engine.verifyOwner()).header('visible','scoped-tasks')).toBeUndefined();
+ f.feed.disconnected();await f.feed.assertReadable({scope:'visible',epoch:'e'});
+ expect((await f.canonical.loadEntityRows('visible','tasks',['a','b'])).map(entry=>entry.row)).toEqual(rows);expect(f.failures).toEqual([]);
+});
+
+it('rolls warm snapshot activation back with an invalid terminal certificate',async()=>{
+ const f=await fixture();await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();
+ const next=[changed,rows[1]],hash=await digest(next);
+ f.feed.frame({type:'replica.snapshotStart',id:'source',snapshotId:'warm-bad-ready',scope:'tenant',visibilityScope:'visible',cursor:cursor(12),key:'id',digest:hash,path:'tasks/all'},1);
+ f.feed.binary(new TextEncoder().encode(JSON.stringify({type:'replica.snapshotEncodedPage',id:'source',snapshotId:'warm-bad-ready',scope:'tenant',visibilityScope:'visible',cursor:cursor(12),key:'id',sequence:0,last:true,canonicalRows:next.map(stable),digest:hash,path:'tasks/all'})).buffer,1);
+ f.feed.frame({type:'replica.ready',id:'source',cursor:cursor(12),digest:'sum128-v1:'+'0'.repeat(32)},1);f.feed.frame({type:'replica.watermark',revision:12},1);
+ await vi.waitFor(()=>expect(f.failures).toHaveLength(1));
+ expect(f.sends).toHaveLength(2);expect(f.watermarks).toEqual([10]);
+ expect((await f.canonical.loadEntityRows('visible','tasks',['a','b'])).map(entry=>entry.row)).toEqual(rows);
+ expect((await new SQLiteWindowStore(f.db,()=>f.engine.verifyOwner()).header('visible','tasks-all'))?.header.cursor).toEqual(cursor(10));
+ await f.feed.assertReadable({scope:'visible',epoch:'e'});expect(await f.engine.integrity()).toBe('ok');
+});

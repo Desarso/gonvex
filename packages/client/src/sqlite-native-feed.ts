@@ -13,7 +13,7 @@ import {fail,sqlitePayloadBytes} from './sqlite-admission.js';
 type Start=Extract<ServerMessage,{type:'replica.snapshotStart'}>;
 type Delta=Extract<ServerMessage,{type:'replica.delta'}>;
 export type SQLiteFeedSource={id:string;signature:string;entity:string;key:string;path:string;completeEntity?:true;columns?:readonly string[]};
-type Source=SQLiteFeedSource&{deferredKey:string;bytes:number;start?:Start;opening:boolean;closing?:{promise:Promise<void>;resolve():void;reject(error:unknown):void;timer:ReturnType<typeof setTimeout>}};
+type Source=SQLiteFeedSource&{deferredKey:string;bytes:number;start?:Start;deferActivation?:boolean;opening:boolean;closing?:{promise:Promise<void>;resolve():void;reject(error:unknown):void;timer:ReturnType<typeof setTimeout>}};
 type State={stream:string;generation:number;scope:string;epoch:string;cursorEpoch?:string;logicalScope:string;gate:Promise<void>;ingress:SQLiteNativeIngress;admission?:number;closed:boolean;watermark?:number};
 type Options={owner:SQLiteOwnerProgramContext;sessions:SQLiteWorkerSessions;connection:string;artifactHash:string;
  reserve?(bytes:number):()=>void;
@@ -68,7 +68,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
  private source(id:string){const source=this.sources.get(id);if(!source)fail('FENCED','Native frame has no generated subscription');return source;}
  private check(state:State){if(this.state!==state||state.closed||state.admission===undefined)fail('FENCED','Native feed admission changed');this.options.sessions.assertFrameAdmission(this.options.connection,state.generation,state.admission);}
  private stop(){const state=this.state;if(state){state.closed=true;state.ingress.close();const keys=[...this.sources.values()].map(source=>source.deferredKey);void this.initialized.then(()=>this.options.owner.runOwner(16384,async()=>{await this.groups.retire(state.stream);for(const key of keys)await this.deferred.cancel(state.scope,key);})).catch(()=>{});}this.state=undefined;for(const source of [...this.sources.values()])if(source.closing){const closing=source.closing;this.removeSource(source.id);closing.reject(Object.assign(Error('Native source connection changed'),{code:'FENCED'}));}}
- authenticating(intentScope:string,generation:number){this.stop();this.startBytes=0;this.options.sessions.authenticating(this.options.connection,intentScope,generation);for(const source of this.sources.values()){source.start=undefined;source.opening=true;source.deferredKey=crypto.randomUUID();}}
+ authenticating(intentScope:string,generation:number){this.stop();this.startBytes=0;this.options.sessions.authenticating(this.options.connection,intentScope,generation);for(const source of this.sources.values()){source.start=undefined;source.deferActivation=false;source.opening=true;source.deferredKey=crypto.randomUUID();}}
  async session(input:SQLiteTransportSession,isCurrent:()=>boolean){
   this.stop();if(!input.directive){await this.options.sessions.activate(this.options.connection,input,isCurrent);return;}
   if(input.capabilities.replicaNativeRows!==1)throw Object.assign(Error('Server requires the legacy replica adapter'),{code:'UNSUPPORTED'});
@@ -79,7 +79,12 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
    sendAck:ack=>{this.check(state);this.options.send(ack);},
    activateVerified:async receipt=>{
     this.check(state);const source=this.source(receipt.ack.id),start=source.start;if(!start||start.snapshotId!==receipt.ack.snapshotId)fail('FENCED','Snapshot has no matching start header');
-    const header:SQLiteWindowHeader={signature:source.signature,entity:source.entity,key:source.key,kind:'replica',source:'server',cursor:start.cursor,aggregateDigest:receipt.progress.digest,completeness:start.truncated?'partial':'complete',...(start.mode?{mode:start.mode}:{}),...(source.completeEntity&&!start.truncated?{entityCoverage:'complete' as const}:{}),columns:source.columns??Object.keys(owner.engine.schema[source.entity]!.fields),artifactHash:this.options.artifactHash};
+    // A warm snapshot is durably staged/ACKed here. Publish its authority
+    // with Ready and the terminal watermark, preserving the last cohort on
+    // disconnect or crash before that watermark.
+    if(source.deferActivation)return;
+    if(!receipt.progress.digest)fail('INVALID_ROW','Verified snapshot has no digest');
+    const header=this.snapshotHeader(source,start,receipt.progress.digest!);
     await owner.database.runAsync('INSERT INTO gv_native_feed_progress VALUES(?,?,0,0,?) ON CONFLICT(scope,epoch) DO UPDATE SET unclosed=CASE WHEN excluded.unclosed>applied THEN max(unclosed,excluded.unclosed) ELSE unclosed END',state.scope,state.epoch,start.cursor.revision);
     await this.mutate(state.scope,async()=>{await owner.activation.activate({scope:state.scope,subscription:source.id,snapshot:start.snapshotId,header});});
     await this.replay(state,source);
@@ -112,6 +117,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
    }
   }
  }
+ private snapshotHeader(source:Source,start:Start,digest:string):SQLiteWindowHeader{return {signature:source.signature,entity:source.entity,key:source.key,kind:'replica',source:'server',cursor:start.cursor,aggregateDigest:digest,completeness:start.truncated?'partial':'complete',...(start.mode?{mode:start.mode}:{}),...(source.completeEntity&&!start.truncated?{entityCoverage:'complete' as const}:{}),columns:source.columns??Object.keys(this.options.owner.engine.schema[source.entity]!.fields),artifactHash:this.options.artifactHash};}
  private async mutate(scope:string,run:()=>Promise<void>){if(this.authorityDepth){await run();return;}this.authorityDepth++;try{if(this.options.authority)await this.options.authority(scope,run);else await run();}finally{this.authorityDepth--;}}
  private async applyDelta(state:State,source:Source,frame:Delta){
   this.cursor(state,frame.cursor);const rows=await decodeSQLiteNativeDelta(frame,source.key),current=await this.windows.header(state.scope,source.signature);
@@ -126,10 +132,15 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
  }
  private async publishWatermark(state:State){
   if(state.watermark===undefined||[...this.sources.values()].some(source=>source.opening))return;
-  const revision=state.watermark;
+  const revision=state.watermark;if([...this.sources.values()].some(source=>source.deferActivation&&source.start&&source.start.cursor.revision>revision))return;
   const readySources=new Set<string>();let applied=false;await this.run(state,0,()=>this.options.owner.database.withTransactionAsync(async()=>{
    const pending=await this.options.owner.database.getFirstAsync<{unclosed:number;applied:number}>('SELECT unclosed,applied FROM gv_native_feed_progress WHERE scope=? AND epoch=?',state.scope,state.epoch);if(pending&&pending.unclosed>revision||await this.groups.after(state.stream,revision))return;
    const publish=async()=>{
+   for(const source of this.sources.values())if(source.deferActivation&&source.start){
+    const start=source.start,stage=await this.options.owner.database.getFirstAsync<{digest:string;complete:number}>('SELECT digest,complete FROM gv_snapshot_stages WHERE scope=? AND subscription=? AND snapshot=? AND discarded=0',state.scope,source.id,start.snapshotId);
+    if(!stage?.complete)fail('PAGE_CHANGED','Warm snapshot has no verified disk stage');
+    await this.options.owner.activation.activate({scope:state.scope,subscription:source.id,snapshot:start.snapshotId,header:this.snapshotHeader(source,start,stage.digest)});
+   }
    await this.groups.drain(state.stream,revision,async frame=>{
     if(frame.type==='replica.transactionEncoded'){const keys=Object.fromEntries(Object.entries(this.options.owner.engine.schema).map(([entity,table])=>[entity,table.key]));await this.mutate(state.scope,async()=>{await this.options.owner.canonical.applyTransaction({cursor:frame.cursor,changes:decodeSQLiteNativeTransaction(frame,keys)},empty,state.scope);});}
     else if(frame.type==='replica.delta')await this.applyDelta(state,this.source(frame.id),frame);
@@ -144,8 +155,8 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
      (SELECT w.signature,w.generation FROM gv_windows w WHERE w.scope=? AND w.signature IN (SELECT value FROM json_each(?)))`,revision,state.scope,state.cursorEpoch??'',state.scope,JSON.stringify([...this.sources.values()].filter(source=>!source.closing).map(source=>source.signature)));
    await this.options.owner.database.runAsync('DELETE FROM gv_native_feed_resets WHERE scope=?',state.scope);
    await this.options.owner.database.runAsync('INSERT INTO gv_native_feed_progress VALUES(?,?,?, ?,0) ON CONFLICT(scope,epoch) DO UPDATE SET observed=max(observed,excluded.observed),applied=max(applied,excluded.applied),unclosed=0',state.scope,state.epoch,revision,revision);if(!pending||pending.applied<revision||pending.unclosed)await markSQLiteStagingCommit(this.options.owner.database,()=>this.options.owner.engine.verifyOwner());applied=true;
-   };if(pending?.unclosed||await this.groups.pending(state.stream)||await this.options.windowsPending?.(state.scope,state.cursorEpoch??state.epoch,revision))await this.mutate(state.scope,publish);else await publish();
-  }));this.check(state);if(applied){for(const id of readySources)this.options.sourceReady?.(id);this.options.advanceWatermark(revision);}
+   };if([...this.sources.values()].some(source=>source.deferActivation&&source.start)||pending?.unclosed||await this.groups.pending(state.stream)||await this.options.windowsPending?.(state.scope,state.cursorEpoch??state.epoch,revision))await this.mutate(state.scope,publish);else await publish();
+  }));this.check(state);if(applied){for(const id of readySources){const source=this.sources.get(id);if(source?.deferActivation&&source.start){this.startBytes-=sqlitePayloadBytes(source.start,16384);source.start=undefined;source.deferActivation=false;}this.options.sourceReady?.(id);}this.options.advanceWatermark(revision);}
  }
  private async process(state:State,message:ServerMessage):Promise<void>{
   const {owner}=this.options;
@@ -161,11 +172,13 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
      const prior=await owner.database.getFirstAsync<{generation:string}>('SELECT generation FROM gv_window_generations WHERE scope=? AND signature=? AND generation<>coalesce((SELECT generation FROM gv_windows WHERE scope=? AND signature=?),\'\') LIMIT 1',state.scope,source.signature,state.scope,source.signature);
      if(!prior)return false;await this.windows.collect(state.scope,source.signature,prior.generation);return true;
     });if(!more)break;}
+    // A new snapshot incarnation retires prior stages of this source, including
+    // a verified warm stage disconnected before its publication watermark.
     for(;;){const more=await this.run(state,16384,async()=>{
-     const prior=await owner.database.getFirstAsync<{snapshot:string}>(`SELECT s.snapshot FROM gv_snapshot_stages s WHERE s.scope=? AND s.subscription=? AND s.snapshot<>? AND (s.discarded=1 OR EXISTS(SELECT 1 FROM gv_snapshot_activation_receipts a WHERE a.scope=s.scope AND a.subscription=s.subscription AND a.snapshot=s.snapshot)) LIMIT 1`,state.scope,source.id,message.snapshotId);
+     const prior=await owner.database.getFirstAsync<{snapshot:string}>(`SELECT s.snapshot FROM gv_snapshot_stages s WHERE s.scope=? AND s.subscription=? AND s.snapshot<>? LIMIT 1`,state.scope,source.id,message.snapshotId);
      if(!prior)return false;await owner.snapshots.discard(state.scope,source.id,prior.snapshot);return true;
     });if(!more)break;}
-    await this.run(state,16384,async()=>{await owner.snapshots.prepareTyped({scope:state.scope,subscription:source.id,snapshot:message.snapshotId,entity:source.entity});});source.start=message;this.startBytes+=startBytes;source.opening=true;return;
+    await this.run(state,16384,async()=>{await owner.snapshots.prepareTyped({scope:state.scope,subscription:source.id,snapshot:message.snapshotId,entity:source.entity});});source.deferActivation=!!(await this.run(state,0,()=>owner.database.getFirstAsync('SELECT 1 FROM gv_native_feed_progress WHERE scope=? AND epoch=? AND applied>0',state.scope,state.epoch)));source.start=message;this.startBytes+=startBytes;source.opening=true;return;
    }
    case 'replica.closed':{
     const source=this.source(message.id),closing=source.closing;if(!closing)fail('INVALID_ROW','Unexpected native source close acknowledgement');
@@ -178,7 +191,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
    }
    case 'replica.delta':{
     const source=this.source(message.id);this.cursor(state,message.cursor);
-    await this.run(state,262144,async()=>{const header=await this.windows.header(state.scope,source.signature);if(source.start||!header||header.header.cursor?.epoch!==state.cursorEpoch)await this.deferred.append(state.scope,source.deferredKey,message);else await this.groups.append(state.stream,message);});return;
+    await this.run(state,262144,async()=>{const header=await this.windows.header(state.scope,source.signature);if(!source.deferActivation&&(source.start||!header||header.header.cursor?.epoch!==state.cursorEpoch))await this.deferred.append(state.scope,source.deferredKey,message);else await this.groups.append(state.stream,message);});return;
    }
    case 'replica.transactionEncoded':{
     this.cursor(state,message.cursor);
@@ -190,6 +203,9 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
    case 'replica.readyMany':for(const ready of message.ready)await this.process(state,{type:'replica.ready',...ready});return;
    case 'replica.ready':{
     const source=this.source(message.id);this.cursor(state,message.cursor);
+    if(source.deferActivation&&source.start){
+     await this.run(state,16384,()=>this.groups.append(state.stream,message));source.opening=false;await this.publishWatermark(state);return;
+    }
     if(!source.opening||!source.start){
      await this.run(state,16384,()=>this.groups.append(state.stream,message));
      // A resumed source has no snapshot stage. Its delta and ready certificate
