@@ -9,7 +9,7 @@ function normalize(value) {
 }
 function isUiPath(value) {
   const p = normalize(value), low = p.toLowerCase();
-  if (!p || /(?:^|\/)(?:docs?|documentation|tests?|__tests__|__snapshots__|fixtures?|test-support|coverage|e2e|playwright|cypress|stories|storybook|\.storybook|\.github|tooling|scripts|server|backend|bridge|convex|gonvex)(?:\/|$)/i.test(p)) return false;
+  if (!p || /(?:^|\/)(?:docs?|documentation|tests?|testing|test-utils|test-helpers|__mocks__|__tests__|__snapshots__|fixtures?|test-support|coverage|e2e|playwright|cypress|stories|storybook|\.storybook|\.github|tooling|scripts|server|backend|bridge|convex|gonvex)(?:\/|$)/i.test(p)) return false;
   // Documentation applications and all Rust sources are explicitly outside UI review.
   if (/^apps\/(?:docs?|documentation)(?:\/|$)/i.test(p) || /\.(?:rs|md|mdx|rst|txt|ya?ml|toml)$/i.test(p)) return false;
   if (/_test\.dart$/i.test(p)) return false;
