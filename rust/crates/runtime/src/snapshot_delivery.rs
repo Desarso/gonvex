@@ -514,7 +514,7 @@ mod tests {
         );
         assert!(delivery.is_empty());
         delivery.begin(snapshot("one", 2000)).unwrap();
-        delivery.pump().frames;
+        delivery.pump();
         delivery.clear();
         assert!(delivery.pump().frames.is_empty());
     }

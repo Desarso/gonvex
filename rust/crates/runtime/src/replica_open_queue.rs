@@ -90,14 +90,15 @@ impl<T: Send + 'static> ReplicaOpenQueue<T> {
     }
     fn start(&mut self) {
         while self.active.len() < crate::REPLICA_OPEN_CONCURRENCY {
-            // At most two bulk SQL snapshots at once. Small metadata sources
-            // can use the other six slots even while a bulk query is waiting.
+            // Keep one preparation slot available to a newly arriving small
+            // source. Broad declared budgets can describe empty or tiny tables;
+            // lend them the other slots instead of idling most of the pool.
             let next = self
                 .waiting
                 .iter()
                 .position(|(_, job)| !job.bulk)
                 .or_else(|| {
-                    (self.bulk_active < 2)
+                    (self.bulk_active < crate::REPLICA_OPEN_CONCURRENCY - 1)
                         .then(|| self.waiting.iter().position(|(_, job)| job.bulk))
                         .flatten()
                 });
@@ -157,11 +158,47 @@ mod tests {
                 .unwrap(),
             Some(42)
         );
-        assert_eq!(queue.bulk_active, 2);
-        assert_eq!(queue.waiting.len(), 6);
+        assert_eq!(queue.bulk_active, crate::REPLICA_OPEN_CONCURRENCY - 1);
+        assert_eq!(queue.waiting.len(), 1);
         queue.clear();
         assert!(queue.is_empty());
         assert_eq!(queue.bytes, 0);
+    }
+    #[tokio::test]
+    async fn lends_unused_capacity_without_blocking_a_later_small_source() {
+        let mut queue = ReplicaOpenQueue::default();
+        for n in 0..crate::REPLICA_OPEN_CONCURRENCY {
+            let future = async move {
+                // A later directory can have a broad declared budget but finish
+                // immediately while earlier SQL snapshots remain suspended.
+                if n == crate::REPLICA_OPEN_CONCURRENCY - 2 {
+                    42
+                } else {
+                    std::future::pending::<usize>().await
+                }
+            };
+            queue
+                .push(format!("broad-{n}"), 1024, true, future.boxed())
+                .unwrap();
+        }
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), queue.next())
+                .await
+                .unwrap(),
+            Some(42)
+        );
+        // Fill the lent capacity with suspended broad work, then admit a newly
+        // arriving small source independently. Neither assertion reads slots.
+        queue.start();
+        queue
+            .push("later-small".into(), 1024, false, async { 99 }.boxed())
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), queue.next())
+                .await
+                .unwrap(),
+            Some(99)
+        );
     }
     #[tokio::test]
     async fn close_and_replacement_never_publish_obsolete_work() {

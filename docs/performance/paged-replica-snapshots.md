@@ -54,7 +54,7 @@ const client = new GonvexClient(runtimeUrl, {
 
 ## Preparation scheduling and native delivery
 
-Replica preparation belongs to the socket. Up to eight preparations run concurrently, with at most two classified as bulk, leaving capacity for small sources. Waiting work prefers small sources. Pending request count and encoded request bytes are bounded. Close, replacement and reauthentication cancel preparation and fence its completion so an obsolete job cannot publish into a new admission.
+Replica preparation belongs to the socket. Up to eight preparations run concurrently, with at most seven classified as bulk, preserving one slot for a newly arriving small source. Broad declared row budgets often describe empty or tiny tables, so they may use the other slots rather than leaving six slots idle. Waiting work prefers small sources. Pending request count and encoded request bytes are bounded. Close, replacement and reauthentication cancel preparation and fence its completion so an obsolete job cannot publish into a new admission.
 
 Bounded SQL reads compile visibility sets into PostgreSQL predicates rather than materializing every related membership row in Rust first. Related predicates share the admitted member and transaction revision. A bounded subscription with SQL-only visibility re-evaluates its authorized window for relevant commits, since its in-memory state does not certify a complete visibility set.
 
