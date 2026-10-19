@@ -2247,9 +2247,10 @@ export type UseReducerOptions = {
 export function useReducer(ref: FunctionReference, options: UseReducerOptions = {}) {
   const client = useGonvexClient();
   useEffect(() => {
-    // Native invocation loads its generated body before executing the intent.
-    // Mounting an unused hook must not pull optional reducer chunks into boot.
-    if (!(client instanceof SQLiteBrowserClient)) void client.prepareReducer?.(ref)?.catch(() => undefined);
+    // A mounted action must have its shared body available before link loss.
+    // Native preparation loads code only; it opens no replica subscriptions.
+    if (client instanceof SQLiteBrowserClient && ref.localExecution !== 1) return;
+    void client.prepareReducer?.(ref)?.catch(() => undefined);
   }, [client, ref]);
   const refRef = useRef(ref);
   refRef.current = ref;

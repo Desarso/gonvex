@@ -695,14 +695,19 @@ describe("useReducer", () => {
     expect(client.action).not.toHaveBeenCalled();
   });
 
-  it("loads native reducer work on intent instead of mounted unused hooks", async () => {
+  it("prepares a mounted native reducer before link loss without opening data subscriptions or executing an intent", async () => {
     const { SQLiteBrowserClient } = await import('@gonvex/client/sqlite/browser');
     const calls: any[] = [];
+    let disconnected = false, prepared = false;
     const broker = { subscribeChanges: () => () => {}, stats: () => ({ ownerEpoch: 1 }), close() {}, async request(_op: string, input: any) {
       calls.push(input);
       if (input.method === 'connect') return { connection: 'native', identityKey: 'identity' };
       if (input.method === 'controls') return { tokens: [], status: { isWebSocketConnected: true }, session: 'authenticated', failure: null };
-      if (input.method === 'reducer') return { commandId: 'intent', result: 42 };
+      if (input.method === 'prepareReducer') { prepared = true; return null; }
+      if (input.method === 'reducer') {
+        if (disconnected && !prepared) throw Error('Reducer module is unavailable offline');
+        return { commandId: 'intent', result: 42 };
+      }
       return null;
     } };
     const client = new SQLiteBrowserClient('ws://private.test/ws', { broker: broker as any });
@@ -710,10 +715,11 @@ describe("useReducer", () => {
     const wrapper = ({ children }: { children: ReactNode }) => <GonvexProvider client={client}>{children}</GonvexProvider>;
     const hook = renderHook(() => useReducer(ref), { wrapper });
     await act(async () => {});
-    expect(calls.some(call => call.method === 'prepareReducer' || call.method === 'reducer')).toBe(false);
+    expect(calls.filter(call => call.method === 'prepareReducer')).toHaveLength(1);
+    expect(calls.some(call => ['reducer', 'watchReplica', 'watchLive'].includes(call.method))).toBe(false);
+    disconnected = true;
     await act(async () => { expect(await hook.result.current({ name: 'Intent' })).toBe(42); });
     expect(calls.filter(call => call.method === 'reducer')).toHaveLength(1);
-    await client.prepareReducer(ref);
     expect(calls.filter(call => call.method === 'prepareReducer')).toHaveLength(1);
     hook.unmount(); client.close();
   });
