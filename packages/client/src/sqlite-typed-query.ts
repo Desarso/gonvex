@@ -1,3 +1,4 @@
+import type {JsonValue} from '@gonvex/protocol';
 import type {SQLiteMembershipSource} from './sqlite-membership-plan.js';
 import { sqliteRowBodySQL } from './sqlite-typed-body.js';
 import { sqliteIdentifier as q, sqliteTableName, sqliteFieldName, sqliteSearchName, type SQLiteTypedSchema } from './sqlite-typed-schema.js';
@@ -7,6 +8,8 @@ export type SQLitePredicate =
   | { op: 'and' | 'or'; children: readonly SQLitePredicate[] }
   | { op: 'not'; child: SQLitePredicate }
   | { op: 'in'; field: string; values: readonly (SQLiteBinding | boolean)[] }
+  | { op: 'arrayContains'; field:string; value:SQLiteBinding|boolean }
+  | { op: 'jsonEq'; field:string; value:JsonValue }
   | { op: 'relation'; field: string; table: string; relatedField: string; where?: SQLitePredicate };
 export type SQLiteOrder = { field: string; direction: 'asc' | 'desc' };
 export type SQLiteKeyset = { values: readonly SQLiteBinding[]; id: string; sequence: number;predictionSequence?:number };
@@ -67,6 +70,16 @@ export function compileSQLiteTypedPage(schema: SQLiteTypedSchema, scope: string,
       const column = field(entity, alias, input.field), shape = schema[entity]!.fields[input.field]!;
       if (input.values.some(value => value !== null && (shape.kind === 'json' || typeof value !== (shape.kind === 'number' ? 'number' : shape.kind === 'boolean' ? 'boolean' : 'string')))) throw new TypeError('SQLite IN value differs from field type');
       return input.values.length ? `${column} IN (${input.values.map(bind).join(',')})` : '0';
+    }
+    if(input.op==='arrayContains'||input.op==='jsonEq'){
+      const column=field(entity,alias,input.field),shape=schema[entity]!.fields[input.field]!;
+      if(shape.kind!=='json')throw new TypeError('JSON predicate requires a generated JSON column');
+      if(input.op==='arrayContains'){const type=input.value===null?"j.type='null'":typeof input.value==='boolean'?"j.type='"+(input.value?'true':'false')+"'":typeof input.value==='number'?"j.type IN ('integer','real')":"j.type='text'";return `(json_type(${column})='array' AND EXISTS(SELECT 1 FROM json_each(${column}) j WHERE ${type} AND j.value IS ${bind(input.value)}))`;}
+      // JSON trees compare structural paths and scalar values in both directions.
+      // Object property order is irrelevant; array indices remain significant.
+      const encoded=JSON.stringify(input.value),first=bind(encoded),second=bind(encoded);
+      const tree=(value:string)=>`SELECT fullkey,CASE WHEN type IN ('integer','real') THEN 'number' ELSE type END,atom FROM json_tree(${value})`;
+      return `(${column} IS NOT NULL AND NOT EXISTS(${tree(column)} EXCEPT ${tree(first)}) AND NOT EXISTS(${tree(second)} EXCEPT ${tree(column)}))`;
     }
     if (input.op === 'relation') {
       if (!Object.hasOwn(schema, input.table)) throw new TypeError('Unknown related SQLite table');

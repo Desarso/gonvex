@@ -206,3 +206,15 @@ it('resets the canonical cache online while preserving unknown inflight commands
  await vi.waitFor(async()=>expect(await f.owner.runOwner(0,()=>f.db.getFirstAsync('SELECT 1 FROM gv_native_feed_resets WHERE scope=?','visible'))).toBeNull());
  expect(await f.engine.integrity()).toBe('ok');
 });
+
+it('evaluates an admitted generated local live plan in SQLite with the same optimistic overlay',async()=>{
+ const plan={table:'tasks',key:'id',columns:['id','n'],where:{operator:'gt',column:'n',value:{argument:'floor'}},sort:{defaultColumn:'n',defaultDirection:'asc',allowedColumns:['n']},window:{offsetArgument:'offset',limitArgument:'limit',defaultLimit:50,maxLimit:128,count:'exact'}};
+ const ref={kind:'query',path:'tasks.localWindow',delivery:'live',live:{entity:'tasks',key:'id',resultPath:['page'],plan}} as FunctionReference;
+ const f=await fixture(true,false,[ref]),{socket}=await f.authenticate(),source:any=await f.call({method:'watchReplica',path:'__local.tasks',args:{}});
+ const read=()=>f.call({method:'localLivePage',signature:source.signature,path:ref.path,args:{floor:0,offset:0,limit:128}}) as Promise<any>;
+ expect(await read()).toMatchObject({supported:true,complete:true,rows:[{id:'a',n:1}]});socket.close();
+ await f.call({method:'reducer',path:'tasks.increment',args:{},now:100},'one','local-scope-edit');
+ expect(await read()).toMatchObject({supported:true,complete:true,rows:[{id:'a',n:2}]});
+ await expect(f.call({method:'localLivePage',signature:'foreign',path:ref.path,args:{}})).rejects.toMatchObject({code:'FENCED'});
+ expect(await f.engine.integrity()).toBe('ok');
+});

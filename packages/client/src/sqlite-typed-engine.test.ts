@@ -591,3 +591,17 @@ it('reopens more than 64 deferred source entities without restoring their in-pro
   expect(await host.getFirstAsync('SELECT count(*) n FROM gv_snapshot_index_deferred')).toEqual({ n: 70 });
   expect(await host.getFirstAsync("SELECT count(*) n FROM sqlite_master WHERE type='index' AND name LIKE '%_i_0'")).toEqual({ n: 0 });
 });
+
+it('compares JSON structures by paths and keeps array scalar types distinct',async()=>{
+ const {engine}=fixture();await engine.open('json-owner');
+ const values:[string,unknown][]=[['false',[false]],['zero',[0]],['one',[1]],['true',[true]],['text',['1']],['null',[null]],['empty',[]],['object',{b:2,a:1}]];
+ await engine.apply('s',values.map(([id,data])=>({...write(id,1),row:{...write(id,1).row,data}})),{id:'json-rows',payload:{fixture:true}});
+ const read=async(where:any)=>(await engine.page('s',{table:'tasks',where,order:[{field:'_id',direction:'asc'}],textOrder:'binary',limit:100})).rows.map(row=>row._id);
+ expect(await read({op:'arrayContains',field:'data',value:false})).toEqual(['false']);
+ expect(await read({op:'arrayContains',field:'data',value:0})).toEqual(['zero']);
+ expect(await read({op:'arrayContains',field:'data',value:'1'})).toEqual(['text']);
+ expect(await read({op:'arrayContains',field:'data',value:null})).toEqual(['null']);
+ expect(await read({op:'jsonEq',field:'data',value:[]})).toEqual(['empty']);
+ expect(await read({op:'jsonEq',field:'data',value:{a:1,b:2}})).toEqual(['object']);
+ expect(await read({op:'jsonEq',field:'data',value:{b:2,a:1}})).toEqual(['object']);
+});

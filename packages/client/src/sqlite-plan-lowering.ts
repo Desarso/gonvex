@@ -23,10 +23,18 @@ export function lowerSQLiteLivePlan(schema: SQLiteTypedSchema, source: LiveQuery
     if (!source.window || !source.sort) unsupported('unwindowedPlan');
     // These need generated materialized reference/search columns and matching
     // native predicate contracts; do not accidentally query a truncated corpus.
-    if (source.search?.sources?.length) unsupported('searchSources');
-    if (source.filters && args[source.filters.argument] != null && args[source.filters.argument] !== '') {
-      const filters = args[source.filters.argument];
-      if (!Array.isArray(filters) || filters.length) unsupported('structuredFilters');
+    if (source.search?.sources?.length && String(args[source.search.argument]??'').trim()) unsupported('searchSources');
+    const filters:SQLitePredicate[]=[];
+    if(source.filters&&args[source.filters.argument]!=null&&args[source.filters.argument]!==''){
+      const requested=args[source.filters.argument];if(!Array.isArray(requested))unsupported('structuredFilters');
+      for(const item of requested as JsonValue[]){
+        if(!item||typeof item!=='object'||Array.isArray(item))unsupported('structuredFilters');
+        const filter=item as Record<string,JsonValue>,column=String(filter.column??''),operator=String(filter.operator??'');
+        if(!source.filters.allowedColumns.includes(column)||!['empty','notEmpty'].includes(operator))unsupported('structuredFilters');
+        const shape=table.fields[column];if(!shape)unsupported('structuredFilters');
+        const empty:SQLitePredicate=shape.kind==='text'?{op:'or',children:[{op:'eq',field:column,value:null},{op:'eq',field:column,value:''}]}:{op:'eq',field:column,value:null};
+        filters.push(operator==='empty'?empty:{op:'not',child:empty});
+      }
     }
     const value = (input: LiveQueryValue | undefined): JsonValue => {
       if (input?.context) {
@@ -47,6 +55,8 @@ export function lowerSQLiteLivePlan(schema: SQLiteTypedSchema, source: LiveQuery
         return { op: 'not', child: expression(input.children![0]!) };
       }
       if (!input.column) unsupported('missingColumn');
+      if(input.operator==='arrayContains')return {op:'arrayContains',field:input.column!,value:scalar(value(input.value))};
+      if((input.operator==='eq'||input.operator==='neq')&&typeof value(input.value)==='object'&&value(input.value)!==null){const equal:SQLitePredicate={op:'jsonEq',field:input.column!,value:value(input.value)};return input.operator==='eq'?equal:{op:'not',child:equal};}
       if (input.operator === 'inRelation') {
         if (!input.relation) unsupported('missingRelation');
         return { op: 'relation', field: input.column!, table: input.relation!.table, relatedField: input.relation!.column,
@@ -78,7 +88,7 @@ export function lowerSQLiteLivePlan(schema: SQLiteTypedSchema, source: LiveQuery
     if (search && JSON.stringify(source.search!.offlineColumns ?? source.search!.columns) !== JSON.stringify(table!.search)) unsupported('searchColumns');
     const requestedLimit = liveQueryNonNegativeInteger(args[source.window!.limitArgument], source.window!.defaultLimit);
     const plan: SQLitePagePlan = { table: source.table,
-      ...(source.where ? { where: expression(source.where) } : {}),
+      ...((source.where||filters.length)?{where:{op:'and' as const,children:[...(source.where?[expression(source.where)]:[]),...filters]}}:{}),
       order: fields.map(field => ({ field, direction })),
       limit: Math.min(requestedLimit || source.window!.defaultLimit, source.window!.maxLimit, 256),
       ...(search ? { search } : {}), ...(source.columns ? { select: source.columns } : {}), ...contract };

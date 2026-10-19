@@ -1,3 +1,4 @@
+import {lowerSQLiteLivePlan} from './sqlite-plan-lowering.js';
 import {GonvexClientError} from './client-error.js';
 import {SQLiteReducerPreparationRequiredError} from './sqlite-reducer-core.js';
 import {waitForSQLiteOwnerAdmission} from './sqlite-owner-transactions.js';
@@ -259,7 +260,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
  async call(value:unknown,caller:SQLiteOwnerCaller):Promise<unknown>{
   sqlitePayloadBytes(value,131072);if(!value||typeof value!=='object'||Array.isArray(value))throw new TypeError('Invalid native client request');const input=structuredClone(value) as any;if(this.closed||caller.signal.aborted)fail('FENCED','Native client is closed');
   if(input.method==='connect')return this.connect(input,caller);
-  const connection=this.connection(caller.tabID),callerAuthVersion=connection.authVersion;if((connection.controlOnly||connection.public)&&['resetLocalReplica','entities','replicaPage','replicaPendingPage','collectionPage','livePage','livePendingPage'].includes(input.method))fail('INVALID_ROW','This connection has no tenant replica');if(connection.controlOnly&&['query','action','reducer','prepareReducer'].includes(input.method)&&this.ref(input.path).scope!=='control')fail('INVALID_ROW','Control connections cannot invoke tenant functions');if(['resetLocalReplica','entities','replicaPage','replicaPendingPage','collectionPage','livePage','livePendingPage','reducer'].includes(input.method)){await connection.restoring;if(connection.authVersion!==callerAuthVersion)fail('FENCED','Caller authentication changed during restoration');if(connection.migrationBlocked)throw connection.migrationBlocked;}
+  const connection=this.connection(caller.tabID),callerAuthVersion=connection.authVersion;if((connection.controlOnly||connection.public)&&['resetLocalReplica','localLivePage','entities','replicaPage','replicaPendingPage','collectionPage','livePage','livePendingPage'].includes(input.method))fail('INVALID_ROW','This connection has no tenant replica');if(connection.controlOnly&&['query','action','reducer','prepareReducer'].includes(input.method)&&this.ref(input.path).scope!=='control')fail('INVALID_ROW','Control connections cannot invoke tenant functions');if(['resetLocalReplica','localLivePage','entities','replicaPage','replicaPendingPage','collectionPage','livePage','livePendingPage','reducer'].includes(input.method)){await connection.restoring;if(connection.authVersion!==callerAuthVersion)fail('FENCED','Caller authentication changed during restoration');if(connection.migrationBlocked)throw connection.migrationBlocked;}
   switch(input.method){
    case 'controls':{
     const admitted=this.admission(connection);let key:string|null|undefined;
@@ -314,6 +315,31 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
     text(input.signature,128);const source=connection.sources.get(input.signature);if(!source||!source.eager&&!source.tabs.has(caller.tabID))fail('FENCED','Tab does not own that source');const admission=this.checkCaller(caller,connection);return this.readCommitted(connection,admission,caller,async()=>{this.checkCaller(caller,connection,admission.generation);const result=await this.owner.reader.window({scope:admission.scope,signature:source.signature,offset:input.offset,limit:input.limit,generation:input.generation,expected:input.expected});this.checkCaller(caller,connection,admission.generation);if(connection.sources.get(source.signature)!==source||!source.eager&&!source.tabs.has(caller.tabID))fail('FENCED','Native source was detached');return result??null;});
    }
    case 'prepareReducer':{const ref=this.ref(input.path,'reducer');if(ref.localExecution===1)await this.reducer.core.prepare(ref.path);if(caller.signal.aborted||this.tabs.get(caller.tabID)!==connection.id)fail('FENCED','Reducer preparation caller detached');return null;}
+   case 'localLivePage':{
+    text(input.signature,128);const source=connection.sources.get(input.signature),ref=this.ref(input.path,'query');
+    if(!source?.tabs.has(caller.tabID)||!source.ref.replica||!ref.live?.plan||ref.live.entity!==source.ref.replica.table)fail('FENCED','Local query has no admitted collection');
+    const admitted=this.checkCaller(caller,connection);
+    // Scoped local reads can demand generated reducer dependencies. These
+    // stay on disk and never hydrate into the renderer. Network preparation
+    // runs outside the SQL FIFO; only certified complete data answers a join.
+    const cached=await this.owner.runOwner(0,()=>this.windows.header(admitted.scope,source.signature));if(!cached)return null;if(cached.header.truncated)return {supported:false,reason:'truncatedReplica',generation:cached.generation};
+    const related=new Set<string>();const visit=(expression:any)=>{if(!expression)return;if(expression.operator==='inRelation'){related.add(expression.relation.table);visit(expression.relation.where);}for(const child of expression.children??[])visit(child);};visit(ref.live.plan.where);
+    for(const entity of related){const dependency=this.references.get('__local.'+entity);if(dependency?.replica)await this.addSource(connection,dependency,{},undefined,true);}
+    return this.readCommitted(connection,admitted,caller,async()=>{
+     const header=await this.windows.header(admitted.scope,source.signature);if(!header)return null;
+     if(header.header.completeness!=='complete'||header.header.truncated)return {supported:false,reason:'truncatedReplica',generation:header.generation};
+     const args=input.args??{};if(!args||typeof args!=='object'||Array.isArray(args))throw new TypeError('Local query arguments must be an object');
+     const context=await this.context(admitted.scope),identity=admitted.identity;
+     const lowered=lowerSQLiteLivePlan(this.owner.engine.schema,ref.live!.plan!,args,{'member.id':identity.member?.id??null,'auth.account.id':identity.auth.account?.id??null},{textOrder:'binary'});
+     if(!lowered.supported)return {supported:false,reason:lowered.reason,generation:header.generation};
+     if(lowered.offset)return {supported:false,reason:'offsetRequiresKeyset',generation:header.generation};
+     const {table:_table,membership:_membership,...options}=lowered.plan;options.limit=Math.min(128,options.limit);
+     const plan=sqliteCollectionPagePlan(source.ref,source.args,options,{signature:source.signature,generation:header.generation},new Set(Object.keys(context.coverage)));
+     const page=await this.reducer.predictions.page(admitted.scope,plan.plan,plan.allowLocalInserts);
+     this.checkCaller(caller,connection,admitted.generation);
+     return {...page,supported:true,complete:page.cursor===null,generation:header.generation};
+    });
+   }
    case 'collectionPage':{
     text(input.signature,128);const source=connection.sources.get(input.signature);if(!source||!source.eager&&!source.tabs.has(caller.tabID))fail('FENCED','Tab does not own that collection');const admitted=this.checkCaller(caller,connection);
     return this.readCommitted(connection,admitted,caller,async()=>{const owns=()=>{this.checkCaller(caller,connection,admitted.generation);if(connection.sources.get(source.signature)!==source||!source.eager&&!source.tabs.has(caller.tabID))fail('FENCED','Native collection was detached');};owns();const header=await this.windows.header(admitted.scope,source.signature);if(!header) return null;
