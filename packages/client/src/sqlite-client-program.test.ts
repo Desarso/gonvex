@@ -166,3 +166,11 @@ it('publishes live query entities and ordered memberships with the replica termi
  await vi.waitFor(async()=>expect((await f.call({method:'livePage',signature:source.signature,limit:10}) as any)?.rows).toEqual([{id:'a',value:row}]));const page:any=await f.call({method:'livePage',signature:source.signature,limit:10});expect(page.window.header).toMatchObject({kind:'live',resultSkeleton:{page:[],total:100000,offset:0,limit:20},subscriptionRevision:{epoch:'e',sequence:2}});expect(page.window.header.entityCoverage).toBeUndefined();expect(await f.call({method:'livePendingPage',signature:source.signature,limit:10})).toBeNull();socket.close();expect((await f.call({method:'livePage',signature:source.signature,limit:10}) as any).rows).toEqual(page.rows);
  const receipt:any=await f.call({method:'reducer',path:'tasks.increment',args:{},now:100},'one','live-offline-edit');expect(receipt.result).toBe(3);expect((await f.call({method:'livePage',signature:source.signature,limit:10}) as any).rows[0].value.n).toBe(3);expect(await f.engine.integrity()).toBe('ok');await f.call({method:'unwatchLive',signature:source.signature,lease:'grid'});expect((await f.call({method:'livePage',signature:source.signature,limit:10}) as any).rows[0].value.n).toBe(3);await f.call({method:'unwatchLive',signature:source.signature,lease:'preview'});await expect(f.call({method:'livePage',signature:source.signature,limit:10})).rejects.toMatchObject({code:'FENCED'});
 });
+
+it('preserves the storage failure when a delivery wait is superseded by reconnect',async()=>{
+ const f=await fixture();await f.authenticate();const connection=[...f.program['connections'].values()][0]!;
+ connection.failure={code:'INVALID_ROW',message:'Original snapshot verification failure'};
+ vi.spyOn(f.program as any,'recover').mockRejectedValueOnce(Object.assign(Error('Intent delivery admission changed'),{code:'FENCED'}));
+ f.program['scheduleDelivery'](connection);await new Promise(resolve=>setTimeout(resolve,20));
+ expect((await f.call({method:'controls'}) as any).failure).toEqual({code:'INVALID_ROW',message:'Original snapshot verification failure'});
+});

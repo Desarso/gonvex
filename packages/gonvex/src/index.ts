@@ -1339,6 +1339,8 @@ async function writeBindings(root: string, manifest: Manifest): Promise<BindingW
   let changedFiles = 0;
   if (await writeManifestIfChanged(join(dir, "manifest.json"), manifest)) changedFiles += 1;
   const local = await localBindings(root, manifest);
+  // The SQLite default has no persistent IndexedDB worker graph.
+  await rm(join(dir, "indexeddb-client-worker.ts"), { force: true });
   if (local["local-reducers.js"]) await rm(join(dir, "local-reducers.ts"), { force: true });
   const outputs: Record<string, string> = {
     ...local,

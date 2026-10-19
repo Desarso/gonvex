@@ -143,7 +143,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
  }
  private scheduleDelivery(connection:Connection,delay=0){
   if(this.closed||this.connections.get(connection.id)!==connection)return;if(connection.timer)clearTimeout(connection.timer);
-  connection.timer=setTimeout(()=>{connection.timer=undefined;void this.recover(connection).then(()=>connection.delivery.drainOnce()).then(result=>{this.notify(connection);if(result.nextDelay!==null)this.scheduleDelivery(connection,result.nextDelay);},error=>{if(this.closed)return;connection.failure={code:String((error as any)?.code??'SQLITE'),message:String((error as any)?.message??error).slice(0,512)};this.notify(connection);this.scheduleDelivery(connection,1000);});},Math.min(60000,Math.max(0,delay)));
+  connection.timer=setTimeout(()=>{connection.timer=undefined;void this.recover(connection).then(()=>connection.delivery.drainOnce()).then(result=>{this.notify(connection);if(result.nextDelay!==null)this.scheduleDelivery(connection,result.nextDelay);},error=>{if(this.closed||this.connections.get(connection.id)!==connection)return;const code=String((error as any)?.code??'SQLITE');if(code!=='FENCED')connection.failure??={code,message:String((error as any)?.message??error).slice(0,512)};this.notify(connection);if(this.admission(connection)?.online)this.scheduleDelivery(connection,1000);});},Math.min(60000,Math.max(0,delay)));
  }
  private scheduleMigration(connection:Connection,delay=0){
   clearTimeout(connection.migrationTimer);if(this.closed||!connection.migrationSession||this.connections.get(connection.id)!==connection)return;

@@ -49,7 +49,7 @@ export class SQLiteLegacyIntentMigration {
      const expected={...draft,scope:input.identityScope,state:entry.state==='inflight'?'pending' as const:entry.state,...(entry.localExecution?{localExecution:{...entry.localExecution,scope}}:{})};
      await this.options.journal.append(expected);
      const saved=await this.options.journal.find(input.identityScope,entry.idempotencyKey);
-     if(!saved||saved.path!==entry.path||JSON.stringify(saved.args)!==JSON.stringify(entry.args)||saved.idempotencyKey!==entry.idempotencyKey)fail('INTENT_CORRUPT','Migrated intent verification differs');
+     if(!saved)fail('INTENT_CORRUPT','Migrated intent is missing');const {id:_newID,...readback}=saved;if(JSON.stringify(readback)!==JSON.stringify(expected))fail('INTENT_CORRUPT','Migrated intent verification differs');
      selected++;copied++;check();
     }
     if(page.nextKey===null)break;after=page.nextKey;
