@@ -131,3 +131,13 @@ it('rebuilds a structured live result from two fenced bounded pages',async()=>{
  expect(f.calls.filter(call=>call.input.method==='livePage').map(call=>call.input.limit)).toEqual([128,128]);
  stop();watch.close();
 });
+
+it('admits a normal metadata-heavy route beyond 64 watches within the same byte ceilings and releases every watch',async()=>{
+ const f=fixture(),watches=Array.from({length:100},(_,n)=>f.client.watchReplica({path:'metadata/table'+n}));
+ await Promise.all(watches.map(watch=>watch.page()));
+ expect(f.client.memoryCounters().replicaWindows).toBe(100);
+ expect(f.client.budgets().find(value=>value.name==='browser-row-pages')).toMatchObject({maxBytes:2097152});
+ expect(f.client.budgets().find(value=>value.name==='browser-watch-metadata')).toMatchObject({maxBytes:524288});
+ for(const watch of watches)watch.close();await vi.waitFor(()=>expect(f.client.memoryCounters().replicaWindows).toBe(0));
+ expect(f.client.budgets().find(value=>value.name==='browser-row-pages')?.bytes).toBe(0);
+});

@@ -65,10 +65,10 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
   this.reducer=new SQLiteReducerOwner(owner,{runtime:binding.runtime,artifactHash:binding.artifactHash,resolveTab:tab=>this.sessions.resolveTab(tab,true),context:scope=>this.context(scope)});
   this.legacy=new SQLiteLegacyBootstrap({owner,journal:this.reducer.journal,artifactHash:binding.artifactHash,replicaName:binding.legacyStorage?.replicaName??'gonvex-local-replica',outboxName:binding.legacyStorage?.outboxName??'gonvex-outbox'});
   this.ledger.register('native-function-catalog',()=>({name:'native-function-catalog',bytes:this.catalogBytes,entries:this.references.size,maxBytes:2097152,maxEntries:4096,evictions:0,refusals:0}));
-  this.ledger.register('native-source-interests',()=>({name:'native-source-interests',bytes:[...this.connections.values()].reduce((sum,value)=>sum+value.sourceBytes,0),entries:[...this.connections.values()].reduce((sum,value)=>sum+value.sources.size,0),maxBytes:2097152,maxEntries:1024,evictions:0,refusals:0}));
+  this.ledger.register('native-source-interests',()=>({name:'native-source-interests',bytes:[...this.connections.values()].reduce((sum,value)=>sum+value.sourceBytes,0),entries:[...this.connections.values()].reduce((sum,value)=>sum+value.sources.size,0),maxBytes:2097152,maxEntries:2048,evictions:0,refusals:0}));
   this.ledger.register('native-live-watches',()=>({name:'native-live-watches',bytes:[...this.connections.values()].reduce((sum,value)=>sum+value.liveBytes,0),entries:[...this.connections.values()].reduce((sum,value)=>sum+value.lives.size,0),maxBytes:524288,maxEntries:256,evictions:0,refusals:0}));
   this.ledger.register('native-control-watches',()=>({name:'native-control-watches',bytes:[...this.connections.values()].reduce((sum,connection)=>sum+connection.controlBytes,0),entries:[...this.connections.values()].reduce((sum,connection)=>sum+connection.controls.size,0),maxBytes:2097152,maxEntries:256,evictions:0,refusals:0}));
-  this.ledger.register('native-source-descriptors',()=>({name:'native-source-descriptors',bytes:[...this.connections.values()].reduce((sum,value)=>sum+value.feed.stats().sourceBytes,0),entries:[...this.connections.values()].reduce((sum,value)=>sum+value.feed.stats().sources,0),maxBytes:2097152,maxEntries:1024,evictions:0,refusals:0}));
+  this.ledger.register('native-source-descriptors',()=>({name:'native-source-descriptors',bytes:[...this.connections.values()].reduce((sum,value)=>sum+value.feed.stats().sourceBytes,0),entries:[...this.connections.values()].reduce((sum,value)=>sum+value.feed.stats().sources,0),maxBytes:2097152,maxEntries:2048,evictions:0,refusals:0}));
   this.ledger.register('native-transient',()=>this.transient.stats());
   this.ledger.register('native-transport',()=>({...this.transport.stats(),name:'native-transport'}));
   this.ledger.register('native-transport-auth',()=>({...this.transportAuth.stats(),name:'native-transport-auth'}));
@@ -172,7 +172,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
   if(source?.closing){await source.closing.catch(()=>{});return this.addSource(connection,ref,args,tab,eager,lease);}
   if(tab&&this.tabs.get(tab)!==connection.id)fail('FENCED','Native source caller detached');
   if(!source){
-   const bytes=sqlitePayloadBytes({path:ref.path,args},16384)+1024;if(connection.sources.size>=128||connection.sourceBytes+bytes+(tab?192:0)>262144)fail('BUDGET','Native subscription allowance exceeded');
+   const bytes=sqlitePayloadBytes({path:ref.path,args},16384)+1024;if(connection.sources.size>=256||connection.sourceBytes+bytes+(tab?192:0)>262144)fail('BUDGET','Native subscription allowance exceeded');
    source={id:'source:'+signature,signature,ref,args:JSON.parse(encoded),tabs:new Set(),leases:new Map(),eager,bytes};
    const completeEntity=!Object.keys(ref.replica.equalFilters??{}).length&&!ref.replica.excludeWhenSet?.length;
    connection.feed.register({id:source.id,signature,entity:ref.replica.table,key:ref.replica.key,path:ref.path,...(completeEntity?{completeEntity:true}:{}),...(ref.replica.columns?{columns:[...ref.replica.columns]}:{})});
