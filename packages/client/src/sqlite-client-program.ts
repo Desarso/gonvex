@@ -16,6 +16,7 @@ import type {SQLiteOwnerCaller,SQLiteOwnerProgram,SQLiteOwnerProgramContext} fro
 import {SQLiteWorkerSessions} from './sqlite-worker-sessions.js';
 import {SQLiteWorkerTokens} from './sqlite-worker-tokens.js';
 import {SQLiteNativeFeed} from './sqlite-native-feed.js';
+import {ReplicaSetDigest} from './replica-set-digest.js';
 import {SQLiteReducerOwner} from './sqlite-reducer-owner.js';
 import {SQLiteReducerDelivery} from './sqlite-reducer-delivery.js';
 import {SQLiteSafetyJournal} from './sqlite-safety-journal.js';
@@ -206,7 +207,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
   void (async()=>{const loaded=new Set<string>();for(;;){try{await run();return;}catch(error){if(!(error instanceof SQLiteReducerPreparationRequiredError))throw error;if(loaded.has(error.path)||loaded.size>=128)fail('BUDGET','Live rebase preparation exceeded budget');loaded.add(error.path);await this.reducer.core.prepare(error.path);current();}}})().then(()=>this.notify(connection),error=>{if(connection.liveStream===stream&&connection.lives.get(source.signature)===source)this.feedFailed(connection,error);}).finally(release);
  }
  private unwatchLive(connection:Connection,source:LiveSource,tab:string,lease?:string){const leases=source.leases.get(tab);if(!leases)return;if(lease===undefined){connection.liveBytes-=leases.size*192;leases.clear();}else if(leases.delete(lease))connection.liveBytes-=192;if(!leases.size){source.leases.delete(tab);source.tabs.delete(tab);}if(source.tabs.size)return;source.close();connection.lives.delete(source.signature);connection.liveBytes-=source.bytes;const stream=connection.liveStream;void this.owner.runOwner(0,()=>this.owner.database.withTransactionAsync(()=>this.liveWindows.retire(stream,source.signature))).catch(()=>{});}
- private openSource(connection:Connection,source:Source){connection.client.sendOwnerMessage({type:'replica.open',id:source.id,path:source.ref.path,args:source.args});}
+ private openSource(connection:Connection,source:Source){connection.client.sendOwnerMessage({type:'replica.open',id:source.id,path:source.ref.path,args:source.args,digest:new ReplicaSetDigest().digest()});}
  private connect(input:any,caller:SQLiteOwnerCaller):Promise<unknown>{
   const work=this.connecting.then(async()=>{
    if(this.closed||caller.signal.aborted)fail('FENCED','Native client is closed');if(input.artifactHash!==undefined&&input.artifactHash!==this.binding.artifactHash)fail('SCHEMA_MISMATCH','Browser and owner module artifacts differ');await this.maintenance.ready();text(input.url,2048);const url=new URL(input.url);if(!['ws:','wss:'].includes(url.protocol)||url.username||url.password||url.hash)throw new TypeError('Invalid native WebSocket URL');

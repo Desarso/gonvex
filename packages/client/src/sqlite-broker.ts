@@ -375,7 +375,7 @@ export class SQLiteReplicaBroker {
     catch (e) { return Promise.reject(e); }
     if(requestID!==undefined&&(typeof requestID!=='string'||!/^[A-Za-z0-9:_-]{1,256}$/.test(requestID)||op!=='clientCall'||!args||typeof args!=='object'||(args as {method?:unknown}).method!=='reducer'))return Promise.reject(error('OPERATION','Stable request IDs require a durable reducer call'));
     if(requestID!==undefined){const previous=this.pending.get(requestID);if(previous){if(previous.op!==op||JSON.stringify(previous.args)!==JSON.stringify(args))return Promise.reject(error('INTENT_CONFLICT','Pending intent ID reused with different content'));return previous.promise??Promise.reject(error('BUSY','Intent request admission is completing'));}}
-    if (this.pending.size >= 16 || this.pendingBytes + bytes > 2097152) return Promise.reject(error('BUDGET', 'Storage request budget exceeded'));
+    if (this.pending.size >= 128 || this.pendingBytes + bytes > 2097152) return Promise.reject(error('BUDGET', 'Storage request budget exceeded'));
     // Immutable replay payload. Public durable writes additionally require an
     // immutable intent ID, checked by the worker's transactional receipt ledger.
     const admitted = structuredClone(args), id = requestID??this.tabID + ':r:' + ++this.serial;

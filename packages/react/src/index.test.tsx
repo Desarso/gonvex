@@ -4,7 +4,7 @@ import { Component, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { control, GonvexClientError, type ConnectionState, type FunctionReference, type GonvexClient, type LocalExecutionFallbackEvent, type OutboxIntent } from "@gonvex/client";
 import type { ServerMessage } from "@gonvex/protocol";
-import { GonvexAuthProvider, GonvexProviderWithAuth, GonvexProvider, useAction, useGonvexAuth, useGonvexAuthState, useGonvexConnectionState, useInvitationList, useReducer, useQuery, useQueryResult, useReplicaCollection, useReplicaCollectionState, useReplicaCollectionStates, useReplicaCollectionStateSelector, useReplicaEntities, useReplicaSelector, useRetainedLiveQuery, useLiveQueryState, useOutboxIntents, useEntityIntentStatus, useResetLocalReplica, useLocalExecutionFallback } from "./index";
+import { GonvexAuthProvider, GonvexProviderWithAuth, GonvexProvider, useAction, useGonvexAuth, useGonvexAuthState, useGonvexConnectionState, useInvitationList, useReducer, useQuery, useQueryResult, useReplicaCollection, useReplicaCollectionState, useReplicaCollectionStates, useReplicaCollectionStateSelector, useReplicaEntities, useEntity, useReplicaSelector, useRetainedLiveQuery, useLiveQueryState, useOutboxIntents, useEntityIntentStatus, useResetLocalReplica, useLocalExecutionFallback } from "./index";
 
 // Replica UI notifications coalesce at a browser paint. Keep every existing
 // identity, authority, and rendering assertion after that observable boundary.
@@ -489,6 +489,14 @@ describe("normalized Replica selectors", () => {
     expect(client.replicaListeners.size).toBe(1);
     expect(client.retainReplicaEntities).toHaveBeenCalledExactlyOnceWith('tasks',['a','b']);
     unmount();expect(client.releaseEntities).toHaveBeenCalledOnce();
+  });
+
+  it("does not retain the empty identity used by unopened dialogs", () => {
+    const client = new FakeGonvexClient();
+    const { result } = renderHook(() => useEntity("tasks", ""), { wrapper: wrapperFor(client) });
+    expect(result.current).toBeUndefined();
+    expect(client.retainReplicaEntities).not.toHaveBeenCalled();
+    expect(client.replicaListeners.size).toBe(0);
   });
 
   it("does not rescan entity IDs for repeated metadata publications", () => {

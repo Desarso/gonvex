@@ -89,7 +89,8 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
   const next=state.gate.then(()=>preceding).then(async()=>{this.check(state);await this.process(state,owned);});state.gate=next;
   void next.then(()=>{this.queued--;this.queuedBytes-=bytes;release?.();},error=>{this.queued--;this.queuedBytes-=bytes;release?.();this.reject(state,error);});return true;
  }
- private reject(state:State,error:unknown){if(this.state!==state||state.closed)return;this.stop();this.options.failed(error);}
+ private reject(state:State,error:unknown){if(this.state!==state||state.closed)return;const sourceID=String((error as Error)?.message??error).match(/source:[0-9a-f]{64}/)?.[0],source=sourceID?this.sources.get(sourceID):undefined;
+  if(source)error=Object.assign(new Error(`${String((error as Error).message)} (${source.path})`),{code:(error as {code?:string}).code});this.stop();this.options.failed(error);}
  private cursor(state:State,cursor:ReplicaCursor){if(!cursor||typeof cursor.epoch!=='string'||!cursor.epoch||cursor.epoch.length>256||!Number.isSafeInteger(cursor.revision)||cursor.revision<0)fail('INVALID_ROW','Invalid native feed cursor');if(state.cursorEpoch===undefined)state.cursorEpoch=cursor.epoch;else if(cursor.epoch!==state.cursorEpoch)fail('FENCED','Native feed cursor changed epoch');}
  private async run<T>(state:State,bytes:number,run:()=>Promise<T>):Promise<T>{
   const loaded=new Set<string>();let preparationBytes=0;
@@ -195,7 +196,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
   }
   await state.gate;await state.ingress.flush();await this.run(state,0,async()=>{await this.readableEpoch(state.scope,state.epoch,state.cursorEpoch);if(await this.groups.pending(state.stream))fail('PAGE_CHANGED','Native feed awaits its terminal watermark');const progress=await this.options.owner.database.getFirstAsync<{unclosed:number}>('SELECT unclosed FROM gv_native_feed_progress WHERE scope=? AND epoch=?',state.scope,state.epoch);if(progress?.unclosed)fail('PAGE_CHANGED','Native feed awaits its terminal watermark');});
  }
- private async readableEpoch(scope:string,epoch:string,cursorEpoch?:string){const current=await this.options.owner.database.getFirstAsync<{value:string}>("SELECT value FROM _gonvex_replica_meta WHERE scope=? AND key='currentEpoch'",scope);if(!current)return;if(cursorEpoch&&current.value!==cursorEpoch)fail('PAGE_CHANGED','Canonical rows need the newly admitted database epoch');const progress=await this.options.owner.database.getFirstAsync('SELECT 1 FROM gv_native_feed_progress WHERE scope=? AND epoch=?',scope,epoch);if(!progress)fail('PAGE_CHANGED','Canonical rows have no committed admission epoch');}
+ private async readableEpoch(scope:string,epoch:string,cursorEpoch?:string){const current=await this.options.owner.database.getFirstAsync<{value:string}>("SELECT value FROM _gonvex_replica_meta WHERE scope=? AND key='currentEpoch'",scope);if(!current)return;if(cursorEpoch&&current.value!==cursorEpoch)fail('PAGE_CHANGED','Canonical rows need the newly admitted database epoch');const progress=await this.options.owner.database.getFirstAsync('SELECT 1 FROM gv_native_feed_progress WHERE scope=? AND epoch=?',scope,epoch);if(!progress&&current.value!==epoch)fail('PAGE_CHANGED','Canonical rows have no committed admission epoch');}
  /** Only an authenticated registered source can select a pending disk stage.
   * This is display metadata, never a complete replica coverage certificate. */
  pendingSource(id:string){

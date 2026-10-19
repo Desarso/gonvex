@@ -1864,13 +1864,13 @@ export function useControlQuery<T extends JsonValue = JsonValue>(ref: FunctionRe
 /** Read one normalized entity from the single Gonvex Local Replica. */
 export function useEntity<T extends ReplicaRow = ReplicaRow>(entity: string, id: string): T | undefined {
   const client = useGonvexClient();
-  useEffect(()=>client.retainReplicaEntities(entity,[id]),[client,entity,id]);
+  useEffect(()=>id ? client.retainReplicaEntities(entity,[id]) : undefined,[client,entity,id]);
   const version = useSyncExternalStore(
-    useCallback((notify) => client.localReplica.subscribe(notify, { entity, ids: [id] }), [client, entity, id]),
-    useCallback(() => client.localReplica.entityVersion(entity, id), [client, entity, id]),
+    useCallback((notify) => id ? client.localReplica.subscribe(notify, { entity, ids: [id] }) : () => {}, [client, entity, id]),
+    useCallback(() => id ? client.localReplica.entityVersion(entity, id) : 0, [client, entity, id]),
     () => 0,
   );
-  return useMemo(() => client.localReplica.entity<T>(entity, id), [client, entity, id, version]);
+  return useMemo(() => id ? client.localReplica.entity<T>(entity, id) : undefined, [client, entity, id, version]);
 }
 
 /** Resolve an ordered entity batch with one Local Replica subscription. */

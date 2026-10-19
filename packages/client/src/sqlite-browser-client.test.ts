@@ -38,7 +38,7 @@ it('serializes last-watch cancellation with a new lease and preserves pinned pag
 });
 it('bounds requests before waiting for a connection and preserves the caller command ID for immutable retries',async()=>{
  const f=fixture();await f.client.connect();const args={id:'a'};const result=await f.client.invokeReducer({path:'tasks/change'},args,{commandId:'stable-command',now:100});expect(result.commandId).toBe('stable-command');expect(f.calls.find(call=>call.input.method==='reducer')?.requestID).toBe('stable-command');expect(()=>f.client.invokeReducer({path:'tasks/change'},{},{commandId:'stable-command'})).toThrow('original invocation time');
- let release!:()=>void;const waiting=new Promise<void>(resolve=>{release=resolve;});f.handler=async input=>{if(input.method==='query'){await waiting;return null;}};const pending=Array.from({length:16},()=>f.client.query({path:'bounded'}));await expect(f.client.query({path:'excess'})).rejects.toMatchObject({code:'BUDGET'});release();await Promise.all(pending);expect(f.client.budgets().find(value=>value.name==='browser-request-admission')?.bytes).toBe(0);
+ let release!:()=>void;const waiting=new Promise<void>(resolve=>{release=resolve;});f.handler=async input=>{if(input.method==='query'){await waiting;return null;}};const pending=Array.from({length:128},()=>f.client.query({path:'bounded'}));const queued=f.client.query({path:'queued'});await vi.waitFor(()=>expect(f.client.budgets().find(value=>value.name==='browser-request-admission')?.entries).toBe(129));release();await Promise.all([...pending,queued]);expect(f.client.budgets().find(value=>value.name==='browser-request-admission')?.bytes).toBe(0);
 });
 
 it('cancels a token provider which never settles when the facade closes',async()=>{

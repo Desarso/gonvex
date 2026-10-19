@@ -46,7 +46,7 @@ CREATE TRIGGER gv_snapshot_fast_append AFTER INSERT ON gv_snapshot_fast_input BE
  ${['maxRows','maxBytes'].map(name=>guard(`${t(name)} IS NOT NULL AND NOT coalesce(${safeInteger(name)},0)`,'INVALID_ROW','Invalid snapshot budget')).join('\n')}
  ${['mode','orderBy','orderDirection','path','digest'].map(name=>guard(`${t(name)} IS NOT NULL AND ${t(name)}<>'text'`,'INVALID_ROW','Invalid snapshot metadata')).join('\n')}
  ${guard(`${t('truncated')} IS NOT NULL AND ${t('truncated')} NOT IN ('true','false')`,'INVALID_ROW','Invalid snapshot truncation')}
- ${guard(`${t('mode')} IS NOT NULL AND ${f('mode')} NOT IN ('eager','progressive') OR ${t('orderDirection')} IS NOT NULL AND ${f('orderDirection')} NOT IN ('asc','desc')`,'INVALID_ROW','Invalid snapshot ordering')}
+ ${guard(`${t('mode')} IS NOT NULL AND ${f('mode')} NOT IN ('eager','progressive') OR ${t('orderDirection')} IS NOT NULL AND ${f('orderDirection')} NOT IN ('asc','desc','')`,'INVALID_ROW','Invalid snapshot ordering')}
  ${guard(`NOT (${last}) AND ${t('digest')} IS NOT NULL OR (${last}) AND ${t('digest')} IS NOT 'text'`,'INVALID_ROW','Invalid final snapshot certificate')}
  DELETE FROM gv_snapshot_fast_state;
  INSERT INTO gv_snapshot_fast_state SELECT 1,${metadata},count(*),coalesce(sum(length(CAST(value AS BLOB))),0),0,0 FROM ${rows};
@@ -91,7 +91,20 @@ export async function appendFastSnapshot(db:SQLiteReplicaDatabase,fence:()=>Prom
    const metadata=JSON.parse(row.metadata) as SQLiteSnapshotMetadata;sqlitePayloadBytes(metadata,16384);
    if(metadata.id.length>256||metadata.snapshotId.length>128||scope.length>512)fail('INVALID_ROW','Invalid snapshot identity');
    output={receipt:{ack:{type:'replica.snapshotAck',id:metadata.id,snapshotId:metadata.snapshotId,sequence:row.sequence},progress:{snapshotId:metadata.snapshotId,nextPage:row.next_page,rows:row.rows,complete:!!row.complete,...(row.digest?{digest:row.digest}:{})}},rows:row.replay?0:row.n,newFrame:!row.replay};
-  }catch(error){fastFailure(error);}finally{await db.runAsync('DELETE FROM gv_snapshot_fast_input');}
+  }catch(error){
+   if(String((error as Error).message).includes('Invalid snapshot ordering')){
+    const frame=JSON.parse(new TextDecoder().decode(bytes)) as {id?:string;mode?:string;orderDirection?:string};
+    fail('INVALID_ROW',`Invalid snapshot ordering for ${String(frame.id??'unknown').slice(0,256)} (mode ${String(frame.mode)}, direction ${String(frame.orderDirection)})`);
+   }
+   if(String((error as Error).message).includes('snapshot-page-integrity-mismatch')){
+    const frame=JSON.parse(new TextDecoder().decode(bytes)) as {id?:string;snapshotId?:string;canonicalRows?:string[];digest?:string};
+    const stage=await db.getFirstAsync<{receipt:Uint8Array}>('SELECT receipt FROM gv_snapshot_stages WHERE scope=? AND subscription=? AND snapshot=?',scope,frame.id,frame.snapshotId);
+    const check=stage?ReplicaSetDigest.decode(stage.receipt):new ReplicaSetDigest();
+    for(const row of frame.canonicalRows??[]){const hash=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(row));check.add(Array.from(new Uint8Array(hash),part=>part.toString(16).padStart(2,'0')).join(''));}
+    fail('INVALID_ROW',`snapshot-page-integrity-mismatch for ${String(frame.id??'unknown').slice(0,256)} (${frame.canonicalRows?.length??0} rows; server ${frame.digest}; decoded ${check.digest()})`);
+   }
+   fastFailure(error);
+  }finally{await db.runAsync('DELETE FROM gv_snapshot_fast_input');}
  };
  if(join)await run();else await db.withTransactionAsync(run);
  return output;

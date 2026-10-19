@@ -18,7 +18,7 @@ async function fixture(){
  const write=(revision:number,changes:any[])=>canonical.applyTransaction({cursor:{epoch:'e',revision},changes},{entities:{},liveQueries:{}},'s');
  async function stage(rows:Record<string,unknown>[],snapshot='one'){
   const digest=replicaSumDigest(await replicaRowsHashes(rows,'id'));await stager.prepareTyped({scope:'s',subscription:'collection',snapshot,entity:'tasks'});
-  const page={type:'replica.snapshotEncodedPage',id:'collection',snapshotId:snapshot,scope:'tenant',visibilityScope:'s',key:'id',cursor:{epoch:'e',revision:10},sequence:0,last:true,canonicalRows:rows.map(row=>JSON.stringify(stable(row))),digest};
+  const page={type:'replica.snapshotEncodedPage',id:'collection',snapshotId:snapshot,scope:'tenant',visibilityScope:'s',key:'id',cursor:{epoch:'e',revision:10},sequence:0,last:true,mode:'progressive',orderBy:'',orderDirection:'',canonicalRows:rows.map(row=>JSON.stringify(stable(row))),digest};
   const wire=new TextEncoder().encode(JSON.stringify(page));await stager.appendEncoded('s',wire);
   return {wire,input:{scope:'s',subscription:'collection',snapshot,header:{signature:'collection',entity:'tasks',key:'id',kind:'replica' as const,source:'server' as const,completeness:'complete' as const,cursor:page.cursor,aggregateDigest:digest}}};
  }
