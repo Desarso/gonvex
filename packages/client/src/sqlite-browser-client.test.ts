@@ -271,3 +271,28 @@ it('keeps live membership IDs while a mounted entity read is pending and publish
  expect(f.client.replicaWindowMembership(signature)).toBe(membership);
  expect(f.calls.filter(call=>call.input.method==='watchLive')).toHaveLength(1);
 });
+
+it('keeps a certified collection after a transient fenced refresh but clears it on revoked admission',async()=>{
+ const f=fixture();
+ f.handler=async input=>input.method==='replicaPage'?{generation:{epoch:1,sequence:1},rows:[{id:'a',value:{id:'a',name:'Certified'}}],window:{generation:'window',total:1,header:{completeness:'complete',source:'server'}},nextOffset:null}:undefined;
+ const watch=f.client.watchReplica({path:'tasks/all'}),stop=watch.onUpdate(()=>{});
+ cleanup.push(()=>{stop();watch.close();});
+ await vi.waitFor(()=>expect(watch.localReplicaState()).toMatchObject({rows:[{id:'a',name:'Certified'}],completeness:'complete'}));
+ const original=watch.localReplicaState();
+ let fenced=false;
+ f.handler=async input=>{if(input.method==='replicaPage'){fenced=true;throw Object.assign(Error('Superseded cached read'),{code:'FENCED'});}};
+ f.change();await vi.waitFor(()=>expect(fenced).toBe(true));await new Promise(resolve=>setTimeout(resolve,0));
+ expect(watch.localReplicaState()).toBe(original);
+ f.admit(null);await f.client.pollControls();
+ expect(watch.localReplicaState()).toBeUndefined();
+});
+
+it.each([{completeness:'partial',truncated:false},{completeness:'complete',truncated:true}])('does not retain uncertified coverage after a fenced refresh: %j',async header=>{
+ const f=fixture();
+ f.handler=async input=>input.method==='replicaPage'?{generation:{epoch:1,sequence:1},rows:[{id:'a',value:{id:'a'}}],window:{generation:'window',total:1,header:{...header,source:'server'}},nextOffset:null}:undefined;
+ const watch=f.client.watchReplica({path:'tasks/all'}),stop=watch.onUpdate(()=>{});
+ cleanup.push(()=>{stop();watch.close();});
+ await vi.waitFor(()=>expect(watch.localReplicaState()?.rows).toEqual([{id:'a'}]));
+ f.handler=async input=>{if(input.method==='replicaPage')throw Object.assign(Error('Superseded read'),{code:'FENCED'});};
+ f.change();await vi.waitFor(()=>expect(watch.localReplicaState()).toBeUndefined());
+});
