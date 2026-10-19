@@ -246,3 +246,28 @@ it('publishes a cached-session control hint queued after the final successful po
  await new Promise(resolve=>setTimeout(resolve,30));
  expect(f.calls.filter(call=>call.input.method==='controls')).toHaveLength(reads);
 });
+
+it('keeps live membership IDs while a mounted entity read is pending and publishes its late row',async()=>{
+ const f=fixture(),ref={kind:'query' as const,path:'tasks/window',delivery:'live' as const,live:{entity:'tasks',key:'_id',resultPath:['page']}};
+ const row={_id:'canonical',id:42,name:'Cached task'};
+ let finish!:()=>void;const held=new Promise<void>(resolve=>{finish=resolve;});
+ f.handler=async input=>{
+  if(input.method==='watchLive')return {signature:'server'};
+  if(input.method==='livePage')return {generation:{epoch:1,sequence:1},window:{generation:'window',total:1,header:{resultSkeleton:{page:[],total:1},resultPath:['page']}},offset:0,nextOffset:null,rows:[{id:'canonical',value:row}]};
+  if(input.method==='entities'){await held;return {generation:{epoch:1,sequence:1},rows:[{id:'canonical',value:row}]};}
+  if(input.method==='unwatchLive')return null;
+ };
+ const signature=f.client.replicaSignature(ref,{}),releaseMembership=f.client.retainReplicaWindow(signature);
+ const changed=vi.fn(),stopEntity=f.client.localReplica.subscribe(changed,{entity:'tasks',ids:['canonical']}),releaseEntity=f.client.retainReplicaEntities('tasks',['canonical']);
+ const watch=f.client.watchLiveQuery(ref,{}),stopWatch=watch.onUpdate(()=>{});
+ cleanup.push(()=>{finish();stopWatch();watch.close();stopEntity();releaseEntity();releaseMembership();});
+ await vi.waitFor(()=>expect(f.client.replicaWindowMembership(signature)?.ids).toEqual(['canonical']));
+ const membership=f.client.replicaWindowMembership(signature);
+ expect(f.client.replicaEntities('tasks',['canonical'])).toEqual([undefined]);
+ expect(watch.localLiveQueryResult()).toEqual({page:[row],total:1});
+ changed.mockClear();finish();
+ await vi.waitFor(()=>expect(f.client.replicaEntities('tasks',['canonical'])).toEqual([row]));
+ expect(changed).toHaveBeenCalled();
+ expect(f.client.replicaWindowMembership(signature)).toBe(membership);
+ expect(f.calls.filter(call=>call.input.method==='watchLive')).toHaveLength(1);
+});
