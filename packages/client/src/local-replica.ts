@@ -617,9 +617,22 @@ export class LocalReplica implements LocalReplicaView {
       const rows=await this.storage.loadEntityRows(this.scopeValue,entity,missing);
       if(scopeGeneration!==this.scopeActivationGeneration)return;
       const next=residentRows(this.entities.get(entity));
-      for(const {id,row} of rows)if(this.retainedRows.get(entity)?.has(id))setResidentRow(next,id,cloneRow(row));
+      const loadedIDs = new Set<string>();
+      for (const { id, row } of rows) if (this.retainedRows.get(entity)?.has(id)) {
+        setResidentRow(next, id, cloneRow(row));
+        loadedIDs.add(id);
+      }
       this.entities=new Map(this.entities).set(entity,next);
-      this.markEntityChanged(entity,missing);this.notify(true);
+      this.markEntityChanged(entity,missing);
+      // A window may have been read before its rows became resident. Entity
+      // leases must invalidate that cached projection and wake window readers,
+      // even when a later window lease can skip its disk read.
+      for (const window of this.liveQueries.values()) {
+        if (window.entity === entity && window.ids.some(id => loadedIDs.has(id))) {
+          this.markWindowChanged(window.signature);
+        }
+      }
+      this.notify(true);
     }, true);
 
     let released=false;
