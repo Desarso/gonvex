@@ -57,6 +57,7 @@ export class SQLiteBrowserClient {
  private readonly ledger=new ByteLedger(12582912);private readonly entityView:SQLiteBrowserEntities;private readonly controlQueries:SQLiteBrowserControls;
  private readonly memberships=new SQLiteBrowserMemberships();
  private readonly requests=new SQLiteTransientBudget(2097152,128);
+ private preparationLane:Promise<void>=Promise.resolve();
  private readonly pages=new BoundedByteCache<string,Page>('browser-row-pages',2097152,192,this.ledger);
  private readonly tokenRequests=new Set<string>();private readonly tokenCancels=new Map<string,()=>void>();private polling?:Promise<void>;private pollAgain=false;
  private readonly releaseChanges:()=>void;private controlsValue?:Pick<Controls,'status'|'session'|'failure'|'authentication'|'serverInfo'>;
@@ -112,7 +113,7 @@ export class SQLiteBrowserClient {
   if(identity!==old||!this.auth.identity&&Object.hasOwn(auth,'token')){this.invalidate(true);await this.connect();return;}
   const revision=this.revision;await this.connect();this.current(revision);await this.options.broker.request('clientCall',{method:'auth',auth:{token:this.auth.token}});this.current(revision);void this.pollControls().catch(()=>{});
  }
- private async rpc<T>(input:unknown,commandID?:string):Promise<T>{const revision=this.revision,dataRevision=this.dataRevision,tenant=!!input&&typeof input==='object'&&'method'in input&&['resetLocalReplica','localLivePage','entities','replicaPage','replicaPendingPage','collectionPage','livePage','livePendingPage','reducer'].includes(String(input.method));this.current(revision);const bytes=sqlitePayloadBytes(input,131072),owned=structuredClone(input) as any,release=await this.requests.acquire(bytes+512);try{this.current(revision);if(tenant&&owned.method==='reducer'&&this.admissionKey!==undefined)owned.expectedAdmissionKey=this.admissionKey;await this.connect();this.current(revision);const value=await this.options.broker.request<T>('clientCall',owned,90000,commandID);this.current(revision);if(tenant&&dataRevision!==this.dataRevision)fail('FENCED','Native page admission changed');return value;}finally{release();}}
+ private async rpc<T>(input:unknown,commandID?:string,reserved=false):Promise<T>{const revision=this.revision,dataRevision=this.dataRevision,tenant=!!input&&typeof input==='object'&&'method'in input&&['resetLocalReplica','localLivePage','entities','replicaPage','replicaPendingPage','collectionPage','livePage','livePendingPage','reducer'].includes(String(input.method));this.current(revision);const bytes=sqlitePayloadBytes(input,131072),owned=structuredClone(input) as any,release=reserved?()=>{}:await this.requests.acquire(bytes+512);try{this.current(revision);if(tenant&&owned.method==='reducer'&&this.admissionKey!==undefined)owned.expectedAdmissionKey=this.admissionKey;await this.connect();this.current(revision);const value=await this.options.broker.request<T>('clientCall',owned,90000,commandID);this.current(revision);if(tenant&&dataRevision!==this.dataRevision)fail('FENCED','Native page admission changed');return value;}finally{release();}}
  pollControls():Promise<void>{
   if(this.closed)return Promise.resolve();if(this.polling){this.pollAgain=true;return this.polling;}
   const operation=(async()=>{do{this.pollAgain=false;const revision=this.revision;try{const handle=await this.connect(),controls=await this.options.broker.request<Controls>('clientCall',{method:'controls'});this.current(revision);sqlitePayloadBytes(controls,65536);const admissionKey=this.admissionKey;if(controls.admissionKey!==undefined)this.admit(controls.admissionKey);
@@ -264,7 +265,15 @@ export class SQLiteBrowserClient {
  reducer<T extends JsonValue=JsonValue,Args extends JsonValue=JsonValue>(ref:FunctionReference<Args,T>,args:Args,options:CallOptions&{offline:'queue'}):Promise<T|QueuedReducerOutcome>;
  reducer<T extends JsonValue=JsonValue,Args extends JsonValue=JsonValue>(ref:FunctionReference<Args,T>,args?:Args,options?:CallOptions):Promise<T>;
  async reducer<T extends JsonValue=JsonValue>(ref:FunctionReference,args:JsonValue={},_options:CallOptions={}):Promise<T|QueuedReducerOutcome>{if(this.publicTenant&&(_options.offline==='queue'||_options.optimistic?.length))throw new GonvexClientError('Public reducers are online-only',{code:'disconnected',path:ref.path,operation:'reducer'});const receipt=await this.invokeReducer(ref,args);return receipt.queuedOnly?{status:'queued',reducerId:receipt.commandId}:receipt.result as T;}
- prepareReducer(ref:Pick<FunctionReference,'path'>):Promise<void>{return this.rpc({method:'prepareReducer',path:ref.path});}
+ async prepareReducer(ref:Pick<FunctionReference,'path'>):Promise<void>{
+  const revision=this.revision,input={method:'prepareReducer',path:ref.path};this.current(revision);
+  // Keep queued code loads inside the existing byte/request allowance, but
+  // dispatch only one at a time so mounted actions cannot fill the owner's
+  // RPC slots ahead of visible reads. Invocations use their direct RPC path.
+  const release=await this.requests.acquire(sqlitePayloadBytes(input,131072)+512);
+  const operation=this.preparationLane.then(()=>{this.current(revision);return this.rpc<void>(input,undefined,true);}).finally(release);
+  this.preparationLane=operation.then(()=>{},()=>{});return operation;
+ }
  query<T extends JsonValue=JsonValue,Args extends JsonValue=JsonValue>(ref:FunctionReference<Args,T>,args:Args={} as Args,_options:CallOptions={}):Promise<T>{return this.rpc({method:'query',path:ref.path,args});}
  action<T extends JsonValue=JsonValue,Args extends JsonValue=JsonValue>(ref:FunctionReference<Args,T>,args:Args={} as Args,_options:CallOptions={}):Promise<T>{return this.rpc({method:'action',path:ref.path,args});}
  budgets(){return this.ledger.snapshot();}

@@ -296,3 +296,28 @@ it.each([{completeness:'partial',truncated:false},{completeness:'complete',trunc
  f.handler=async input=>{if(input.method==='replicaPage')throw Object.assign(Error('Superseded read'),{code:'FENCED'});};
  f.change();await vi.waitFor(()=>expect(watch.localReplicaState()).toBeUndefined());
 });
+
+it('paces mounted reducer code preparation while cached queries remain usable',async()=>{
+ const f=fixture();await f.client.connect();let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});
+ f.handler=async input=>{if(input.method==='prepareReducer'){await gate;return null;}};
+ const first=f.client.prepareReducer({path:'background/one'}),second=f.client.prepareReducer({path:'background/two'});
+ try{
+  await vi.waitFor(()=>expect(f.calls.some(call=>call.input.method==='prepareReducer')).toBe(true));
+  await expect(f.client.query({path:'visible/query'})).resolves.toEqual({identity:'a'});
+  await expect(f.client.invokeReducer({path:'visible/edit'},{})).resolves.toMatchObject({result:2});
+  expect(f.calls.filter(call=>call.input.method==='prepareReducer')).toHaveLength(1);
+ }finally{release();await Promise.all([first,second]);}
+ expect(f.calls.filter(call=>call.input.method==='prepareReducer').map(call=>call.input.path)).toEqual(['background/one','background/two']);
+ expect(f.client.budgets().find(value=>value.name==='browser-request-admission')?.bytes).toBe(0);
+});
+
+it('bounds queued preparation with the existing shared budget and cancels queued code loads on close',async()=>{
+ const f=fixture();await f.client.connect();let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});
+ f.handler=async input=>{if(input.method==='prepareReducer'){await gate;return null;}};
+ const pending=Array.from({length:384},(_,i)=>f.client.prepareReducer({path:'background/'+i}));const settled=Promise.allSettled(pending);
+ await vi.waitFor(()=>expect(f.client.budgets().find(value=>value.name==='browser-request-admission')?.entries).toBe(384));
+ await expect(f.client.prepareReducer({path:'overflow'})).rejects.toMatchObject({code:'BUDGET'});
+ f.client.close();release();expect((await settled).every(result=>result.status==='rejected')).toBe(true);
+ expect(f.calls.filter(call=>call.input.method==='prepareReducer')).toHaveLength(1);
+ expect(f.client.budgets().find(value=>value.name==='browser-request-admission')?.bytes).toBe(0);
+});
