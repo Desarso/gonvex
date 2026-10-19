@@ -128,7 +128,7 @@ it('keeps durable Reducer replay but reports a single-shot refusal as an unknown
 
 it('joins an identical stable reducer request even at capacity, rejects changed content and keeps its command ID in replay',async()=>{
  const broker=client() as any;broker.owner={id:'test',token:'owner',epoch:1,seen:Date.now()};broker.send=vi.fn();const input={method:'reducer',path:'tasks/change',args:{id:'a'},now:100};
- const pending=broker.request('clientCall',input,90000,'stable-command'),others=Array.from({length:127},(_,n)=>broker.request('clientCall',{...input,now:101+n}));expect(broker.pending.size).toBe(128);expect(broker.request('clientCall',input,90000,'stable-command')).toBe(pending);
+ const pending=broker.request('clientCall',input,90000,'stable-command'),others=Array.from({length:255},(_,n)=>broker.request('clientCall',{...input,now:101+n}));expect(broker.pending.size).toBe(256);expect(broker.request('clientCall',input,90000,'stable-command')).toBe(pending);
  await expect(broker.request('clientCall',{...input,args:{id:'b'}},90000,'stable-command')).rejects.toMatchObject({code:'INTENT_CONFLICT'});await expect(broker.request('clientCall',input)).rejects.toMatchObject({code:'BUDGET'});expect(broker.pending.get('stable-command').args).toEqual(input);
  for(const call of [...broker.pending.values()])broker.receiveReply({protocol:2,to:'test',token:'owner',id:call.id,value:call.id});expect(await pending).toBe('stable-command');await Promise.all(others);expect(broker.pendingBytes).toBe(0);
  await expect(broker.request('clientCall',{method:'action',path:'external'},90000,'stable-command')).rejects.toMatchObject({code:'OPERATION'});
