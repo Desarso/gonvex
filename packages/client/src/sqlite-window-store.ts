@@ -165,6 +165,9 @@ export class SQLiteWindowStore {
     await this.initialize();await this.db.withTransactionAsync(async()=>{
       await this.fence();const current=await this.header(scope,signature),header=current?.header;
       if(!current||!header?.cursor||header.cursor.epoch!==cursor.epoch||header.cursor.revision>cursor.revision||header.aggregateDigest!==digest||header.completeness!==(truncated?'partial':'complete'))conflict('Ready differs from verified native membership');
+      // Snapshot activation already durably installed an identical certificate.
+      // Keep its Ready read-only rather than forcing another FULL WAL sync.
+      if(header.cursor.revision===cursor.revision)return;
       await this.db.runAsync('UPDATE gv_window_generations SET header=? WHERE scope=? AND signature=? AND generation=?',JSON.stringify({...header,cursor}),scope,signature,current.generation);
     });
   }

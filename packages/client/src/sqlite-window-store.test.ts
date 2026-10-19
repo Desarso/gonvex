@@ -102,3 +102,26 @@ it('bounds legacy certificate reconstruction pages and refuses incomplete or amb
  await expect(store.applyDelta({...input,cursor:{epoch:'other',revision:3}})).rejects.toMatchObject({code:'PAGE_CHANGED'});await expect(store.applyDelta({...input,generation:'old'})).rejects.toMatchObject({code:'PAGE_CHANGED'});
  await expect(store.applyDelta({...input,deleted:Array.from({length:129},(_,n)=>String(n))})).rejects.toThrow('Invalid native');await expect(store.applyDelta({...input,upserts:[{id:'a',hash:'bad'}]})).rejects.toThrow('hash');
 });
+
+it('keeps an identical verified Ready read-only while rejecting incompatible certificates and advancing newer cursors',async()=>{
+ const {sqliteOwnerTransactions}=await import('./sqlite-owner-transactions.js');
+ const {ReplicaSetDigest}=await import('./replica-set-digest.js');
+ const {native,database}=fixture(),store=new SQLiteWindowStore(sqliteOwnerTransactions(database));
+ const digest=new ReplicaSetDigest().digest(),verified={...header,aggregateDigest:digest};
+ const initial=await store.begin('s',verified,'quiet');await store.publish('s','tasks',initial);
+ const changes=()=>Number(native.prepare('SELECT total_changes() n').get()!.n),before=changes();
+ await store.confirmReady('s','tasks',{epoch:'e',revision:1},digest);
+ expect(changes()).toBe(before);
+ for(const [cursor,value,truncated]of [
+  [{epoch:'other',revision:1},digest,false],
+  [{epoch:'e',revision:0},digest,false],
+  [{epoch:'e',revision:1},'sum128-v1:'+'f'.repeat(32),false],
+  [{epoch:'e',revision:1},digest,true],
+ ] as const)await expect(store.confirmReady('s','tasks',cursor,value,truncated)).rejects.toMatchObject({code:'PAGE_CHANGED'});
+ expect(changes()).toBe(before);
+ await store.confirmReady('s','tasks',{epoch:'e',revision:2},digest);
+ expect((await store.header('s','tasks'))?.header.cursor).toEqual({epoch:'e',revision:2});
+ expect(changes()).toBe(before+1);
+ await store.confirmReady('s','tasks',{epoch:'e',revision:2},digest);
+ expect(changes()).toBe(before+1);
+});
