@@ -120,7 +120,7 @@ export class EngineClient {
       } else if (method === "watchError") {
         const watch = this.watches.get(args[0]); if (!watch) return;
         watch.error = deserializeEngineError(args[1]); for (const listener of watch.listeners) listener();
-      } else if (method === "scope") { this.commandScope = args[0]; this.invalidate(); }
+      } else if (method === "scope") { if (args[1] !== "restore" || args[0] !== this.commandScope) { this.commandScope = args[0]; this.invalidate(); } }
       else if (method === "connection") { this.connection = { ...args[0], hasEverConnected: this.connection?.hasEverConnected || args[0].hasEverConnected, connectionCount: this.connectionOffset + args[0].connectionCount }; this.emit(method, this.connection); }
       else if (method === "session") { this.session = args[0]; this.sessionEvents++; this.emit(method); }
       else if (method === "intents") { this.intents = args[0]; this.emit(method); }

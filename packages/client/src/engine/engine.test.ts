@@ -538,6 +538,18 @@ it("answers worker init before local session hydration and publishes the restore
   expect(await client.localSessionReady).toBe(true);
 });
 
+it("does not supersede a reducer admitted while the initial session restore activates its scope", async () => {
+  const { init } = await setup();
+  const load = IndexedDBLocalReplicaStorage.prototype.loadSession; let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
+  const spy = vi.spyOn(IndexedDBLocalReplicaStorage.prototype, "loadSession").mockImplementation(async function (this: IndexedDBLocalReplicaStorage, scope: string) { await gate; return load.call(this, scope); });
+  const client = await workerModeClient(init);
+  await vi.waitFor(() => expect(spy).toHaveBeenCalled()); expect(client.localSessionState()).toBe("unavailable");
+  const admitted = client.reducer(ref, {}, { timeoutMs: 0 });
+  release();
+  await expect(admitted).resolves.toBe(7);
+  await vi.waitFor(() => expect(client.localSessionState()).toBe("restored"));
+});
+
 it("falls back to legacy when worker session restoration fails after init answered", async () => {
   const { init } = await setup(); const diagnostics: string[] = [];
   vi.spyOn(IndexedDBLocalReplicaStorage.prototype, "loadSession").mockRejectedValueOnce(new Error("restore failed"));

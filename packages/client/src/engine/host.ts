@@ -158,7 +158,13 @@ export function serveEngineHost(endpoint: EngineEndpoint, binding?: StaticEngine
         const hostClient = client;
         Object.defineProperty(client, "connect", { value: () => connectEngine(hostClient, networkConstructor) });
       }
-      client.onSessionScopeChange(() => { previous.clear(); void event("scope", [engineScope(client!)]); });
+      // The initial restore activates the cached visibility scope after init answered. That first activation
+      // is marked so the UI does not supersede RPCs issued during hydration; later changes invalidate as before.
+      let restoring = true, scopeActivated = false;
+      client.onSessionScopeChange(() => {
+        previous.clear(); const restoreActivation = restoring && !scopeActivated; scopeActivated = true;
+        void event("scope", restoreActivation ? [engineScope(client!), "restore"] : [engineScope(client!)]);
+      });
       client.subscribeToConnectionState(state => event("connection", [state]));
       client.onDeveloperCredential(token => event("developerCredential", [token]));
       client.onAuthError((message, details) => event("authError", [message, details]));
@@ -169,7 +175,7 @@ export function serveEngineHost(endpoint: EngineEndpoint, binding?: StaticEngine
       // Restoring hydrates the whole local scope. Answer init first so the UI can register its visible
       // watches during hydration; later transitions arrive as session events, and a failed restore
       // falls back to legacy as a failed init did.
-      void client.localSessionReady.catch(error => event("startupError", [serializeEngineError(error)]));
+      void client.localSessionReady.then(() => { restoring = false; }, error => { restoring = false; void event("startupError", [serializeEngineError(error)]); });
       return { connection: client.connectionState(), session: client.localSessionState(), commandScope: engineScope(client), capabilities: { admissionBatch: 1, admissionBatchLimit: 1024 } };
     }
     if (!client) throw new Error("Engine is not initialized");
