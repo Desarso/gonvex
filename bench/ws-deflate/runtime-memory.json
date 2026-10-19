@@ -1,0 +1,93 @@
+{
+  "timestamp": "2026-10-14T08:08:17.713Z",
+  "trials": 5,
+  "socketsPerTrial": 1000,
+  "binarySha256": "b4263d2143972439ba365c30d7131eff0dfc2b727268bd9eff62ff6e38f42a6a",
+  "plain": [
+    {
+      "baselineRss": 33808384,
+      "idleRss": 209231872,
+      "deltaRss": 175423488,
+      "bytesPerSocket": 175423.488
+    },
+    {
+      "baselineRss": 33079296,
+      "idleRss": 209027072,
+      "deltaRss": 175947776,
+      "bytesPerSocket": 175947.776
+    },
+    {
+      "baselineRss": 33480704,
+      "idleRss": 208912384,
+      "deltaRss": 175431680,
+      "bytesPerSocket": 175431.68
+    },
+    {
+      "baselineRss": 33378304,
+      "idleRss": 209125376,
+      "deltaRss": 175747072,
+      "bytesPerSocket": 175747.072
+    },
+    {
+      "baselineRss": 33562624,
+      "idleRss": 209182720,
+      "deltaRss": 175620096,
+      "bytesPerSocket": 175620.096
+    }
+  ],
+  "compressed": [
+    {
+      "baselineRss": 33538048,
+      "idleRss": 81477632,
+      "deltaRss": 47939584,
+      "bytesPerSocket": 47939.584
+    },
+    {
+      "baselineRss": 33701888,
+      "idleRss": 81563648,
+      "deltaRss": 47861760,
+      "bytesPerSocket": 47861.76
+    },
+    {
+      "baselineRss": 33091584,
+      "idleRss": 81162240,
+      "deltaRss": 48070656,
+      "bytesPerSocket": 48070.656
+    },
+    {
+      "baselineRss": 33300480,
+      "idleRss": 81444864,
+      "deltaRss": 48144384,
+      "bytesPerSocket": 48144.384
+    },
+    {
+      "baselineRss": 33325056,
+      "idleRss": 80809984,
+      "deltaRss": 47484928,
+      "bytesPerSocket": 47484.928
+    }
+  ],
+  "summary": {
+    "plainBytesPerSocket": {
+      "mean": 175634.02240000002,
+      "ci95": [
+        175358.6896363132,
+        175909.35516368682
+      ]
+    },
+    "compressedBytesPerSocket": {
+      "mean": 47900.26239999999,
+      "ci95": [
+        47581.17555657934,
+        48219.34924342064
+      ]
+    },
+    "additionalBytesPerSocket": {
+      "mean": -127733.75999999998,
+      "ci95": [
+        -128174.39962310295,
+        -127293.12037689702
+      ]
+    }
+  }
+}
