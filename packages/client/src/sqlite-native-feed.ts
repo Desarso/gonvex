@@ -151,7 +151,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
      if(!prior)return false;await this.windows.collect(state.scope,source.signature,prior.generation);return true;
     });if(!more)break;}
     for(;;){const more=await this.run(state,16384,async()=>{
-     const prior=await owner.database.getFirstAsync<{snapshot:string}>(`SELECT s.snapshot FROM gv_snapshot_stages s JOIN gv_snapshot_activation_receipts a USING(scope,subscription,snapshot) WHERE s.scope=? AND s.subscription=? AND s.snapshot<>? LIMIT 1`,state.scope,source.id,message.snapshotId);
+     const prior=await owner.database.getFirstAsync<{snapshot:string}>(`SELECT s.snapshot FROM gv_snapshot_stages s WHERE s.scope=? AND s.subscription=? AND s.snapshot<>? AND (s.discarded=1 OR EXISTS(SELECT 1 FROM gv_snapshot_activation_receipts a WHERE a.scope=s.scope AND a.subscription=s.subscription AND a.snapshot=s.snapshot)) LIMIT 1`,state.scope,source.id,message.snapshotId);
      if(!prior)return false;await owner.snapshots.discard(state.scope,source.id,prior.snapshot);return true;
     });if(!more)break;}
     await this.run(state,16384,async()=>{await owner.snapshots.prepareTyped({scope:state.scope,subscription:source.id,snapshot:message.snapshotId,entity:source.entity});});source.start=message;this.startBytes+=startBytes;source.opening=true;return;

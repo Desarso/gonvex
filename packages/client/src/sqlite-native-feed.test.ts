@@ -193,6 +193,7 @@ it('reclaims published staging metadata before repeated snapshots without waitin
   expect(f.failures).toEqual([]);
   expect((await f.canonical.loadEntityRows('visible','tasks',['a','b'])).map(entry=>entry.row)).toEqual(rows);
   expect((await f.db.getFirstAsync<{n:number}>('SELECT count(*) n FROM gv_snapshot_stages')).n).toBeLessThanOrEqual(1);
+  if(n===0)await f.db.runAsync("INSERT INTO gv_snapshot_stages SELECT scope,subscription,'discarded-before-crash',metadata,next_page,rows,bytes,receipt,complete,digest,1 FROM gv_snapshot_stages LIMIT 1");
  }
  expect(await f.engine.integrity()).toBe('ok');
 });

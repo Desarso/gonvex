@@ -169,3 +169,12 @@ it('does not spin the microtask queue after a replica read is fenced or the clie
  f.change();await vi.waitFor(()=>expect(reads).toBe(2));
  f.client.close();await new Promise(resolve=>setTimeout(resolve,50));expect(reads).toBe(2);stop();watch.close();
 });
+
+it('retains a verified replica projection and waits for a feed hint when its next read crosses a cohort',async()=>{
+ const f=fixture(),watch=f.client.watchReplica({path:'tasks/all'}),stop=watch.onUpdate(vi.fn());cleanup.push(()=>{stop();watch.close();});
+ await vi.waitFor(()=>expect(watch.localReplicaState()).toBeDefined());const before=watch.localReplicaState();let reads=0;
+ f.handler=input=>{if(input.method==='replicaPage'){reads++;throw Object.assign(Error('Cohort not yet committed'),{code:'PAGE_CHANGED'});}};
+ f.change();await vi.waitFor(()=>expect(reads).toBe(1));await new Promise(resolve=>setTimeout(resolve,75));
+ expect(reads).toBe(1);expect(watch.localReplicaState()).toBe(before);
+ f.handler=undefined;f.change();await vi.waitFor(()=>expect(watch.localReplicaState()).not.toBe(before));
+});
