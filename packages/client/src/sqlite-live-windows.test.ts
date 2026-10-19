@@ -7,14 +7,16 @@ import {SQLiteLiveWindows} from './sqlite-live-windows.js';
 import {SQLiteNativeReplicaReader} from './sqlite-native-replica-reader.js';
 import type {SQLiteReplicaDatabase} from './sqlite-replica-storage.js';
 import type {SQLiteOwnerProgramContext} from './sqlite-owner-actor.js';
+import {decodedJSONBytes,sqlitePayloadBytes} from './sqlite-admission.js';
+import type {SQLiteTypedSchema} from './sqlite-typed-schema.js';
 import type {FunctionReference} from './index.js';
 const cleanup:Array<()=>void>=[];afterEach(()=>{for(const close of cleanup.splice(0))close();});
 const typed={tasks:{key:'id',fields:{id:{kind:'text'},n:{kind:'number'},detail:{kind:'text'}},indexes:[]}} as const;
 const ref:FunctionReference={kind:'query',path:'tasks/grid',delivery:'live',live:{entity:'tasks',key:'id',resultPath:['page'],plan:{columns:['id','n']} as any}};
-async function fixture(){
- const sql=new DatabaseSync(':memory:');cleanup.push(()=>sql.close());const db=sqliteOwnerTransactions({async execAsync(query){sql.exec(query);},async runAsync(query,...args){return sql.prepare(query).run(...args as any[]);},async getFirstAsync<T>(query:string,...args:unknown[]){return sql.prepare(query).get(...args as any[]) as T??null;},async getAllAsync<T>(query:string,...args:unknown[]){return sql.prepare(query).all(...args as any[]) as T[];},async withTransactionAsync(run){sql.exec('BEGIN');try{await run();sql.exec('COMMIT');}catch(error){sql.exec('ROLLBACK');throw error;}}} satisfies SQLiteReplicaDatabase),engine=new SQLiteTypedReplicaEngine(db,typed);await engine.open('live');const canonical=sqliteTypedReplicaStorage(db,typed);await canonical.ready();const owner={database:db,engine,canonical} as SQLiteOwnerProgramContext,windows=new SQLiteLiveWindows(owner,'artifact'),reader=new SQLiteNativeReplicaReader(db,canonical,engine);await windows.ready();await reader.ready();
+async function fixture(schema:SQLiteTypedSchema=typed,source:FunctionReference=ref){
+ const sql=new DatabaseSync(':memory:');cleanup.push(()=>sql.close());const db=sqliteOwnerTransactions({async execAsync(query){sql.exec(query);},async runAsync(query,...args){return sql.prepare(query).run(...args as any[]);},async getFirstAsync<T>(query:string,...args:unknown[]){return sql.prepare(query).get(...args as any[]) as T??null;},async getAllAsync<T>(query:string,...args:unknown[]){return sql.prepare(query).all(...args as any[]) as T[];},async withTransactionAsync(run){sql.exec('BEGIN');try{await run();sql.exec('COMMIT');}catch(error){sql.exec('ROLLBACK');throw error;}}} satisfies SQLiteReplicaDatabase),engine=new SQLiteTypedReplicaEngine(db,schema);await engine.open('live');const canonical=sqliteTypedReplicaStorage(db,schema);await canonical.ready();const owner={database:db,engine,canonical} as SQLiteOwnerProgramContext,windows=new SQLiteLiveWindows(owner,'artifact'),reader=new SQLiteNativeReplicaReader(db,canonical,engine);await windows.ready();await reader.ready();
  const tx=async<T>(run:()=>Promise<T>)=>{let result!:T;await db.withTransactionAsync(async()=>{result=await run();});return result;};
- const stage=(sequence:number,rows:Array<Record<string,any>>=[{id:'a',n:sequence}])=>tx(()=>windows.stage('stream','visible','grid',ref,{result:{page:rows,total:100000},subscriptionRevision:{epoch:'e',sequence},replicaScope:'visible'}));
+ const stage=(sequence:number,rows:Array<Record<string,any>>=[{id:'a',n:sequence}])=>tx(()=>windows.stage('stream','visible','grid',source,{result:{page:rows,total:100000},subscriptionRevision:{epoch:'e',sequence},replicaScope:'visible'}));
  const publish=(sequence:number)=>tx(()=>windows.publish('stream','visible','e',sequence));return {sql,db,engine,canonical,windows,reader,tx,stage,publish};
 }
 it('keeps pending pages explicitly incomplete and publishes bounded memberships over normalized projected rows',async()=>{
@@ -36,4 +38,13 @@ it('keeps repeated generations and long Unicode identities bounded across public
 
 it('refuses corrupted durable frames for early display and canonical publication',async()=>{
  const f=await fixture();await f.stage(2);await f.db.runAsync('UPDATE gv_live_window_stages SET rows=?',JSON.stringify([{id:'a',n:999}]));await expect(f.tx(()=>f.windows.page('stream','visible','grid','e'))).rejects.toMatchObject({code:'INTENT_CORRUPT'});await expect(f.publish(2)).rejects.toMatchObject({code:'INTENT_CORRUPT'});expect(await f.canonical.loadEntityRows('visible','tasks',['a'])).toEqual([]);await expect(f.stage(3,[{id:'a',n:1},{id:'a',n:2}])).rejects.toMatchObject({code:'INTENT_CONFLICT'});
+});
+
+it('publishes wide bounded frames whose conservative decode charge exceeds their wire charge',async()=>{
+ const columns=Array.from({length:52},(_,n)=>'column_'+n),schema:SQLiteTypedSchema={tasks:{key:'id',fields:{id:{kind:'text'},...Object.fromEntries(columns.map(name=>[name,{kind:'text' as const}]))},indexes:[]}},source:FunctionReference={...ref,live:{...ref.live!,plan:{columns:['id',...columns]} as any}};
+ const rows=Array.from({length:16},(_,n)=>({id:String(n),...Object.fromEntries(columns.map(name=>[name,null]))}));
+ expect(sqlitePayloadBytes(rows,131072)).toBeLessThan(131072);expect(()=>decodedJSONBytes(JSON.stringify(rows),131072)).toThrow('Decoded SQLite page');
+ const f=await fixture(schema,source);await f.stage(2,rows);const pending=await f.tx(()=>f.windows.page('stream','visible','grid','e',{limit:4}));expect(pending?.rows).toHaveLength(4);expect(await f.publish(2)).toBe(1);
+ expect((await f.reader.window({scope:'visible',signature:'grid',limit:4}))?.rows.map(row=>row.value)).toEqual(rows.slice(0,4));expect(await f.engine.integrity()).toBe('ok');
+ await expect(f.stage(3,[{...rows[0],column_0:'x'.repeat(70000)}])).rejects.toMatchObject({code:'BUDGET'});
 });

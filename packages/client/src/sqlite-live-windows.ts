@@ -1,4 +1,4 @@
-import {prepareNativeLiveWindow} from './native-live-window-frame.js';
+import {prepareNativeLiveWindow,NATIVE_LIVE_DECODE_BYTES} from './native-live-window-frame.js';
 import type {JsonValue} from '@gonvex/protocol';
 import type {FunctionReference} from './index.js';
 import type {SQLiteLiveQueryUpdate} from './sqlite-native-transport.js';
@@ -11,7 +11,7 @@ type Stage={stream:string;scope:string;signature:string;epoch:string;revision:nu
 const schema=`CREATE TABLE IF NOT EXISTS gv_live_window_stages(stream TEXT NOT NULL,scope TEXT NOT NULL,signature TEXT NOT NULL,epoch TEXT NOT NULL,revision INTEGER NOT NULL,generation TEXT NOT NULL,header TEXT NOT NULL CHECK(length(header)*2<=16384),rows TEXT NOT NULL CHECK(length(rows)*2<=131072),fingerprint TEXT NOT NULL,PRIMARY KEY(stream,scope,signature)) WITHOUT ROWID;`;
 const sha=async(value:string)=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))),byte=>byte.toString(16).padStart(2,'0')).join('');
 async function decodeStage(stage:Stage){
- decodedJSONBytes(stage.rows,131072);decodedJSONBytes(stage.header,16384);const header=JSON.parse(stage.header) as SQLiteWindowHeader;
+ decodedJSONBytes(stage.rows,NATIVE_LIVE_DECODE_BYTES);decodedJSONBytes(stage.header,16384);const header=JSON.parse(stage.header) as SQLiteWindowHeader;
  if(header.signature!==stage.signature||header.kind!=='live'||header.source!=='server'||header.entityCoverage!==undefined||header.cursor?.epoch!==stage.epoch||header.cursor?.revision!==stage.revision||await sha(stage.rows)!==header.aggregateDigest||await sha(stage.header+'\0'+stage.rows)!==stage.fingerprint)fail('INTENT_CORRUPT','Pending live window differs from its durable frame');
  const rows=JSON.parse(stage.rows) as Array<Record<string,JsonValue>>;return {rows,header};
 }
