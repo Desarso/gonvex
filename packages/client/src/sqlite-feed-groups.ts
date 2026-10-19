@@ -26,6 +26,17 @@ export class SQLiteFeedGroups {
   });
  }
  async pending(stream:string){await this.ready();await this.fence();return !!await this.db.getFirstAsync('SELECT 1 FROM gv_feed_group_frames WHERE stream=? LIMIT 1',stream);}
+ async after(stream:string,revision:number){await this.ready();await this.fence();return !!await this.db.getFirstAsync('SELECT 1 FROM gv_feed_group_frames WHERE stream=? AND revision>? LIMIT 1',stream,revision);}
+ /** A protocol-confirmed close retires only that source's membership frames.
+  * Shared entity transactions remain queued for the terminal watermark. */
+ async discardSource(stream:string,id:string){await this.ready();await this.fence();let remaining=false;
+  await this.db.withTransactionAsync(async()=>{
+   const predicate="stream=? AND json_extract(body,'$.id')=? AND json_extract(body,'$.type') IN ('replica.delta','replica.ready')";
+   const size=await this.db.getFirstAsync<{bytes:number;frames:number}>('SELECT coalesce(sum(bytes),0) bytes,count(*) frames FROM (SELECT bytes FROM gv_feed_group_frames WHERE '+predicate+' ORDER BY sequence LIMIT 128)',stream,id);
+   if(size?.frames){await this.db.runAsync('DELETE FROM gv_feed_group_frames WHERE stream=? AND sequence IN (SELECT sequence FROM gv_feed_group_frames WHERE '+predicate+' ORDER BY sequence LIMIT 128)',stream,stream,id);if(!await this.db.getFirstAsync('UPDATE gv_feed_group_usage SET bytes=bytes-?,frames=frames-? WHERE id=1 AND bytes>=? AND frames>=? RETURNING id',size.bytes,size.frames,size.bytes,size.frames))fail('INTENT_CORRUPT','Unfinished feed accounting differs');}
+   remaining=!!await this.db.getFirstAsync('SELECT 1 FROM gv_feed_group_frames WHERE '+predicate+' LIMIT 1',stream,id);
+  });return remaining;
+ }
  async recover(){await this.ready();await this.fence();await this.db.runAsync('INSERT OR IGNORE INTO gv_feed_group_retired SELECT DISTINCT stream FROM gv_feed_group_frames');}
  async retire(stream:string){await this.ready();await this.fence();await this.db.runAsync('INSERT OR IGNORE INTO gv_feed_group_retired VALUES(?)',stream);}
  async collect(){await this.ready();await this.fence();const row=await this.db.getFirstAsync<{stream:string}>('SELECT stream FROM gv_feed_group_retired ORDER BY stream LIMIT 1');if(!row)return false;

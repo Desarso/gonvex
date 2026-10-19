@@ -127,7 +127,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
   if(state.watermark===undefined||[...this.sources.values()].some(source=>source.opening))return;
   const revision=state.watermark;
   const readySources=new Set<string>();let applied=false;await this.run(state,0,()=>this.options.owner.database.withTransactionAsync(async()=>{
-   const pending=await this.options.owner.database.getFirstAsync<{unclosed:number;applied:number}>('SELECT unclosed,applied FROM gv_native_feed_progress WHERE scope=? AND epoch=?',state.scope,state.epoch);if(pending&&pending.unclosed>revision)return;
+   const pending=await this.options.owner.database.getFirstAsync<{unclosed:number;applied:number}>('SELECT unclosed,applied FROM gv_native_feed_progress WHERE scope=? AND epoch=?',state.scope,state.epoch);if(pending&&pending.unclosed>revision||await this.groups.after(state.stream,revision))return;
    const publish=async()=>{
    await this.groups.drain(state.stream,revision,async frame=>{
     if(frame.type==='replica.transactionEncoded'){const keys=Object.fromEntries(Object.entries(this.options.owner.engine.schema).map(([entity,table])=>[entity,table.key]));await this.mutate(state.scope,async()=>{await this.options.owner.canonical.applyTransaction({cursor:frame.cursor,changes:decodeSQLiteNativeTransaction(frame,keys)},empty,state.scope);});}
@@ -168,6 +168,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
    }
    case 'replica.closed':{
     const source=this.source(message.id),closing=source.closing;if(!closing)fail('INVALID_ROW','Unexpected native source close acknowledgement');
+    while(await this.run(state,16384,()=>this.groups.discardSource(state.stream,source.id))){}
     await this.run(state,16384,async()=>{
      const stage=source.start?{subscription:source.id,snapshot:source.start.snapshotId}:await owner.database.getFirstAsync<{subscription:string;snapshot:string}>('SELECT a.subscription,a.snapshot FROM gv_windows w JOIN gv_snapshot_window_alias a USING(scope,signature,generation) WHERE w.scope=? AND w.signature=?',state.scope,source.signature);
      if(stage)await owner.snapshots.discard(state.scope,stage.subscription,stage.snapshot);

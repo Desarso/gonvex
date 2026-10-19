@@ -217,3 +217,14 @@ it('accounts shared schema column names as references under the unchanged source
   expect(feed.stats().sources).toBe(100);expect(feed.stats().sourceBytes).toBeLessThan(262144);
  }finally{feed.close();}
 });
+
+it('retires closed membership frames without losing the shared transaction or publishing ahead of its watermark',async()=>{
+ const f=await fixture();await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();
+ f.transaction(12);const values=[{...changed,n:12},rows[1]!];
+ f.feed.frame({type:'replica.delta',id:'source',cursor:cursor(12),canonicalUpserts:[stable(values[0]!)],deleted:[],digest:await digest(values)},1);await f.ready(12,values);
+ const closing=f.feed.closeSource('source');f.feed.frame({type:'replica.closed',id:'source'},1);await closing;
+ expect(f.failures).toEqual([]);expect((await f.canonical.loadEntityRows('visible','tasks',['a']))[0]?.row?.n).toBe(1);
+ f.feed.frame({type:'replica.watermark',revision:12},1);await f.feed.assertReadable();expect(f.failures).toEqual([]);
+ expect((await f.canonical.loadEntityRows('visible','tasks',['a']))[0]?.row?.n).toBe(12);
+ expect(await f.db.getFirstAsync('SELECT bytes,frames FROM gv_feed_group_usage WHERE id=1')).toEqual({bytes:0,frames:0});expect(await f.engine.integrity()).toBe('ok');
+});
