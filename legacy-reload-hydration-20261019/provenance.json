@@ -1,0 +1,29 @@
+{
+  "appHead": "68c482e010510b96b6afd69a2e8839c38937fbab",
+  "baselineRuntimeHead": "5f25a68929596f496a82c1b57db64560db2171f4",
+  "candidateRuntimeHead": "f4cba811fb29edbc205019c380f1107bb2e8eb7e",
+  "sdkFixHead": "5185d461500eff2babdd923edd0e280cfde69612",
+  "fixture": "Private synthetic 31,012-task Whagons fixture; no customer data",
+  "largeViewport": {
+    "width": 1886,
+    "height": 1041,
+    "dpr": 1
+  },
+  "files": {
+    "before-reload-hang.png": {
+      "sha256": "7202bd0bc5a49f56c2e5ae00b6be5182fef2d87df1b04d34ab06c85708447000",
+      "capturedAt": "2026-10-19T11:41:17.515565+00:00",
+      "source": "visibility-private/runs/runtime-large-1-01-fair/failure.png"
+    },
+    "after-reload-5-related.png": {
+      "sha256": "8f76b4ddaec723a8625667aa344a10d98ec050a2cd7c890cca843d717adbebd2",
+      "capturedAt": "2026-10-19T12:18:18.737103+00:00",
+      "source": "visibility-private/runs/legacy-reload-fixed-1/reload-5-related.png"
+    },
+    "proof-summary.json": {
+      "sha256": "667e5aa1b0cf47a449848e288ab925824c110c825d2670f2d3a63e9866d3cbe9",
+      "capturedAt": "2026-10-19T12:19:25.986341+00:00",
+      "source": "results/legacy-reload-proof-summary.json"
+    }
+  }
+}

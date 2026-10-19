@@ -1,0 +1,61 @@
+{
+  "label": "legacy-reload-fixed-1",
+  "appCommit": "68c482e010510b96b6afd69a2e8839c38937fbab",
+  "runtimeCommit": "f4cba811fb29edbc205019c380f1107bb2e8eb7e",
+  "sdkFix": {
+    "appHead": "68c482e010510b96b6afd69a2e8839c38937fbab",
+    "sourceSDKHead": "5185d461500eff2babdd923edd0e280cfde69612",
+    "sourceSDKPatchSHA256": "31bed756f60d24f97701ee2d6530177afb253548dedb3191ce82c3a945cf4555",
+    "originalDistSHA256": "aede08210b333389f5fb2a0477007b5f4f8ec83be32d73fce0665aab6486e88b",
+    "fixedDistSHA256": "2eca10c7205d9f31cbf4ba0689d7ff73887a0fae33814e336a2517ee7f5bb256",
+    "installedPatchSHA256": "75384f952a07a9a3193c1ddf69bc29d1019f68306853a18dd8ddb823e5b95a85",
+    "policy": "Only copied owned legacy client hydration-window invalidation changed; no application/backend/codegen changes"
+  },
+  "errors": [],
+  "diagnostic": true,
+  "phases": [
+    {
+      "phase": "cold",
+      "gridMs": 6137,
+      "relatedMs": 51377,
+      "passed": true
+    },
+    {
+      "phase": "reload-1",
+      "gridMs": 1916,
+      "relatedMs": 5495,
+      "passed": true
+    },
+    {
+      "phase": "reload-2",
+      "gridMs": 1989,
+      "relatedMs": 4489,
+      "passed": true
+    },
+    {
+      "phase": "reload-3",
+      "gridMs": 1639,
+      "relatedMs": 3114,
+      "passed": true
+    },
+    {
+      "phase": "reload-4",
+      "gridMs": 1842,
+      "relatedMs": 4263,
+      "passed": true
+    },
+    {
+      "phase": "reload-5",
+      "gridMs": 1731,
+      "relatedMs": 4131,
+      "passed": true
+    }
+  ],
+  "fixture": "31,012 private synthetic tasks",
+  "viewport": {
+    "width": 1886,
+    "height": 1041,
+    "dpr": 1
+  },
+  "checks": "Each phase: authorized visible workspace,12 real taskName cells,two animation frames,all250 assignments/contexts/status/priority/workspace references,31014 taskUsers,7members,1000 complete scoped contexts,12 visible expected assignee names."
+}
