@@ -91,7 +91,8 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
  frame(message:ServerMessage,generation:number){
   if(!message.type.startsWith('replica.'))return false;
   const state=this.state;if(!state||state.generation!==generation||state.closed)fail('FENCED','Control frame has no native session');
-  const bytes=sqlitePayloadBytes(message,262144);if(this.queued>=64||this.queuedBytes+bytes>2097152)fail('BUDGET','Native control queue exceeded budget');
+  const bytes=sqlitePayloadBytes(message,262144);// One certificate per admitted source plus bounded protocol controls.
+  if(this.queued>=320||this.queuedBytes+bytes>2097152)fail('BUDGET','Native control queue exceeded budget');
   const release=this.options.reserve?.(bytes+512);let owned:ServerMessage;try{owned=structuredClone(message);}catch(error){release?.();throw error;}const preceding=state.ingress.flush();void preceding.catch(()=>{});this.queued++;this.queuedBytes+=bytes;
   const next=state.gate.then(()=>preceding).then(async()=>{this.check(state);await this.process(state,owned);});state.gate=next;
   void next.then(()=>{this.queued--;this.queuedBytes-=bytes;release?.();},error=>{this.queued--;this.queuedBytes-=bytes;release?.();this.reject(state,error);});return true;

@@ -228,3 +228,10 @@ it('retires closed membership frames without losing the shared transaction or pu
  expect((await f.canonical.loadEntityRows('visible','tasks',['a']))[0]?.row?.n).toBe(12);
  expect(await f.db.getFirstAsync('SELECT bytes,frames FROM gv_feed_group_usage WHERE id=1')).toEqual({bytes:0,frames:0});expect(await f.engine.integrity()).toBe('ok');
 });
+
+it('admits the declared source certificate burst plus a watermark within unchanged byte limits',async()=>{
+ const f=await fixture();await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();
+ const certificate=await digest();
+ for(let n=0;n<255;n++){const id='small-'+n;f.feed.register({id,signature:'tasks-all',entity:'tasks',key:'id',path:'tasks/all'});f.feed.frame({type:'replica.ready',id,cursor:cursor(10),digest:certificate},1);}
+ await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();expect(f.failures).toEqual([]);expect(f.feed.stats().opening).toBe(0);expect(await f.engine.integrity()).toBe('ok');
+});
