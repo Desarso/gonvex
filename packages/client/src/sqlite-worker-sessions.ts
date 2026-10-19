@@ -6,7 +6,7 @@ import {ByteLedger} from './byte-budget.js';
 import {fail,sqlitePayloadBytes} from './sqlite-admission.js';
 
 type Phase='unavailable'|'authenticating'|'online'|'offline'|'quarantined';
-type Connection={id:string;intentScope:string;transportGeneration:number;revision:number;phase:Phase;session?:LocalReplicaSession;bytes:number};
+type Connection={id:string;intentScope:string;transportGeneration:number;revision:number;phase:Phase;session?:LocalReplicaSession;readGeneration?:string;bytes:number};
 export type WorkerSessionStorage={loadSession(scope:string):Promise<LocalReplicaSession|undefined>;saveSession(scope:string,session:LocalReplicaSession|undefined,options:{current():boolean;ifAbsent?:boolean}):Promise<void>};
 type Options={
  artifactHash:string;offlineMaxAgeMs:number|null;
@@ -15,6 +15,7 @@ type Options={
 } & ({storage:WorkerSessionStorage}|{database:SQLiteReplicaDatabase;canonical:Pick<SQLiteLocalReplicaStorage,'loadSession'|'saveSession'>;fence():Promise<unknown>});
 const maxConnections=8,maxTabs=64,maxSessionBytes=32768,maxBytes=maxConnections*(maxSessionBytes+2048)+maxTabs*512;
 const clone=<T>(value:T):T=>JSON.parse(JSON.stringify(value));
+async function cachedReadKey(scope:string,session:LocalReplicaSession){const bytes=new TextEncoder().encode(JSON.stringify(['gonvex-cached-read-v1',scope,session.directive,session.identity,session.artifactHash]));return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),byte=>byte.toString(16).padStart(2,'0')).join('');}
 function key(value:string,max:number){if(typeof value!=='string'||!value||value.length>max)throw new TypeError('Invalid worker session identity');}
 
 /** Trusted owner-only session registry. Application RPCs must never call its
@@ -74,10 +75,10 @@ export class SQLiteWorkerSessions {
   if(await this.options.safety.sessionRevoked(scope)){this.check(record,revision,isCurrent);record.session=undefined;record.phase='quarantined';record.bytes=2048;return false;}
   const saved=await this.options.safety.session(scope)??await this.storage.loadSession(scope);
   this.check(record,revision,isCurrent);if(!saved)return false;
-  const session=clone(saved),bytes=this.validate(session);
+  const session=clone(saved),bytes=this.validate(session),readGeneration=await cachedReadKey(scope,session);
   // A concurrent definitive denial must win even when fallback loading waited.
   if(await this.options.safety.sessionRevoked(scope))return false;
-  this.check(record,revision,isCurrent);record.session=session;record.bytes=2048+bytes;
+  this.check(record,revision,isCurrent);record.session=session;record.readGeneration=readGeneration;record.bytes=2048+bytes;
   // During token refresh reads use the cached admission, but native frames
   // remain quarantined until activate publishes a durable online session.
   if(record.phase!=='authenticating')record.phase='offline';return true;
@@ -103,12 +104,13 @@ export class SQLiteWorkerSessions {
   this.check(record,revision,isCurrent);
   if(!input.directive||!input.identity){record.session=undefined;record.phase='unavailable';record.bytes=2048;return false;}
   const session:LocalReplicaSession=clone({directive:input.directive,identity:input.identity,artifactHash:input.artifactHash,lastOnlineAtMs:input.lastOnlineAtMs}),bytes=this.validate(session);
+  const readGeneration=await cachedReadKey(record.intentScope,session);this.check(record,revision,isCurrent);
   const current=()=>this.current(record,revision,isCurrent);
   return this.persist(bytes,async()=>{
   this.check(record,revision,isCurrent);
   await this.options.safety.saveSession(record.intentScope,session,true,current);this.check(record,revision,isCurrent);
   await this.storage.saveSession(record.intentScope,session,{current});
-  this.check(record,revision,isCurrent);record.session=session;record.bytes=2048+bytes;record.phase='online';record.revision=this.revision();return true;
+  this.check(record,revision,isCurrent);record.session=session;record.readGeneration=readGeneration;record.bytes=2048+bytes;record.phase='online';record.revision=this.revision();return true;
   });
  }
  /** Called synchronously at definitive transport denial. All tabs sharing this
@@ -121,9 +123,9 @@ export class SQLiteWorkerSessions {
  }
  resolveTab(tab:string,write=false,now=Date.now()){
   const id=this.tabs.get(tab);if(!id)fail('FENCED','Tab has no authenticated worker connection');
-  const record=this.connection(id),session=record.session;if(!session||record.phase==='quarantined'||record.phase==='unavailable')fail('FENCED','Worker session is unavailable');
+  const record=this.connection(id),session=record.session;if(!session||!record.readGeneration||record.phase==='quarantined'||record.phase==='unavailable')fail('FENCED','Worker session is unavailable');
   if(write&&record.phase!=='online'&&this.options.offlineMaxAgeMs!==null&&(!Number.isSafeInteger(now)||now<(session.lastOnlineAtMs??0)||now-(session.lastOnlineAtMs??0)>this.options.offlineMaxAgeMs))fail('FENCED','Offline editing window expired. Reconnect before making more changes.');
-  return {scope:session.directive.visibilityScope,intentScope:record.intentScope,generation:record.id+':'+record.revision,identity:clone(session.identity),artifactHash:session.artifactHash,online:record.phase==='online'};
+  return {scope:session.directive.visibilityScope,intentScope:record.intentScope,generation:record.id+':'+record.revision,readGeneration:record.readGeneration,identity:clone(session.identity),artifactHash:session.artifactHash,online:record.phase==='online'};
  }
  /** Owner-only bounded session capture for independent intent durability. */
  sessionForConnection(id:string){const record=this.connection(id);if(!record.session||record.phase==='quarantined'||record.phase==='unavailable')fail('FENCED','Worker session is unavailable');return clone(record.session);}

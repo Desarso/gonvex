@@ -110,7 +110,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
    const admitted=this.admission(connection);if(!admitted)return;
    for(;;){
     const count=await this.owner.runOwner(262144,async()=>{let count=0;await this.owner.database.withTransactionAsync(async()=>{
-     const current=this.admission(connection);if(!current||current.generation!==admitted.generation)fail('FENCED','Recovery admission changed');
+     const current=this.admission(connection);if(!current||current.readGeneration!==admitted.readGeneration)fail('FENCED','Recovery admission changed');
      const entries=await this.reducer.journal.unrecovered(admitted.intentScope);
      for(const entry of entries)await this.reducer.core.recoverLegacy({scope:admitted.scope,path:entry.path,commandId:entry.idempotencyKey,args:entry.args as JsonValue,now:entry.localExecution?.now??entry.createdAt,...(entry.localExecution?.intentEntropy===undefined?{}:{intentEntropy:entry.localExecution.intentEntropy})},entry);
      count=entries.length;
@@ -122,14 +122,15 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
  private checkCaller(caller:SQLiteOwnerCaller,connection:Connection,generation?:string){
   if(caller.signal.aborted||this.tabs.get(caller.tabID)!==connection.id)fail('FENCED','Native caller detached');const current=this.sessions.resolveTab(caller.tabID);if(generation!==undefined&&current.generation!==generation)fail('FENCED','Native read admission changed');return current;
  }
+ private checkCachedCaller(caller:SQLiteOwnerCaller,connection:Connection,generation:string){const current=this.checkCaller(caller,connection);if(current.readGeneration!==generation)fail('FENCED','Cached read admission changed');return current;}
  private async readCommitted<T>(connection:Connection,admitted:ReturnType<SQLiteWorkerSessions['resolveTab']>,caller:SQLiteOwnerCaller,read:()=>Promise<T>){
   await this.recover(connection);
   const attempt=()=>this.owner.runOwner(131072,async()=>{
    let result!:T;await this.owner.database.withTransactionAsync(async()=>{
-    this.checkCaller(caller,connection,admitted.generation);const saved=await this.owner.canonical.loadSession(admitted.intentScope);
+    this.checkCachedCaller(caller,connection,admitted.readGeneration);const saved=await this.owner.canonical.loadSession(admitted.intentScope);
     if(!saved||saved.directive.visibilityScope!==admitted.scope)fail('FENCED','Cached read session changed');
     await connection.feed.assertCommittedReadable({scope:admitted.scope,epoch:saved.directive.epoch});
-    result=await read();this.checkCaller(caller,connection,admitted.generation);
+    result=await read();this.checkCachedCaller(caller,connection,admitted.readGeneration);
    });return result;
   });
   try{const result=await attempt();if(result!==null&&result!==undefined)return result;}catch(error){if((error as {code?:string})?.code!=='PAGE_CHANGED')throw error;}
@@ -324,14 +325,14 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
    case 'watchReplica':{if(connection.controlOnly||connection.public)fail('INVALID_ROW','This connection does not own tenant replica collections');const source=await this.addSource(connection,this.ref(input.path,'query'),input.args??{},caller.tabID,false,input.lease??'default');return {id:source.id,signature:source.signature};}
    case 'unwatchReplica':{text(input.signature,128);const source=connection.sources.get(input.signature);if(source){this.releaseSourceInterest(connection,source,caller.tabID,input.lease??'default');if(!source.tabs.size&&!source.eager){await this.closeSource(connection,source);}}return null;}
    case 'entities':{
-    const admission=this.checkCaller(caller,connection);return this.readCommitted(connection,admission,caller,async()=>{this.checkCaller(caller,connection,admission.generation);const result=await this.owner.reader.entities({scope:admission.scope,entity:input.entity,ids:input.ids,expected:input.expected});this.checkCaller(caller,connection,admission.generation);return result;});
+    const admission=this.checkCaller(caller,connection);return this.readCommitted(connection,admission,caller,async()=>{this.checkCachedCaller(caller,connection,admission.readGeneration);const result=await this.owner.reader.entities({scope:admission.scope,entity:input.entity,ids:input.ids,expected:input.expected});this.checkCachedCaller(caller,connection,admission.readGeneration);return result;});
    }
    case 'replicaPendingPage':{
     text(input.signature,128);const source=connection.sources.get(input.signature);if(!source||!source.eager&&!source.tabs.has(caller.tabID))fail('FENCED','Tab does not own that source');const admitted=this.checkCaller(caller,connection),pending=await connection.feed.pendingSource(source.id);if(!pending)return null;
     return this.owner.runOwner(131072,async()=>{const current=()=>{this.checkCaller(caller,connection,admitted.generation);return connection.sources.get(source.signature)===source&&(source.eager||source.tabs.has(caller.tabID));};if(!current())fail('FENCED','Pending source detached');if(!await this.owner.database.getFirstAsync('SELECT 1 FROM gv_snapshot_stages WHERE scope=? AND subscription=? AND snapshot=? AND discarded=0',admitted.scope,pending.subscription,pending.snapshot)){if(input.expected)fail('PAGE_CHANGED','Pending source was replaced');return null;}if(await this.owner.database.getFirstAsync('SELECT 1 FROM gv_snapshot_activation_receipts WHERE scope=? AND subscription=? AND snapshot=?',admitted.scope,pending.subscription,pending.snapshot)){if(input.expected)fail('PAGE_CHANGED','Pending source has become canonical');return null;}return this.owner.pendingReader.page({scope:admitted.scope,...pending,after:input.after,limit:input.limit,expected:input.expected},current);});
    }
    case 'replicaPage':{
-    text(input.signature,128);const source=connection.sources.get(input.signature);if(!source||!source.eager&&!source.tabs.has(caller.tabID))fail('FENCED','Tab does not own that source');const admission=this.checkCaller(caller,connection);return this.readCommitted(connection,admission,caller,async()=>{this.checkCaller(caller,connection,admission.generation);const result=await this.owner.reader.window({scope:admission.scope,signature:source.signature,offset:input.offset,limit:input.limit,generation:input.generation,expected:input.expected});this.checkCaller(caller,connection,admission.generation);if(connection.sources.get(source.signature)!==source||!source.eager&&!source.tabs.has(caller.tabID))fail('FENCED','Native source was detached');return result??null;});
+    text(input.signature,128);const source=connection.sources.get(input.signature);if(!source||!source.eager&&!source.tabs.has(caller.tabID))fail('FENCED','Tab does not own that source');const admission=this.checkCaller(caller,connection);return this.readCommitted(connection,admission,caller,async()=>{this.checkCachedCaller(caller,connection,admission.readGeneration);const result=await this.owner.reader.window({scope:admission.scope,signature:source.signature,offset:input.offset,limit:input.limit,generation:input.generation,expected:input.expected});this.checkCachedCaller(caller,connection,admission.readGeneration);if(connection.sources.get(source.signature)!==source||!source.eager&&!source.tabs.has(caller.tabID))fail('FENCED','Native source was detached');return result??null;});
    }
    case 'prepareReducer':{const ref=this.ref(input.path,'reducer');if(ref.localExecution===1)await this.reducer.core.prepare(ref.path);if(caller.signal.aborted||this.tabs.get(caller.tabID)!==connection.id)fail('FENCED','Reducer preparation caller detached');return null;}
    case 'localLivePage':{
@@ -355,13 +356,13 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
      const {table:_table,membership:_membership,...options}=lowered.plan;options.limit=Math.min(128,options.limit);
      const plan=sqliteCollectionPagePlan(source.ref,source.args,options,{signature:source.signature,generation:header.generation},new Set(Object.keys(context.coverage)));
      const page=await this.reducer.predictions.page(admitted.scope,plan.plan,plan.allowLocalInserts);
-     this.checkCaller(caller,connection,admitted.generation);
+     this.checkCachedCaller(caller,connection,admitted.readGeneration);
      return {...page,supported:true,complete:page.cursor===null,generation:header.generation};
     });
    }
    case 'collectionPage':{
     text(input.signature,128);const source=connection.sources.get(input.signature);if(!source||!source.eager&&!source.tabs.has(caller.tabID))fail('FENCED','Tab does not own that collection');const admitted=this.checkCaller(caller,connection);
-    return this.readCommitted(connection,admitted,caller,async()=>{const owns=()=>{this.checkCaller(caller,connection,admitted.generation);if(connection.sources.get(source.signature)!==source||!source.eager&&!source.tabs.has(caller.tabID))fail('FENCED','Native collection was detached');};owns();const header=await this.windows.header(admitted.scope,source.signature);if(!header) return null;
+    return this.readCommitted(connection,admitted,caller,async()=>{const owns=()=>{this.checkCachedCaller(caller,connection,admitted.readGeneration);if(connection.sources.get(source.signature)!==source||!source.eager&&!source.tabs.has(caller.tabID))fail('FENCED','Native collection was detached');};owns();const header=await this.windows.header(admitted.scope,source.signature);if(!header) return null;
      if(input.generation!==undefined&&input.generation!==header.generation)fail('PAGE_CHANGED','Collection membership changed');const context=await this.context(admitted.scope),lowered=sqliteCollectionPagePlan(source.ref,source.args,input.plan,{signature:source.signature,generation:header.generation},new Set(Object.keys(context.coverage)));
      if(input.plan.after&&input.generation===undefined)throw new TypeError('Collection keyset continuation requires its window generation');if(input.plan.search&&source.ref.replica?.columns&&this.owner.engine.schema[lowered.plan.table]?.search?.some(field=>!source.ref.replica!.columns!.includes(field)))fail('INVALID_ROW','Search requires undeclared collection columns');
      const page=await this.reducer.predictions.page(admitted.scope,lowered.plan,lowered.allowLocalInserts);owns();return {...page,generation:header.generation};

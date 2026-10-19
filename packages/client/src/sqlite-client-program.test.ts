@@ -261,3 +261,20 @@ it('opens no unused generated collection merely because its declared budget is s
  expect(f.program.budgets().find(value=>value.name==='native-source-interests')?.entries).toBe(0);
  const {socket}=await f.authenticate();expect(socket.sent.filter(message=>message.type==='replica.open').map(message=>message.path)).toEqual(['__local.tasks','__local.backgroundTasks']);
 });
+
+it('serves an in-flight committed page across disconnect without accepting obsolete frame admission',async()=>{
+ const f=await fixture(),{socket}=await f.authenticate(),source:any=await f.call({method:'watchReplica',path:'__local.tasks',args:{}});
+ const read=f.owner.reader.window.bind(f.owner.reader);let release!:()=>void,started!:()=>void;const held=new Promise<void>(resolve=>release=resolve),entered=new Promise<void>(resolve=>started=resolve);
+ vi.spyOn(f.owner.reader,'window').mockImplementationOnce(async input=>{started();await held;return read(input);});
+ const page=f.call({method:'replicaPage',signature:source.signature,limit:10});await entered;socket.close();socket.receive({type:'replica.transactionEncoded',cursor:{epoch:'e',revision:2},canonicalChanges:[JSON.stringify({entity:'tasks',id:'a',operation:'update',newValue:{id:'a',n:999}})]});release();
+ expect((await page as any).rows).toEqual([{id:'a',value:{id:'a',n:1}}]);
+ expect((await f.call({method:'controls'}) as any).status.isWebSocketConnected).toBe(false);expect(await f.engine.integrity()).toBe('ok');
+});
+
+it('fences an in-flight cached page immediately when tenant admission is revoked',async()=>{
+ const f=await fixture(),{socket}=await f.authenticate(),source:any=await f.call({method:'watchReplica',path:'__local.tasks',args:{}});
+ const read=f.owner.reader.window.bind(f.owner.reader);let release!:()=>void,started!:()=>void;const held=new Promise<void>(resolve=>release=resolve),entered=new Promise<void>(resolve=>started=resolve);
+ vi.spyOn(f.owner.reader,'window').mockImplementationOnce(async input=>{started();await held;return read(input);});
+ const page=f.call({method:'replicaPage',signature:source.signature,limit:10}),rejected=expect(page).rejects.toMatchObject({code:'FENCED'});await entered;
+ socket.receive({type:'auth.error',id:'membership-changed',error:'Member removed',code:'member_removed'});release();await rejected;
+});

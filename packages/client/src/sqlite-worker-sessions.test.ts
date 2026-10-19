@@ -103,3 +103,14 @@ it('imports a fenced cached session before network admission without refreshing 
 it('does not let cached migration revive revocation or overwrite a newer authoritative admission',async()=>{
  const f=await fixture();try{await f.safety.revokeSession('identity\u0000a');expect(await f.registry.importCached('one',saved)).toBe(false);expect(await f.canonical.loadSession('identity\u0000a')).toBeUndefined();await f.registry.activate('one',{...admitted(),lastOnlineAtMs:3000},()=>true);expect(await f.registry.importCached('one',saved)).toBe(false);expect((await f.safety.session('identity\u0000a'))?.lastOnlineAtMs).toBe(3000);expect((await f.canonical.loadSession('identity\u0000a'))?.lastOnlineAtMs).toBe(3000);}finally{f.close();}
 });
+
+it('keeps cached-read admission stable across transport retries and changes it for verified visibility changes',async()=>{
+ const f=await fixture();try{
+  await f.registry.activate('one',admitted(),()=>true);const first=f.registry.resolveTab('tab');
+  f.registry.disconnected('one');f.registry.authenticating('one','identity\u0000a',2);expect(f.registry.resolveTab('tab').readGeneration).toBe(first.readGeneration);expect(f.registry.resolveTab('tab').generation).not.toBe(first.generation);expect(f.registry.admitsFrames('one',2)).toBe(false);
+  await f.registry.restore('one');expect(f.registry.resolveTab('tab').readGeneration).toBe(first.readGeneration);
+  await f.registry.activate('one',admitted('identity\u0000a',2),()=>true);expect(f.registry.resolveTab('tab').readGeneration).toBe(first.readGeneration);
+  f.registry.authenticating('one','identity\u0000a',3);const next=admitted('identity\u0000a',3);next.directive={...next.directive!,visibilityScope:'changed-visibility'};await f.registry.activate('one',next,()=>true);expect(f.registry.resolveTab('tab').readGeneration).not.toBe(first.readGeneration);
+  await f.registry.quarantine('one',3);expect(()=>f.registry.resolveTab('tab')).toThrow('unavailable');
+ }finally{f.close();}
+});
