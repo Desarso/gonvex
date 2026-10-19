@@ -161,3 +161,11 @@ it('services control hints without invalidating every mounted data page',async()
  expect(watch.snapshot().stale).toBe(false);expect(watch.snapshot().page).toBe(page);expect(notify).not.toHaveBeenCalled();
  f.change();expect(watch.snapshot().stale).toBe(true);expect(notify).toHaveBeenCalledOnce();stop();
 });
+
+it('does not spin the microtask queue after a replica read is fenced or the client closes',async()=>{
+ const f=fixture();let reads=0;f.handler=input=>{if(input.method==='replicaPage'){reads++;throw Object.assign(Error('Admission unavailable'),{code:'FENCED'});}};
+ const watch=f.client.watchReplica({path:'tasks/all'}),stop=watch.onUpdate(vi.fn());
+ await new Promise(resolve=>setTimeout(resolve,50));expect(reads).toBe(1);
+ f.change();await vi.waitFor(()=>expect(reads).toBe(2));
+ f.client.close();await new Promise(resolve=>setTimeout(resolve,50));expect(reads).toBe(2);stop();watch.close();
+});
