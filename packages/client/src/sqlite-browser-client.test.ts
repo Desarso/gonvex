@@ -310,12 +310,41 @@ it('paces mounted reducer code preparation while cached queries remain usable',a
  expect(f.calls.filter(call=>call.input.method==='prepareReducer').map(call=>call.input.path)).toEqual(['background/one','background/two']);
  expect(f.client.budgets().find(value=>value.name==='browser-request-admission')?.bytes).toBe(0);
 });
+it('coalesces concurrent preparation of the same reducer without retaining a failed promise',async()=>{
+ const f=fixture();await f.client.connect();let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});let fail=true;
+ f.handler=async input=>{if(input.method==='prepareReducer'){await gate;if(fail)throw Error('Synthetic missing offline chunk');return null;}};
+ const pending=Array.from({length:32},()=>f.client.prepareReducer({path:'tasks/edit'})),settled=Promise.allSettled(pending);
+ await vi.waitFor(()=>expect(f.calls.some(call=>call.input.method==='prepareReducer')).toBe(true));release();
+ expect((await settled).every(value=>value.status==='rejected')).toBe(true);expect(f.calls.filter(call=>call.input.method==='prepareReducer')).toHaveLength(1);
+ fail=false;await f.client.prepareReducer({path:'tasks/edit'});expect(f.calls.filter(call=>call.input.method==='prepareReducer')).toHaveLength(2);
+ expect(f.client.budgets().find(value=>value.name==='browser-shared-reads')?.bytes).toBe(0);expect(f.client.budgets().find(value=>value.name==='browser-request-admission')?.bytes).toBe(0);
+});
+it('keeps foreground requests usable while the background preparation queue is full',async()=>{
+ const f=fixture();await f.client.connect();let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});
+ f.handler=async input=>{if(input.method==='prepareReducer'){await gate;return null;}};
+ const pending=Array.from({length:256},(_,i)=>f.client.prepareReducer({path:'background/'+i})),settled=Promise.allSettled(pending);
+ const visible=f.client.query({path:'visible/query'});void visible.catch(()=>{});
+ try{
+  await vi.waitFor(()=>expect(f.calls.some(call=>call.input.method==='query')).toBe(true));await expect(visible).resolves.toEqual({identity:'a'});
+  await expect(f.client.invokeReducer({path:'visible/edit'},{})).resolves.toMatchObject({result:2});
+  expect(f.calls.filter(call=>call.input.method==='prepareReducer')).toHaveLength(1);
+  expect(f.client.budgets().find(value=>value.name==='browser-request-admission')?.entries).toBe(256);
+ }finally{release();await settled;await Promise.allSettled([visible]);}
+});
+it('does not share a pending reducer preparation across owner generations',async()=>{
+ const f=fixture();await f.client.connect();let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});let calls=0;
+ f.handler=async input=>{if(input.method==='prepareReducer'){if(++calls===1)await gate;return null;}};
+ const first=f.client.prepareReducer({path:'tasks/edit'});void first.catch(()=>{});await vi.waitFor(()=>expect(calls).toBe(1));
+ f.replaceOwner();const second=f.client.prepareReducer({path:'tasks/edit'});release();
+ await expect(first).rejects.toMatchObject({code:'FENCED'});await second;expect(calls).toBe(2);
+ expect(f.client.budgets().find(value=>value.name==='browser-request-admission')?.bytes).toBe(0);
+});
 
 it('bounds queued preparation with the existing shared budget and cancels queued code loads on close',async()=>{
  const f=fixture();await f.client.connect();let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});
  f.handler=async input=>{if(input.method==='prepareReducer'){await gate;return null;}};
- const pending=Array.from({length:384},(_,i)=>f.client.prepareReducer({path:'background/'+i}));const settled=Promise.allSettled(pending);
- await vi.waitFor(()=>expect(f.client.budgets().find(value=>value.name==='browser-request-admission')?.entries).toBe(384));
+ const pending=Array.from({length:256},(_,i)=>f.client.prepareReducer({path:'background/'+i}));const settled=Promise.allSettled(pending);
+ await vi.waitFor(()=>expect(f.client.budgets().find(value=>value.name==='browser-request-admission')?.entries).toBe(256));
  await expect(f.client.prepareReducer({path:'overflow'})).rejects.toMatchObject({code:'BUDGET'});
  f.client.close();release();expect((await settled).every(result=>result.status==='rejected')).toBe(true);
  expect(f.calls.filter(call=>call.input.method==='prepareReducer')).toHaveLength(1);

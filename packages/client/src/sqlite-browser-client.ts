@@ -58,6 +58,7 @@ export class SQLiteBrowserClient {
  private readonly memberships=new SQLiteBrowserMemberships();
  private readonly requests=new SQLiteTransientBudget(2097152,128);
  private preparationLane:Promise<void>=Promise.resolve();
+ private readonly preparations=new Map<string,Promise<void>>();
  private readonly pages=new BoundedByteCache<string,Page>('browser-row-pages',2097152,192,this.ledger);
  private readonly tokenRequests=new Set<string>();private readonly tokenCancels=new Map<string,()=>void>();private polling?:Promise<void>;private pollAgain=false;
  private readonly releaseChanges:()=>void;private controlsValue?:Pick<Controls,'status'|'session'|'failure'|'authentication'|'serverInfo'>;
@@ -273,11 +274,14 @@ export class SQLiteBrowserClient {
  async reducer<T extends JsonValue=JsonValue>(ref:FunctionReference,args:JsonValue={},_options:CallOptions={}):Promise<T|QueuedReducerOutcome>{if(this.publicTenant&&(_options.offline==='queue'||_options.optimistic?.length))throw new GonvexClientError('Public reducers are online-only',{code:'disconnected',path:ref.path,operation:'reducer'});const receipt=await this.invokeReducer(ref,args);return receipt.queuedOnly?{status:'queued',reducerId:receipt.commandId}:receipt.result as T;}
  async prepareReducer(ref:Pick<FunctionReference,'path'>):Promise<void>{
   const revision=this.revision,input={method:'prepareReducer',path:ref.path};this.current(revision);
-  // Keep queued code loads inside the existing byte/request allowance, but
-  // dispatch only one at a time so mounted actions cannot fill the owner's
-  // RPC slots ahead of visible reads. Invocations use their direct RPC path.
-  const release=await this.requests.acquire(sqlitePayloadBytes(input,131072)+512);
-  const operation=this.preparationLane.then(()=>{this.current(revision);return this.rpc<void>(input,undefined,true);}).finally(release);
+  if(typeof ref.path!=='string'||!ref.path||ref.path.length>1024)throw new TypeError('Invalid reducer path');
+  const key=stable({revision,path:ref.path}),pending=this.preparations.get(key);if(pending)return pending;
+  if(this.preparations.size>=this.requests.maxWaitingEntries)fail('BUDGET','Native reducer preparation queue exhausted');
+  const bytes=sqlitePayloadBytes({key,input},65536)+512,releaseQueued=this.requests.hold(bytes);
+  // Only the dispatched warmup uses an RPC slot. Pending work keeps its
+  // metadata charged to the same budget and shares one promise per path.
+  const operation=this.preparationLane.then(async()=>{this.current(revision);releaseQueued();const release=await this.requests.acquire(bytes);try{this.current(revision);return await this.rpc<void>(input,undefined,true);}finally{release();}}).finally(()=>{releaseQueued();if(this.preparations.get(key)===operation)this.preparations.delete(key);});
+  this.preparations.set(key,operation);
   this.preparationLane=operation.then(()=>{},()=>{});return operation;
  }
  query<T extends JsonValue=JsonValue,Args extends JsonValue=JsonValue>(ref:FunctionReference<Args,T>,args:Args={} as Args,_options:CallOptions={}):Promise<T>{return this.rpc({method:'query',path:ref.path,args});}
