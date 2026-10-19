@@ -12,6 +12,7 @@ function isUiPath(value) {
   if (!p || /(?:^|\/)(?:docs?|documentation|tests?|__tests__|__snapshots__|fixtures?|test-support|coverage|e2e|playwright|cypress|stories|storybook|\.storybook|\.github|tooling|scripts|server|backend|bridge|convex|gonvex)(?:\/|$)/i.test(p)) return false;
   // Documentation applications and all Rust sources are explicitly outside UI review.
   if (/^apps\/(?:docs?|documentation)(?:\/|$)/i.test(p) || /\.(?:rs|md|mdx|rst|txt|ya?ml|toml)$/i.test(p)) return false;
+  if (/_test\.dart$/i.test(p)) return false;
   if (/(?:^|\/)[^/]*\.(?:test|spec|stories|story)\.[^/]+$/i.test(p) || /(?:^|\/)(?:readme|changelog|license)(?:\.|$)/i.test(p)) return false;
   if (/^lib\/(?:main|app)\.dart$/i.test(p) || /^lib\/.*\.dart$/i.test(p) && /(?:^|\/)(?:widgets|screens|pages|views|layouts|components|presentation|ui|themes?|l10n|localization|i18n)(?:\/|$)/i.test(p)) return true;
   if (low === 'index.html' || /\.(?:css|scss|sass|less)$/i.test(p)) return true;
