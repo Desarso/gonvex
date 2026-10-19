@@ -60,6 +60,24 @@ it('leaves a newer feed group pending when a ready arrives before its terminal w
  f.transaction(12);f.feed.frame({type:'replica.delta',id:'source',cursor:cursor(12),canonicalUpserts:[stable(changed)],deleted:[],digest:await digest([changed,rows[1]])},1);await f.ready(12,[changed,rows[1]]);await expect(f.feed.assertReadable()).rejects.toMatchObject({code:'PAGE_CHANGED'});expect(f.failures).toEqual([]);expect(f.watermarks).toEqual([10]);
  f.feed.frame({type:'replica.watermark',revision:12},1);await f.feed.assertReadable();expect(f.watermarks).toEqual([10,12]);
 });
+it.each(['queued','running'] as const)('does not certify a newly registered source during a %s watermark publication',async(phase)=>{
+ const f=await fixture();await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();
+ const windows=new SQLiteWindowStore(f.db,()=>f.engine.verifyOwner()),first=(await windows.header('visible','tasks-all'))!;
+ await windows.publishSnapshot('visible',{...first.header,signature:'tasks-second'},'source','base');
+ let release!:()=>void,entered!:()=>void,armed=true;const barrier=new Promise<void>(resolve=>{release=resolve;}),waiting=new Promise<void>(resolve=>{entered=resolve;});
+ if(phase==='queued'){
+  const original=f.owner.runOwner.bind(f.owner);vi.spyOn(f.owner,'runOwner').mockImplementation(async(...args)=>{if(armed&&args[0]===0){armed=false;entered();await barrier;}return original(...args);});
+ }else{
+  const original=f.db.getFirstAsync.bind(f.db);vi.spyOn(f.db,'getFirstAsync').mockImplementation(async(sql,...args)=>{const value=await original(sql,...args);if(armed&&sql.startsWith('SELECT unclosed,applied FROM gv_native_feed_progress')){armed=false;entered();await barrier;}return value;});
+ }
+ f.feed.frame({type:'replica.watermark',revision:12},1);await waiting;
+ f.feed.register({id:'second',signature:'tasks-second',entity:'tasks',key:'id',path:'tasks/second'});release();
+ await f.feed.assertReadable().catch(error=>{expect(error).toMatchObject({code:'PAGE_CHANGED'});});expect(f.failures).toEqual([]);
+ expect((await windows.header('visible','tasks-second'))?.header.cursor).toEqual(cursor(10));
+ f.feed.frame({type:'replica.ready',id:'second',cursor:cursor(10),digest:await digest()},1);f.feed.frame({type:'replica.watermark',revision:12},1);
+ await f.feed.assertReadable();expect(f.failures).toEqual([]);expect(f.watermarks.at(-1)).toBe(12);
+ expect((await windows.header('visible','tasks-second'))?.header.cursor).toEqual(cursor(12));expect(await f.engine.integrity()).toBe('ok');
+});
 it('rolls back final snapshot activation and returns no final credit when a deferred certificate is invalid',async()=>{
  const f=await fixture();await f.start();await f.append(rows.slice(0,1),0,false);await vi.waitFor(()=>expect(f.sends).toHaveLength(1));f.feed.frame({type:'replica.delta',id:'source',cursor:cursor(12),canonicalUpserts:[stable(changed)],deleted:[],digest:'sum128-v1:'+'0'.repeat(32)},1);await f.append(rows.slice(1),1,true);
  await vi.waitFor(()=>expect(f.failures).toHaveLength(1));expect(f.sends).toHaveLength(1);expect(f.watermarks).toEqual([]);expect(await new SQLiteWindowStore(f.db,()=>f.engine.verifyOwner()).header('visible','tasks-all')).toBeUndefined();expect(await f.canonical.loadEntityRows('visible','tasks',['a','b'])).toEqual([]);expect((await f.db.getFirstAsync<{next_page:number}>('SELECT next_page FROM gv_snapshot_stages'))?.next_page).toBe(1);expect(await f.engine.integrity()).toBe('ok');

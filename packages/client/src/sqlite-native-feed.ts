@@ -139,13 +139,17 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
   if(state.watermark===undefined||[...this.sources.values()].some(source=>source.opening))return;
   const revision=state.watermark;if([...this.sources.values()].some(source=>source.deferActivation&&source.start&&source.start.cursor.revision>revision))return;
   const readySources=new Set<string>();let applied=false;await this.run(state,0,()=>this.options.owner.database.withTransactionAsync(async()=>{
+   // Registration does not wait for this SQL turn. Recheck after admission and
+   // keep one source set through the transaction's asynchronous reads. A later
+   // source must earn its own Ready before this watermark can certify it.
+   const sources=[...this.sources.values()];if(sources.some(source=>source.opening))return;
    const pending=await this.options.owner.database.getFirstAsync<{unclosed:number;applied:number}>('SELECT unclosed,applied FROM gv_native_feed_progress WHERE scope=? AND epoch=?',state.scope,state.epoch);if(pending&&pending.unclosed>revision||await this.groups.after(state.stream,revision))return;
-   const stages=[...this.sources.values()].some(source=>source.deferActivation&&source.start),groups=await this.groups.pending(state.stream),windows=await this.options.windowsPending?.(state.scope,state.cursorEpoch??state.epoch,revision);
+   const stages=sources.some(source=>source.deferActivation&&source.start),groups=await this.groups.pending(state.stream),windows=await this.options.windowsPending?.(state.scope,state.cursorEpoch??state.epoch,revision);
    // Repeated quiet watermarks do not change authority. Keep them read-only;
    // new windows or Ready records at this same revision must still publish.
    if(pending&&pending.applied>=revision&&!pending.unclosed&&!stages&&!groups&&!windows){applied=true;return;}
    const publish=async()=>{
-   for(const source of this.sources.values())if(source.deferActivation&&source.start){
+   for(const source of sources)if(source.deferActivation&&source.start){
     const start=source.start,stage=await this.options.owner.database.getFirstAsync<{digest:string;complete:number}>('SELECT digest,complete FROM gv_snapshot_stages WHERE scope=? AND subscription=? AND snapshot=? AND discarded=0',state.scope,source.id,start.snapshotId);
     if(!stage?.complete)fail('PAGE_CHANGED','Warm snapshot has no verified disk stage');
     await this.options.owner.activation.activate({scope:state.scope,subscription:source.id,snapshot:start.snapshotId,header:this.snapshotHeader(source,start,stage.digest)});
@@ -161,7 +165,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
    // reducer completeness after authority has advanced beyond them.
    await this.options.owner.database.runAsync(`UPDATE gv_window_generations AS g SET header=json_set(g.header,'$.cursor.revision',max(json_extract(g.header,'$.cursor.revision'),?))
     WHERE g.scope=? AND json_extract(g.header,'$.cursor.epoch')=? AND (g.signature,g.generation) IN
-     (SELECT w.signature,w.generation FROM gv_windows w WHERE w.scope=? AND w.signature IN (SELECT value FROM json_each(?)))`,revision,state.scope,state.cursorEpoch??'',state.scope,JSON.stringify([...this.sources.values()].filter(source=>!source.closing).map(source=>source.signature)));
+     (SELECT w.signature,w.generation FROM gv_windows w WHERE w.scope=? AND w.signature IN (SELECT value FROM json_each(?)))`,revision,state.scope,state.cursorEpoch??'',state.scope,JSON.stringify(sources.filter(source=>this.sources.get(source.id)===source&&!source.closing&&!source.opening).map(source=>source.signature)));
    await this.options.owner.database.runAsync('DELETE FROM gv_native_feed_resets WHERE scope=?',state.scope);
    await this.options.owner.database.runAsync('INSERT INTO gv_native_feed_progress VALUES(?,?,?, ?,0) ON CONFLICT(scope,epoch) DO UPDATE SET observed=max(observed,excluded.observed),applied=max(applied,excluded.applied),unclosed=0',state.scope,state.epoch,revision,revision);if(!pending||pending.applied<revision||pending.unclosed)await markSQLiteStagingCommit(this.options.owner.database,()=>this.options.owner.engine.verifyOwner());applied=true;
    };if(stages||pending?.unclosed||groups||windows)await this.mutate(state.scope,publish);else await publish();
@@ -215,7 +219,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
      // A resumed source can repeat an existing durable certificate verbatim.
      // No new rows, cursor or completeness become authoritative in this case.
      const unchanged=await this.run(state,0,async()=>{
-      if(!await owner.database.getFirstAsync(`SELECT 1 FROM gv_native_feed_progress p WHERE p.scope=? AND p.epoch=? AND p.unclosed=0 AND p.applied>=?
+      if(!await owner.database.getFirstAsync(`SELECT 1 FROM gv_native_feed_progress p WHERE p.scope=? AND p.epoch=? AND p.unclosed=0 AND p.applied=?
        AND NOT EXISTS(SELECT 1 FROM gv_native_feed_resets r WHERE r.scope=p.scope)
        AND EXISTS(SELECT 1 FROM _gonvex_replica_meta m WHERE m.scope=p.scope AND m.key='currentEpoch' AND m.value=?)`,state.scope,state.epoch,message.cursor.revision,message.cursor.epoch)||await this.groups.pending(state.stream))return false;
       const header=(await this.windows.header(state.scope,source.signature))?.header,columns=source.columns??Object.keys(owner.engine.schema[source.entity]!.fields);
