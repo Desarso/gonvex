@@ -180,7 +180,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
    const completeEntity=!Object.keys(ref.replica.equalFilters??{}).length&&!ref.replica.excludeWhenSet?.length;
    connection.feed.register({id:source.id,signature,entity:ref.replica.table,key:ref.replica.key,path:ref.path,...(completeEntity?{completeEntity:true}:{}),...(ref.replica.columns?{columns:[...ref.replica.columns]}:{})});
    connection.sources.set(signature,source);connection.sourceBytes+=bytes;
-   if(connection.client.localSessionState()==='authenticated')this.openSource(connection,source);
+   if(connection.client.localSessionState()==='authenticated')await this.openSource(connection,source);
   }
   if(tab){text(lease,128);let leases=source.leases.get(tab);if(!leases?.has(lease)){if((leases?.size??0)>=64||connection.sourceBytes+192>262144)fail('BUDGET','Native source interests exceed budget');if(!leases)source.leases.set(tab,leases=new Set());leases.add(lease);source.tabs.add(tab);connection.sourceBytes+=192;}}source.eager||=eager;return source;
  }
@@ -210,7 +210,19 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
   void (async()=>{const loaded=new Set<string>();for(;;){try{await run();return;}catch(error){if(!(error instanceof SQLiteReducerPreparationRequiredError))throw error;if(loaded.has(error.path)||loaded.size>=128)fail('BUDGET','Live rebase preparation exceeded budget');loaded.add(error.path);await this.reducer.core.prepare(error.path);current();}}})().then(()=>this.notify(connection),error=>{if(connection.liveStream===stream&&connection.lives.get(source.signature)===source)this.feedFailed(connection,error);}).finally(release);
  }
  private unwatchLive(connection:Connection,source:LiveSource,tab:string,lease?:string){const leases=source.leases.get(tab);if(!leases)return;if(lease===undefined){connection.liveBytes-=leases.size*192;leases.clear();}else if(leases.delete(lease))connection.liveBytes-=192;if(!leases.size){source.leases.delete(tab);source.tabs.delete(tab);}if(source.tabs.size)return;source.close();connection.lives.delete(source.signature);connection.liveBytes-=source.bytes;const stream=connection.liveStream;void this.owner.runOwner(0,()=>this.owner.database.withTransactionAsync(()=>this.liveWindows.retire(stream,source.signature))).catch(()=>{});}
- private openSource(connection:Connection,source:Source){connection.client.sendOwnerMessage({type:'replica.open',id:source.id,path:source.ref.path,args:source.args,digest:connection.client.serverInfo().replicaSetDigest===1?new ReplicaSetDigest().digest():new ReplicaSetDigest().legacyDigest()});}
+ private async openSource(connection:Connection,source:Source){
+  const admitted=this.admission(connection),version=connection.authVersion,capabilities=connection.client.serverInfo(),sum=capabilities.replicaSetDigest===1;
+  let cached:{cursor:import('@gonvex/protocol').ReplicaCursor;digest:string}|undefined;
+  if(admitted&&capabilities.replicaResume===1)await this.owner.runOwner(0,()=>this.owner.database.withTransactionAsync(async()=>{
+   const saved=await this.owner.canonical.loadSession(admitted.intentScope);if(!saved||saved.directive.visibilityScope!==admitted.scope)return;
+   try{await connection.feed.assertCommittedReadable({scope:admitted.scope,epoch:saved.directive.epoch});}catch(error){if((error as {code?:string})?.code==='PAGE_CHANGED')return;throw error;}
+   const window=await this.windows.header(admitted.scope,source.signature),header=window?.header;
+   if(header?.kind!=='replica'||header.source!=='server'||header.entity!==source.ref.replica!.table||header.key!==source.ref.replica!.key||!header.cursor||!header.aggregateDigest?.startsWith(sum?'sum128-v1:':'xor1:'))return;
+   cached={cursor:header.cursor,digest:header.aggregateDigest};
+  }));
+  if(connection.authVersion!==version||connection.sources.get(source.signature)!==source||source.closing||admitted&&this.admission(connection)?.generation!==admitted.generation)return;
+  connection.client.sendOwnerMessage({type:'replica.open',id:source.id,path:source.ref.path,args:source.args,...(cached??{digest:sum?new ReplicaSetDigest().digest():new ReplicaSetDigest().legacyDigest()})});
+ }
  private connect(input:any,caller:SQLiteOwnerCaller):Promise<unknown>{
   const work=this.connecting.then(async()=>{
    if(this.closed||caller.signal.aborted)fail('FENCED','Native client is closed');if(input.artifactHash!==undefined&&input.artifactHash!==this.binding.artifactHash)fail('SCHEMA_MISMATCH','Browser and owner module artifacts differ');await this.maintenance.ready();text(input.url,2048);const url=new URL(input.url);if(!['ws:','wss:'].includes(url.protocol)||url.username||url.password||url.hash)throw new TypeError('Invalid native WebSocket URL');
@@ -244,7 +256,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
       record.denied=false;record.recovered=false;await this.recover(record);
       if(record.lastScope&&record.lastScope!==session.directive?.visibilityScope)void this.maintenance.retire(record.lastScope,[...record.sources.values()].map(source=>source.id)).catch(()=>{});record.lastScope=session.directive?.visibilityScope;
       if(!session.directive)record.failure=undefined;
-      if(session.directive&&session.identity){for(const source of [...record.sources.values()].sort((a,b)=>Number(!!b.tabs.size)-Number(!!a.tabs.size)))if(!source.closing)this.openSource(record,source);this.scheduleDelivery(record);this.scheduleMigration(record);}
+      if(session.directive&&session.identity){for(const source of [...record.sources.values()].sort((a,b)=>Number(!!b.tabs.size)-Number(!!a.tabs.size)))if(!source.closing)await this.openSource(record,source);this.scheduleDelivery(record);this.scheduleMigration(record);}
       this.notify(record);
      })();record.restoring=cutover;try{await cutover;record.migrationBlocked=undefined;}catch(error){record.migrationBlocked=error;throw error;}finally{if(record.restoring===cutover)record.restoring=undefined;}
     },binary:(frame:ArrayBuffer,generation:number)=>feed.binary(frame,generation),frame:(message:any,generation:number)=>feed.frame(message,generation),quarantined:(generation:number)=>{record.denied=true;record.rejections.length=0;record.supportCommands.length=0;for(const source of record.controls.values())if(source.ref.authorization!=='public'){record.controlBytes-=source.resultBytes;source.resultBytes=0;source.value=undefined;source.error='Session unavailable';source.version++;}feed.quarantined(generation);this.notify(record);},authenticated:()=>this.notify(record),authError:(message:string,details:{definitive:boolean;code?:string})=>{record.authError={id:crypto.randomUUID(),message:message.slice(0,512),...details,...(details.code?{code:details.code.slice(0,128)}:{})};this.notify(record);},supportCommand:(command:SupportCommand)=>{if(record.supportSequence>=Number.MAX_SAFE_INTEGER){record.failure={code:'FENCED',message:'Support notification sequence exhausted'};this.notify(record);return;}record.supportCommands.push({...command,sequence:++record.supportSequence});if(record.supportCommands.length>8)record.supportCommands.shift();this.notify(record);},developerCredential:(token:string)=>{record.developer={id:crypto.randomUUID(),token,acked:new Set()};this.notify(record);},disconnected:()=>{feed.disconnected();this.notify(record);},failed:(error:unknown)=>feed.failed(error)};
