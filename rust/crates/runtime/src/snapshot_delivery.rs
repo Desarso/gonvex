@@ -40,6 +40,7 @@ pub(crate) struct DeliveryBatch {
 pub(crate) struct SnapshotDelivery {
     native: bool,
     pending: BTreeMap<String, Pending>,
+    last_served: Option<String>,
 }
 
 impl SnapshotDelivery {
@@ -51,6 +52,7 @@ impl SnapshotDelivery {
     }
     pub(crate) fn clear(&mut self) {
         self.pending.clear();
+        self.last_served = None;
     }
     pub(crate) fn is_empty(&self) -> bool {
         self.pending.is_empty()
@@ -188,71 +190,73 @@ impl SnapshotDelivery {
             .map(|pending| pending.in_flight.len())
             .sum();
         let mut batch = DeliveryBatch::default();
-        'pump: loop {
-            let mut progressed = false;
-            for (id, pending) in self
-                .pending
-                .iter_mut()
-                .filter(|(_, pending)| !pending.last_sent)
-            {
-                if count == IN_FLIGHT_FRAMES || bytes == IN_FLIGHT_BYTES {
-                    break 'pump;
-                }
-                let encoded = pending.buffered.take().map(Ok).unwrap_or_else(|| {
-                    pending
-                        .pages
-                        .next()
-                        .ok_or("snapshot iterator ended without final frame")
-                        .and_then(|page| {
-                            let ServerMessage::ReplicaSnapshotEncodedPage {
-                                sequence, last, ..
-                            } = &page
-                            else {
-                                unreachable!()
-                            };
-                            let encoded = serde_json::to_vec(&page)
-                                .map_err(|_| "snapshot encoding failed")?;
-                            if encoded.len() > FRAME_LIMIT {
-                                return Err("snapshot row exceeds native frame budget");
-                            }
-                            Ok((encoded, *sequence, *last))
-                        })
-                });
-                match encoded {
-                    Ok((encoded, sequence, last)) => {
-                        if bytes + encoded.len() > IN_FLIGHT_BYTES {
-                            pending.buffered = Some((encoded, sequence, last));
-                            break 'pump;
+        let mut blocked = 0;
+        while count < IN_FLIGHT_FRAMES && bytes < IN_FLIGHT_BYTES && blocked < self.pending.len() {
+            use std::ops::Bound::{Excluded, Unbounded};
+            let next = self
+                .last_served
+                .as_ref()
+                .and_then(|last| {
+                    self.pending
+                        .range((Excluded(last.clone()), Unbounded))
+                        .find(|(_, pending)| !pending.last_sent)
+                })
+                .or_else(|| self.pending.iter().find(|(_, pending)| !pending.last_sent))
+                .map(|(id, _)| id.clone());
+            let Some(id) = next else { break };
+            self.last_served = Some(id.clone());
+            let pending = self.pending.get_mut(&id).unwrap();
+            let encoded = pending.buffered.take().map(Ok).unwrap_or_else(|| {
+                pending
+                    .pages
+                    .next()
+                    .ok_or("snapshot iterator ended without final frame")
+                    .and_then(|page| {
+                        let ServerMessage::ReplicaSnapshotEncodedPage { sequence, last, .. } =
+                            &page
+                        else {
+                            unreachable!()
+                        };
+                        let encoded =
+                            serde_json::to_vec(&page).map_err(|_| "snapshot encoding failed")?;
+                        if encoded.len() > FRAME_LIMIT {
+                            return Err("snapshot row exceeds native frame budget");
                         }
-                        if let Some(start) = pending.start.take() {
-                            batch.starts.push(start);
-                        }
-                        pending.sent = Some(sequence);
-                        pending.last_sent = last;
-                        pending.in_flight.push_back((sequence, encoded.len()));
-                        count += 1;
-                        bytes += encoded.len();
-                        batch.frames.push(encoded);
-                        progressed = true;
+                        Ok((encoded, *sequence, *last))
+                    })
+            });
+            match encoded {
+                Ok((encoded, sequence, last)) => {
+                    if bytes + encoded.len() > IN_FLIGHT_BYTES {
+                        pending.buffered = Some((encoded, sequence, last));
+                        blocked += 1;
+                        continue;
                     }
-                    Err(error) => {
-                        pending.last_sent = true;
-                        count -= pending.in_flight.len();
-                        bytes -= pending
-                            .in_flight
-                            .iter()
-                            .map(|(_, bytes)| bytes)
-                            .sum::<usize>();
-                        batch.errors.push(ServerMessage::ReplicaError {
-                            id: id.clone(),
-                            path: None,
-                            error: error.into(),
-                        });
+                    if let Some(start) = pending.start.take() {
+                        batch.starts.push(start);
                     }
+                    pending.sent = Some(sequence);
+                    pending.last_sent = last;
+                    pending.in_flight.push_back((sequence, encoded.len()));
+                    count += 1;
+                    bytes += encoded.len();
+                    batch.frames.push(encoded);
+                    blocked = 0;
                 }
-            }
-            if !progressed {
-                break;
+                Err(error) => {
+                    pending.last_sent = true;
+                    count -= pending.in_flight.len();
+                    bytes -= pending
+                        .in_flight
+                        .iter()
+                        .map(|(_, bytes)| bytes)
+                        .sum::<usize>();
+                    batch.errors.push(ServerMessage::ReplicaError {
+                        id,
+                        error: error.into(),
+                        path: None,
+                    });
+                }
             }
         }
         for error in &batch.errors {
@@ -261,6 +265,75 @@ impl SnapshotDelivery {
             }
         }
         batch
+    }
+}
+
+/// Legacy paging has no durable ACK. Keep its materialized iterator in the
+/// socket and send one page per turn so new small watches can be processed.
+/// Feed events remain queued until all baselines and certificates are sent.
+#[derive(Default)]
+pub(crate) struct LegacySnapshotDelivery {
+    pending: BTreeMap<String, (SnapshotPages, Option<ServerMessage>)>,
+    last_served: Option<String>,
+}
+impl LegacySnapshotDelivery {
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+    pub fn clear(&mut self) {
+        self.pending.clear();
+        self.last_served = None;
+    }
+    pub fn remove(&mut self, id: &str) {
+        self.pending.remove(id);
+    }
+    pub fn admit(&mut self, message: ServerMessage) -> Option<ServerMessage> {
+        match message {
+            snapshot @ ServerMessage::ReplicaSnapshot { .. } => {
+                let pages = SnapshotPages::new(snapshot);
+                let id = pages.identity().0.to_owned();
+                if !self.pending.contains_key(&id) && self.pending.len() >= SUBSCRIPTION_LIMIT {
+                    return Some(ServerMessage::ReplicaError {
+                        id,
+                        path: None,
+                        error: "legacy snapshot subscription limit exceeded".into(),
+                    });
+                }
+                self.pending.insert(id, (pages, None));
+                None
+            }
+            ServerMessage::ReplicaReady { ref id, .. } if self.pending.contains_key(id) => {
+                let key = id.clone();
+                self.pending.get_mut(&key).unwrap().1 = Some(message);
+                None
+            }
+            message => Some(message),
+        }
+    }
+    pub fn next(&mut self) -> Vec<ServerMessage> {
+        use std::ops::Bound::{Excluded, Unbounded};
+        let id = self
+            .last_served
+            .as_ref()
+            .and_then(|last| {
+                self.pending
+                    .range((Excluded(last.clone()), Unbounded))
+                    .next()
+            })
+            .or_else(|| self.pending.iter().next())
+            .map(|(id, _)| id.clone());
+        let Some(id) = id else { return Vec::new() };
+        self.last_served = Some(id.clone());
+        let (pages, _) = self.pending.get_mut(&id).unwrap();
+        let page = pages.next().expect("pending snapshot page");
+        let last = matches!(&page, ServerMessage::ReplicaSnapshotPage { last: true, .. });
+        let mut result = vec![page];
+        if last {
+            if let Some((_, Some(ready))) = self.pending.remove(&id) {
+                result.push(ready);
+            }
+        }
+        result
     }
 }
 
@@ -483,5 +556,49 @@ mod tests {
         );
         assert!(delivery.pending.contains_key("a-valid"));
         assert!(!delivery.pending.contains_key("z-oversized"));
+    }
+    #[test]
+    fn late_small_native_source_gets_next_returned_credit_before_bulk_continues() {
+        let mut delivery = SnapshotDelivery::default();
+        delivery.begin(snapshot("a-bulk", 2000)).unwrap();
+        let initial = delivery.pump();
+        assert_eq!(initial.frames.len(), 8);
+        delivery.begin(snapshot("z-metadata", 1)).unwrap();
+        assert!(delivery.pump().frames.is_empty());
+        let first: serde_json::Value = serde_json::from_slice(&initial.frames[0]).unwrap();
+        delivery
+            .acknowledge("a-bulk", first["snapshotId"].as_str().unwrap(), 0)
+            .unwrap();
+        let next = delivery.pump();
+        let frame: serde_json::Value = serde_json::from_slice(&next.frames[0]).unwrap();
+        assert_eq!(frame["id"], "z-metadata");
+    }
+    #[test]
+    fn legacy_pages_rotate_and_hold_ready_until_the_last_page() {
+        let mut delivery = LegacySnapshotDelivery::default();
+        delivery.admit(snapshot("a-bulk", 2000));
+        assert!(matches!(
+            &delivery.next()[0],
+            ServerMessage::ReplicaSnapshotPage { last: false, .. }
+        ));
+        delivery.admit(snapshot("z-metadata", 1));
+        let ready = ServerMessage::ReplicaReady {
+            id: "z-metadata".into(),
+            cursor: gonvex_protocol::ReplicaCursor {
+                epoch: "e".into(),
+                revision: 1,
+            },
+            digest: "digest".into(),
+            metadata: BTreeMap::new(),
+        };
+        delivery.admit(ready);
+        let next = delivery.next();
+        assert_eq!(next.len(), 2);
+        assert!(
+            matches!(&next[0],ServerMessage::ReplicaSnapshotPage{id,last:true,..} if id=="z-metadata")
+        );
+        assert!(matches!(&next[1],ServerMessage::ReplicaReady{id,..} if id=="z-metadata"));
+        delivery.remove("a-bulk");
+        assert!(delivery.is_empty());
     }
 }

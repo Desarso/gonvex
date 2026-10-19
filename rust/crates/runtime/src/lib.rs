@@ -18,6 +18,7 @@ mod operations;
 mod operator_data;
 pub mod public_functions;
 pub mod replica;
+mod replica_open_queue;
 pub mod sandbox;
 pub mod scheduler;
 mod service_principal;
@@ -1330,6 +1331,7 @@ async fn websocket(
     let mut replica_sum_digest_enabled = false;
     let mut replica_native_rows_enabled = false;
     let mut snapshot_delivery = snapshot_delivery::SnapshotDelivery::default();
+    let mut legacy_snapshot_delivery = snapshot_delivery::LegacySnapshotDelivery::default();
     let mut service_grant: Option<service_principal::ServiceGrant> = None;
     let mut connected_client_contract: Option<u64> = None;
     let connection_id = uuid::Uuid::new_v4().to_string();
@@ -1343,6 +1345,7 @@ async fn websocket(
     let mut sent_replica_revision = 0u64;
     let mut sent_zero_bootstrap_watermark = false;
     let mut replicas = BTreeMap::new();
+    let mut replica_opens = replica_open_queue::ReplicaOpenQueue::default();
     let mut live_queries = BTreeMap::new();
     let mut control_queries = BTreeMap::new();
     let mut runtime_events = runtime.inner.runtime_events.subscribe();
@@ -1384,7 +1387,9 @@ async fn websocket(
     macro_rules! discard_tenant_session {
         () => {{
             replicas.clear();
+            replica_opens.clear();
             snapshot_delivery.clear();
+            legacy_snapshot_delivery.clear();
             live_queries.clear();
             control_queries.clear();
             tenant_session = None;
@@ -1408,7 +1413,27 @@ async fn websocket(
     }
 
     loop {
+        let preparing_replicas = !replica_opens.is_empty();
+        let defer_feed = preparing_replicas || !legacy_snapshot_delivery.is_empty();
         let message = tokio::select! {
+            opened = replica_opens.next(), if preparing_replicas => {
+                if let Some(outcome) = opened {
+                    for response in install_replica_open_outcomes(&mut replicas, vec![outcome]) {
+                        let response = if replica_snapshot_pages_enabled && !replica_native_rows_enabled {
+                            let Some(response)=legacy_snapshot_delivery.admit(response) else {continue}; response
+                        } else {response};
+                        if send_replica_open(&mut socket, response, replica_snapshot_pages_enabled, replica_native_rows_enabled, &mut snapshot_delivery).await.is_err() { return; }
+                    }
+                    record_connection_subscriptions(&runtime, &connection_id, &replicas, &live_queries, &control_queries);
+                }
+                continue;
+            }
+            _ = tokio::task::yield_now(), if !legacy_snapshot_delivery.is_empty() => {
+                for page in legacy_snapshot_delivery.next() {
+                    if send_json(&mut socket,&page).await.is_err() {return;}
+                }
+                continue;
+            }
             _ = tokio::time::sleep_until(auth_deadline), if pending_connection.is_some() => {
                 let _ = socket.send(Message::Close(Some(axum::extract::ws::CloseFrame {
                     code: 1008, reason: "authentication deadline exceeded".into(),
@@ -1422,7 +1447,9 @@ async fn websocket(
             _ = auth_revalidation.tick(), if !control_connection.auth_token.is_empty() => {
                 if !revalidate_connection(&runtime, &control_connection).await {
                     replicas.clear();
+                    replica_opens.clear();
                     snapshot_delivery.clear();
+                    legacy_snapshot_delivery.clear();
                     live_queries.clear();
                     control_queries.clear();
                     tenant_session = None;
@@ -1452,7 +1479,14 @@ async fn websocket(
                 }
                 continue;
             }
-            transport = next_socket_or_feed(&mut socket, &mut feed, &mut feed_scheduler) => {
+            // Retain feed events in the bounded broadcast receiver until every
+            // newly prepared snapshot is installed. Each subscription skips
+            // events at/before its own snapshot cursor; receiver lag produces
+            // the existing reset, never a silently missed transaction.
+            transport = async {
+                if defer_feed { ScheduledTransport::Socket(socket.next().await) }
+                else { next_socket_or_feed(&mut socket, &mut feed, &mut feed_scheduler).await }
+            } => {
                 match transport {
                     ScheduledTransport::Socket(message) => {
                         let Some(message) = message else { break; };
@@ -1510,7 +1544,9 @@ async fn websocket(
                                     }
                                     if reset {
                                         replicas.clear();
+                                        replica_opens.clear();
                                         snapshot_delivery.clear();
+                                        legacy_snapshot_delivery.clear();
                                     }
                                 }
                                 Err(error) => {
@@ -1523,7 +1559,9 @@ async fn websocket(
                                         if send_connection_json(&mut snapshot_delivery, &mut socket, &response).await.is_err() { return; }
                                     }
                                     replicas.clear();
+                                    replica_opens.clear();
                                     snapshot_delivery.clear();
+                                    legacy_snapshot_delivery.clear();
                                 }
                             }
                         }
@@ -1547,7 +1585,9 @@ async fn websocket(
                             if send_connection_json(&mut snapshot_delivery, &mut socket, &response).await.is_err() { return; }
                         }
                         replicas.clear();
+                        replica_opens.clear();
                         snapshot_delivery.clear();
+                        legacy_snapshot_delivery.clear();
                         live_queries.clear();
                         continue;
                     }
@@ -1590,7 +1630,9 @@ async fn websocket(
                         if project_id == control_connection.project_id =>
                     {
                         replicas.clear();
+                        replica_opens.clear();
                         snapshot_delivery.clear();
+                        legacy_snapshot_delivery.clear();
                         live_queries.clear();
                         if let Some(module) = runtime.inner.modules.project(&project_id).await {
                             if let Some(required) = module.client_contract {
@@ -1837,7 +1879,9 @@ async fn websocket(
                         break;
                     };
                     replicas.clear();
+                    replica_opens.clear();
                     snapshot_delivery.clear();
+                    legacy_snapshot_delivery.clear();
                     live_queries.clear();
                     control_queries.clear();
                     feed = None;
@@ -2000,7 +2044,9 @@ async fn websocket(
                         capabilities.as_ref().and_then(|c| c.telemetry_batch) == Some(1);
                     let next_tenant_session =
                         tenant_data_session(control_only, &authenticated_control);
-                    let preserved = (replica_native_rows_enabled || snapshot_delivery.is_empty())
+                    let preserved = replica_opens.is_empty()
+                        && legacy_snapshot_delivery.is_empty()
+                        && (replica_native_rows_enabled || snapshot_delivery.is_empty())
                         && !control_only
                         && tenant_session.is_some()
                         && preserve_subscription_scope(
@@ -2021,7 +2067,9 @@ async fn websocket(
                         }
                     } else {
                         replicas.clear();
+                        replica_opens.clear();
                         snapshot_delivery.clear();
+                        legacy_snapshot_delivery.clear();
                         live_queries.clear();
                         control_queries.clear();
                         if let Some(session) =
@@ -2590,133 +2638,68 @@ async fn websocket(
                 Ok(ClientMessage::ReplicaOpen(request)) => {
                     sent_zero_bootstrap_watermark = false;
                     snapshot_delivery.remove(&request.id);
+                    legacy_snapshot_delivery.remove(&request.id);
+                    replicas.remove(&request.id);
                     runtime.inner.metrics.activity(
                         &connection_id,
                         "Replica Collection opened",
                         Some(&request.path),
                     );
-                    let messages = if let Some(session) = tenant_session.as_ref() {
-                        match runtime
-                            .open_replica_negotiated(
-                                session,
-                                request.clone(),
-                                replica_sum_digest_enabled,
-                            )
+                    if let Some(response) = enqueue_replica_open(
+                        &runtime,
+                        tenant_session.as_ref(),
+                        request,
+                        replica_sum_digest_enabled,
+                        &mut replica_opens,
+                    )
+                    .await
+                    {
+                        if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
                             .await
-                        {
-                            Ok(opened) => {
-                                if let Some(subscription) = opened.subscription {
-                                    replicas.insert(subscription.id.clone(), subscription);
-                                }
-                                opened.messages
-                            }
-                            Err(error) => vec![ServerMessage::ReplicaError {
-                                id: request.id,
-                                path: Some(request.path),
-                                error: error.to_string(),
-                            }],
-                        }
-                    } else {
-                        vec![ServerMessage::ReplicaError {
-                            id: request.id,
-                            path: Some(request.path),
-                            error: "authenticate with an active tenant before opening a Replica Collection".to_owned(),
-                        }]
-                    };
-                    for response in messages {
-                        if send_replica_open(
-                            &mut socket,
-                            response,
-                            replica_snapshot_pages_enabled,
-                            replica_native_rows_enabled,
-                            &mut snapshot_delivery,
-                        )
-                        .await
-                        .is_err()
+                            .is_err()
                         {
                             return;
                         }
                     }
-                    record_connection_subscriptions(
-                        &runtime,
-                        &connection_id,
-                        &replicas,
-                        &live_queries,
-                        &control_queries,
-                    );
                 }
                 Ok(ClientMessage::ReplicaOpenMany { opens }) => {
-                    sent_zero_bootstrap_watermark = false;
                     if opens.len() > REPLICA_OPEN_BATCH_LIMIT {
-                        let response = ServerMessage::ReplicaError {
-                            id: String::new(),
-                            path: None,
-                            error: format!(
-                                "replica batch cannot contain more than {REPLICA_OPEN_BATCH_LIMIT} opens"
-                            ),
-                        };
-                        if send_replica_open(
-                            &mut socket,
-                            response,
-                            replica_snapshot_pages_enabled,
-                            replica_native_rows_enabled,
-                            &mut snapshot_delivery,
-                        )
-                        .await
-                        .is_err()
+                        let response = ServerMessage::ReplicaError {id:String::new(),path:None,error:format!("replica batch cannot contain more than {REPLICA_OPEN_BATCH_LIMIT} opens")};
+                        if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
+                            .await
+                            .is_err()
                         {
-                            break;
+                            return;
                         }
                         continue;
                     }
-                    for request in &opens {
+                    sent_zero_bootstrap_watermark = false;
+                    for request in opens {
                         snapshot_delivery.remove(&request.id);
+                        legacy_snapshot_delivery.remove(&request.id);
+                        replicas.remove(&request.id);
                         runtime.inner.metrics.activity(
                             &connection_id,
                             "Replica Collection opened",
                             Some(&request.path),
                         );
-                    }
-                    let messages = if let Some(session) = tenant_session.as_ref() {
-                        let outcomes = open_replica_batch(
+                        if let Some(response) = enqueue_replica_open(
                             &runtime,
-                            session,
-                            opens,
+                            tenant_session.as_ref(),
+                            request,
                             replica_sum_digest_enabled,
-                        )
-                        .await;
-                        install_replica_open_outcomes(&mut replicas, outcomes)
-                    } else {
-                        opens
-                            .into_iter()
-                            .map(|request| ServerMessage::ReplicaError {
-                                id: request.id,
-                                path: Some(request.path),
-                                error: "authenticate with an active tenant before opening a Replica Collection".to_owned(),
-                            })
-                            .collect()
-                    };
-                    for response in messages {
-                        if send_replica_open(
-                            &mut socket,
-                            response,
-                            replica_snapshot_pages_enabled,
-                            replica_native_rows_enabled,
-                            &mut snapshot_delivery,
+                            &mut replica_opens,
                         )
                         .await
-                        .is_err()
                         {
-                            return;
+                            if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
                         }
                     }
-                    record_connection_subscriptions(
-                        &runtime,
-                        &connection_id,
-                        &replicas,
-                        &live_queries,
-                        &control_queries,
-                    );
                 }
                 Ok(ClientMessage::ReplicaSnapshotAck {
                     id,
@@ -2771,6 +2754,8 @@ async fn websocket(
                     }
                 }
                 Ok(ClientMessage::ReplicaClose { id }) => {
+                    replica_opens.remove(&id);
+                    legacy_snapshot_delivery.remove(&id);
                     replicas.remove(&id);
                     // Confirmation precedes pumping any later binary frames.
                     if let Some(closed) = snapshot_delivery.close_subscription(&id) {
@@ -3916,16 +3901,45 @@ where
         .await
 }
 
-async fn open_replica_batch(
+async fn enqueue_replica_open(
     runtime: &Runtime,
-    session: &TenantSession,
-    opens: Vec<ReplicaOpenRequest>,
+    session: Option<&TenantSession>,
+    request: ReplicaOpenRequest,
     sum_enabled: bool,
-) -> Vec<ReplicaOpenOutcome<replica::ReplicaSubscription, replica::ReplicaError>> {
-    collect_bounded_ordered(opens, REPLICA_OPEN_CONCURRENCY, |request| async move {
-        let request_for_open = request.clone();
-        let opened = runtime
-            .open_replica_negotiated(session, request_for_open, sum_enabled)
+    queue: &mut replica_open_queue::ReplicaOpenQueue<
+        ReplicaOpenOutcome<replica::ReplicaSubscription, replica::ReplicaError>,
+    >,
+) -> Option<ServerMessage> {
+    let reject = |error: &str| ServerMessage::ReplicaError {
+        id: request.id.clone(),
+        path: Some(request.path.clone()),
+        error: error.to_owned(),
+    };
+    let Some(session) = session else {
+        return Some(reject(
+            "authenticate with an active tenant before opening a Replica Collection",
+        ));
+    };
+    let bytes = serde_json::to_vec(&request).map_or(usize::MAX, |value| {
+        value.len().saturating_mul(2).saturating_add(1024)
+    });
+    let module = runtime
+        .inner
+        .modules
+        .project(&session.identity.project_id)
+        .await;
+    let bulk = module
+        .as_ref()
+        .and_then(|module| module.functions.get(&request.path))
+        .and_then(|function| function.replica.as_ref())
+        .is_none_or(|definition| definition.max_rows == 0 || definition.max_rows > 512);
+    let owned_runtime = runtime.clone();
+    let owned_session = session.clone();
+    let owned_request = request.clone();
+    use futures_util::FutureExt;
+    let future = async move {
+        let opened = owned_runtime
+            .open_replica_negotiated(&owned_session, owned_request.clone(), sum_enabled)
             .await
             .map(|opened| {
                 let subscription = opened
@@ -3933,9 +3947,13 @@ async fn open_replica_batch(
                     .map(|subscription| (subscription.id.clone(), subscription));
                 (opened.messages, subscription)
             });
-        (request, opened)
-    })
-    .await
+        (owned_request, opened)
+    }
+    .boxed();
+    queue
+        .push(request.id.clone(), bytes, bulk, future)
+        .err()
+        .map(reject)
 }
 
 fn install_replica_open_outcomes<S, E>(

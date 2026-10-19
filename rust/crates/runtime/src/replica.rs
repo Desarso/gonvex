@@ -371,10 +371,13 @@ impl Runtime {
             Vec::new()
         };
         transaction.commit().await?;
-        let (rows, truncated) = apply_budgets(rows, definition)?;
+        let (rows, truncated) = apply_budgets(rows, definition).await?;
         let mut by_key = BTreeMap::new();
         let mut hashes = BTreeMap::new();
-        for row in &rows {
+        for (index, row) in rows.iter().enumerate() {
+            if index % 32 == 0 {
+                tokio::task::yield_now().await;
+            }
             let key = row_key(row, &definition.key)?;
             if by_key.insert(key.clone(), row.clone()).is_some() {
                 return Err(ReplicaError::DuplicateKey(key));
@@ -801,23 +804,31 @@ async fn query_rows(
         query = bind_value(query, parameter).map_err(ReplicaError::InvalidIdentifier)?;
     }
     let rows = query.fetch_all(&mut **transaction.transaction()).await?;
-    rows.into_iter()
-        .map(|row| {
-            let raw: String = row.get(0);
+    let mut values = Vec::with_capacity(rows.len());
+    for (index, row) in rows.into_iter().enumerate() {
+        if index % 32 == 0 {
+            tokio::task::yield_now().await;
+        }
+        let raw: String = row.get(0);
+        values.push(
             serde_json::from_str(&raw)
-                .map_err(|error| ReplicaError::InvalidIdentifier(error.to_string()))
-        })
-        .collect()
+                .map_err(|error| ReplicaError::InvalidIdentifier(error.to_string()))?,
+        );
+    }
+    Ok(values)
 }
 
-fn apply_budgets(
+async fn apply_budgets(
     rows: Vec<Value>,
     definition: &ReplicaCollectionDefinition,
 ) -> Result<(Vec<Value>, bool), ReplicaError> {
     let mut kept = Vec::new();
     let mut bytes = 0i64;
     let mut seen = BTreeSet::new();
-    for row in rows {
+    for (index, row) in rows.into_iter().enumerate() {
+        if index % 32 == 0 {
+            tokio::task::yield_now().await;
+        }
         let key = row_key(&row, &definition.key)?;
         if !seen.insert(key.clone()) {
             return Err(ReplicaError::DuplicateKey(key));
