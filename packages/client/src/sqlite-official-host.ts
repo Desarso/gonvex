@@ -20,7 +20,7 @@ export type OfficialSQLiteHost = {
  * before invoking this. Followers never import WASM or acquire OPFS handles. */
 export async function openOfficialSQLiteHost(): Promise<OfficialSQLiteHost> {
   if (typeof globalThis.postMessage !== 'function' || 'document' in globalThis || 'onconnect' in globalThis)
-    throw new Error('SQLite OPFS must open in the elected dedicated worker');
+    throw new Error('SQLite storage must open in the elected dedicated worker');
   if (typeof WebAssembly !== 'object' || typeof WebAssembly.instantiate !== 'function')
     throw Object.assign(new Error('This browser cannot run this app because WebAssembly is disabled. In Safari, open the page menu, choose Website Settings, and turn off Lockdown Mode for this website, then reload. On Mac, use Safari Settings > Websites > Lockdown Mode to exclude this website. You can also use a browser with WebAssembly enabled.'), {code:'UNSUPPORTED'});
   // Disable unused proxy VFS initialization and its helper workers. Configure

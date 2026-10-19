@@ -50,7 +50,7 @@ it('restores before socket open and forwards native frames only after correlated
 it('retains a successful reducer until the durable watermark and sends the command once',async()=>{
  const f=fixture();await f.authenticate();let settled=false;
  const pending=f.client.callOwnerReducer({kind:'reducer',path:'tasks.edit',artifactHash:'original',intentEntropy:'entropy'},{id:'a'},'durable-command').then(value=>{settled=true;return value;});
- await vi.waitFor(()=>expect(f.socket.sent.filter(message=>message.type==='reducer.call')).toHaveLength(1));const call=f.socket.sent.find(message=>message.type==='reducer.call');expect(call).toMatchObject({idempotencyKey:'durable-command',artifactHash:'original',intentEntropy:'entropy',clientContract:1});
+ await vi.waitFor(()=>expect(f.socket.sent.filter(message=>message.type==='reducer.call')).toHaveLength(1));const call=f.socket.sent.find(message=>message.type==='reducer.call');expect(call).toMatchObject({id:'durable-command',idempotencyKey:'durable-command',artifactHash:'original',intentEntropy:'entropy',clientContract:1});
  f.socket.receive({type:'reducer.result',id:call.id,result:'original',committedRevision:10,originCommandId:'durable-command'});await Promise.resolve();expect(settled).toBe(false);
  f.socket.receive({type:'reducer.result',id:call.id,result:'duplicate',committedRevision:10,originCommandId:'durable-command'});
  f.client.advanceOwnerWatermark(9);expect(settled).toBe(false);f.client.advanceOwnerWatermark(10);expect(await pending).toBe('original');expect(f.budget.stats()).toMatchObject({bytes:0,entries:0});expect(f.failures).toEqual([]);
@@ -129,4 +129,13 @@ it('holds early replica frames until asynchronous owner admission is installed, 
 });
 it('discards an old admission frame prefix when authentication is superseded',async()=>{
  let release!:()=>void;const barrier=new Promise<void>(resolve=>{release=resolve;}),f=fixture({},async()=>barrier),auth=await f.open();f.socket.receive({type:'auth.result',id:auth.id,result});f.socket.receive({type:'replica.watermark',revision:10});expect(f.budget.stats().entries).toBe(1);f.client.setAuth({token:'new'});expect(f.budget.stats().entries).toBe(0);release();await vi.waitFor(()=>expect(f.socket.sent.filter(message=>message.type==='auth')).toHaveLength(2));const current=f.socket.sent.filter(message=>message.type==='auth').at(-1);f.socket.receive({type:'auth.result',id:current.id,result});await vi.waitFor(()=>expect(f.client.localSessionState()).toBe('authenticated'));f.socket.receive({type:'replica.watermark',revision:20});expect(f.frames).toEqual([{type:'replica.watermark',revision:20}]);expect(f.failures).toEqual([]);
+});
+
+it('does not replace a pending immutable reducer command when another delivery attempts the same ID',async()=>{
+ const f=fixture();await f.authenticate();const first=f.client.callOwnerReducer({kind:'reducer',path:'tasks.edit'},{},'stable');
+ await vi.waitFor(()=>expect(f.socket.sent.some(message=>message.type==='reducer.call')).toBe(true));
+ await expect(f.client.callOwnerReducer({kind:'reducer',path:'tasks.edit'},{},'stable')).rejects.toMatchObject({code:'disconnected'});
+ expect(f.socket.sent.filter(message=>message.type==='reducer.call')).toHaveLength(1);
+ f.socket.receive({type:'reducer.result',id:'stable',originCommandId:'stable',result:'one',committedRevision:1});f.client.advanceOwnerWatermark(1);
+ expect(await first).toBe('one');expect(f.budget.stats()).toMatchObject({bytes:0,entries:0});
 });
