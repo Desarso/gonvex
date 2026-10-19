@@ -24,7 +24,7 @@ const cursor=(revision:number)=>({epoch:'e',revision});
 const stable=(row:Record<string,unknown>)=>JSON.stringify(Object.fromEntries(Object.keys(row).sort().map(key=>[key,row[key]])));
 const rows=[{id:'a',name:'Before café 東京',n:1},{id:'b',name:'Second',n:2}],changed={id:'a',name:'Newer canonical',n:12};
 const digest=async(values=rows)=>replicaSumDigest(await replicaRowsHashes(values,'id'));
-async function fixture(extra:Partial<ConstructorParameters<typeof SQLiteNativeFeed>[0]>={},completeEntity=false){
+async function fixture(extra:Partial<ConstructorParameters<typeof SQLiteNativeFeed>[0]>={},completeEntity=false,moduleEpoch='e'){
  const raw=new sqlite.oo1.DB(':memory:'),host=officialSQLiteDatabase(sqlite,raw),db=sqliteOwnerTransactions(host.database),engine=new SQLiteTypedReplicaEngine(db,schema);await engine.open('feed');const canonical=sqliteTypedReplicaStorage(db,schema);await canonical.ready();
  const fence=()=>engine.verifyOwner(),snapshots=new SQLiteSnapshotPages(db,fence,schema),activation=new SQLiteSnapshotActivator(db,canonical,fence,schema),safety=new SQLiteSafetyJournal('feed',new IDBFactory(),IDBKeyRange);
  let lane=Promise.resolve();const runOwner=<T>(_bytes:number,run:()=>Promise<T>)=>{const next=lane.then(run);lane=next.then(()=>{},()=>{});return next;};
@@ -33,7 +33,7 @@ async function fixture(extra:Partial<ConstructorParameters<typeof SQLiteNativeFe
  const sends:any[]=[],watermarks:number[]=[],failures:unknown[]=[];const feed=new SQLiteNativeFeed({owner,sessions,connection:'one',artifactHash:'artifact',send:message=>sends.push(message),advanceWatermark:revision=>watermarks.push(revision),failed:error=>failures.push(error),...extra});
  cleanup.push(()=>{feed.close();safety.close();raw.close();});
  feed.register({id:'source',signature:'tasks-all',entity:'tasks',key:'id',path:'tasks/all',...(completeEntity?{completeEntity:true as const}:{})});feed.authenticating('identity',1);
- const session={connectionGeneration:1,directive:{protocolVersion:1 as const,scope:'tenant',visibilityScope:'visible',epoch:'e'},identity:{auth:{account:{id:'account'}},tenant:{id:'tenant'},member:{id:'member',accountId:'account',permissions:{}}},artifactHash:'artifact',intentScope:'identity',lastOnlineAtMs:1000,capabilities:{replicaNativeRows:1}};
+ const session={connectionGeneration:1,directive:{protocolVersion:1 as const,scope:'tenant',visibilityScope:'visible',epoch:moduleEpoch},identity:{auth:{account:{id:'account'}},tenant:{id:'tenant'},member:{id:'member',accountId:'account',permissions:{}}},artifactHash:'artifact',intentScope:'identity',lastOnlineAtMs:1000,capabilities:{replicaNativeRows:1}};
  await feed.session(session,()=>true);
  const start=async()=>{feed.frame({type:'replica.snapshotStart',id:'source',snapshotId:'base',scope:'tenant',visibilityScope:'visible',cursor:cursor(10),key:'id',digest:await digest(),path:'tasks/all'},1);};
  const append=async(part:typeof rows,sequence:number,last:boolean)=>{feed.binary(new TextEncoder().encode(JSON.stringify({type:'replica.snapshotEncodedPage',id:'source',snapshotId:'base',scope:'tenant',visibilityScope:'visible',cursor:cursor(10),key:'id',sequence,last,canonicalRows:part.map(stable),path:'tasks/all',...(last?{digest:await digest()}:{})})).buffer,1);};
@@ -41,6 +41,12 @@ async function fixture(extra:Partial<ConstructorParameters<typeof SQLiteNativeFe
  const transaction=(revision=12)=>feed.frame({type:'replica.transactionEncoded',cursor:cursor(revision),originCommandId:'intent',canonicalChanges:[stable({entity:'tasks',id:'a',operation:'update',newValue:{...changed,n:revision}})]},1);
  return {owner,db,engine,canonical,feed,sends,watermarks,failures,start,append,ready,transaction,session,sessions,safety,runOwner};
 }
+it('keeps the module admission epoch distinct from the database replica cursor epoch',async()=>{
+ const f=await fixture({},false,'module-epoch');
+ await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);
+ await f.feed.assertReadable();expect(f.failures).toEqual([]);
+ expect((await f.canonical.loadEntityRows('visible','tasks',['a','b'])).length).toBe(2);
+});
 it('joins auth, source start, binary staging, newer canonical data, disk deltas and terminal watermark without deadlock',async()=>{
  const f=await fixture();await f.start();await f.append(rows.slice(0,1),0,false);await vi.waitFor(()=>expect(f.sends).toHaveLength(1));
  f.transaction();f.feed.frame({type:'replica.delta',id:'source',cursor:cursor(12),canonicalUpserts:[stable(changed)],deleted:[],digest:await digest([changed,rows[1]])},1);

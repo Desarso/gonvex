@@ -14,7 +14,7 @@ type Start=Extract<ServerMessage,{type:'replica.snapshotStart'}>;
 type Delta=Extract<ServerMessage,{type:'replica.delta'}>;
 export type SQLiteFeedSource={id:string;signature:string;entity:string;key:string;path:string;completeEntity?:true;columns?:readonly string[]};
 type Source=SQLiteFeedSource&{deferredKey:string;bytes:number;start?:Start;opening:boolean;closing?:{promise:Promise<void>;resolve():void;reject(error:unknown):void;timer:ReturnType<typeof setTimeout>}};
-type State={stream:string;generation:number;scope:string;epoch:string;logicalScope:string;gate:Promise<void>;ingress:SQLiteNativeIngress;admission?:number;closed:boolean;watermark?:number};
+type State={stream:string;generation:number;scope:string;epoch:string;cursorEpoch?:string;logicalScope:string;gate:Promise<void>;ingress:SQLiteNativeIngress;admission?:number;closed:boolean;watermark?:number};
 type Options={owner:SQLiteOwnerProgramContext;sessions:SQLiteWorkerSessions;connection:string;artifactHash:string;
  reserve?(bytes:number):()=>void;
  windowsPending?(scope:string,epoch:string,revision:number):Promise<boolean>;
@@ -90,7 +90,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
   void next.then(()=>{this.queued--;this.queuedBytes-=bytes;release?.();},error=>{this.queued--;this.queuedBytes-=bytes;release?.();this.reject(state,error);});return true;
  }
  private reject(state:State,error:unknown){if(this.state!==state||state.closed)return;this.stop();this.options.failed(error);}
- private cursor(state:State,cursor:ReplicaCursor){if(!cursor||cursor.epoch!==state.epoch||!Number.isSafeInteger(cursor.revision)||cursor.revision<0)fail('FENCED','Native feed cursor changed epoch');}
+ private cursor(state:State,cursor:ReplicaCursor){if(!cursor||typeof cursor.epoch!=='string'||!cursor.epoch||cursor.epoch.length>256||!Number.isSafeInteger(cursor.revision)||cursor.revision<0)fail('INVALID_ROW','Invalid native feed cursor');if(state.cursorEpoch===undefined)state.cursorEpoch=cursor.epoch;else if(cursor.epoch!==state.cursorEpoch)fail('FENCED','Native feed cursor changed epoch');}
  private async run<T>(state:State,bytes:number,run:()=>Promise<T>):Promise<T>{
   const loaded=new Set<string>();let preparationBytes=0;
   for(;;){try{return await waitForSQLiteOwnerAdmission(()=>this.options.owner.runOwner(bytes,async()=>{let value!:T;await this.options.owner.database.withTransactionAsync(async()=>{this.check(state);value=await run();this.check(state);});return value;},[state.scope]),()=>this.check(state));}
@@ -103,7 +103,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
  private async mutate(scope:string,run:()=>Promise<void>){if(this.authorityDepth){await run();return;}this.authorityDepth++;try{if(this.options.authority)await this.options.authority(scope,run);else await run();}finally{this.authorityDepth--;}}
  private async applyDelta(state:State,source:Source,frame:Delta){
   this.cursor(state,frame.cursor);const rows=await decodeSQLiteNativeDelta(frame,source.key),current=await this.windows.header(state.scope,source.signature);
-  if(!current||current.header.cursor?.epoch!==state.epoch)fail('PAGE_CHANGED','Native delta needs a verified base window');
+  if(!current||current.header.cursor?.epoch!==state.cursorEpoch)fail('PAGE_CHANGED','Native delta needs a verified base window');
   await this.windows.applyDelta({scope:state.scope,signature:source.signature,generation:current.generation,cursor:frame.cursor,upserts:rows.map(({id,hash})=>({id,hash})),deleted:frame.deleted??[],digest:frame.digest??''},()=>this.mutate(state.scope,async()=>{await this.options.owner.canonical.applyTransaction({cursor:frame.cursor,changes:rows.map(({id,row})=>({entity:source.entity,id,operation:'update',newValue:row}))},empty,state.scope);}));
  }
  private async replay(state:State,source:Source){
@@ -129,7 +129,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
    // reducer completeness after authority has advanced beyond them.
    await this.options.owner.database.runAsync(`UPDATE gv_window_generations AS g SET header=json_set(g.header,'$.cursor.revision',max(json_extract(g.header,'$.cursor.revision'),?))
     WHERE g.scope=? AND json_extract(g.header,'$.cursor.epoch')=? AND (g.signature,g.generation) IN
-     (SELECT w.signature,w.generation FROM gv_windows w WHERE w.scope=? AND w.signature IN (SELECT value FROM json_each(?)))`,revision,state.scope,state.epoch,state.scope,JSON.stringify([...this.sources.values()].filter(source=>!source.closing).map(source=>source.signature)));
+     (SELECT w.signature,w.generation FROM gv_windows w WHERE w.scope=? AND w.signature IN (SELECT value FROM json_each(?)))`,revision,state.scope,state.cursorEpoch??'',state.scope,JSON.stringify([...this.sources.values()].filter(source=>!source.closing).map(source=>source.signature)));
    await this.options.owner.database.runAsync('INSERT INTO gv_native_feed_progress VALUES(?,?,?, ?,0) ON CONFLICT(scope,epoch) DO UPDATE SET observed=max(observed,excluded.observed),applied=max(applied,excluded.applied),unclosed=0',state.scope,state.epoch,revision,revision);if(!pending||pending.applied<revision||pending.unclosed)await markSQLiteStagingCommit(this.options.owner.database,()=>this.options.owner.engine.verifyOwner());applied=true;
    };if(pending?.unclosed||await this.groups.pending(state.stream)||await this.options.windowsPending?.(state.scope,state.epoch,revision))await this.mutate(state.scope,publish);else await publish();
   }));this.check(state);if(applied)this.options.advanceWatermark(revision);
@@ -153,7 +153,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
    }
    case 'replica.delta':{
     const source=this.source(message.id);this.cursor(state,message.cursor);
-    await this.run(state,262144,async()=>{const header=await this.windows.header(state.scope,source.signature);if(source.start||!header||header.header.cursor?.epoch!==state.epoch)await this.deferred.append(state.scope,source.deferredKey,message);else await this.groups.append(state.stream,message);});return;
+    await this.run(state,262144,async()=>{const header=await this.windows.header(state.scope,source.signature);if(source.start||!header||header.header.cursor?.epoch!==state.cursorEpoch)await this.deferred.append(state.scope,source.deferredKey,message);else await this.groups.append(state.stream,message);});return;
    }
    case 'replica.transactionEncoded':{
     this.cursor(state,message.cursor);
@@ -181,7 +181,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
   * until its terminal cohort closes. This does not grant reducer coverage. */
  async assertCommittedReadable(cached:{scope:string;epoch:string}){
   if(!this.options.owner.database.ownerTransactionDepth)throw Error('Committed read guard requires an owner transaction');
-  sqlitePayloadBytes(cached,4096);await this.options.owner.engine.verifyOwner();await this.readableEpoch(cached.scope,cached.epoch);
+  sqlitePayloadBytes(cached,4096);await this.options.owner.engine.verifyOwner();await this.readableEpoch(cached.scope,cached.epoch,this.state?.scope===cached.scope&&this.state.epoch===cached.epoch?this.state.cursorEpoch:undefined);
   const progress=await this.options.owner.database.getFirstAsync<{unclosed:number;applied:number}>('SELECT unclosed,applied FROM gv_native_feed_progress WHERE scope=? AND epoch=?',cached.scope,cached.epoch);
   if(progress?.unclosed&&progress.unclosed>progress.applied)fail('PAGE_CHANGED','Committed feed requires reconciliation of its unfinished cohort');
  }
@@ -193,9 +193,9 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
    if(!cached)fail('FENCED','Native feed unavailable');sqlitePayloadBytes(cached,4096);
    await this.options.owner.runOwner(0,async()=>{await this.options.owner.engine.verifyOwner();await this.readableEpoch(cached.scope,cached.epoch);const progress=await this.options.owner.database.getFirstAsync<{unclosed:number}>('SELECT unclosed FROM gv_native_feed_progress WHERE scope=? AND epoch=?',cached.scope,cached.epoch);if(progress?.unclosed)fail('PAGE_CHANGED','Cached feed requires reconciliation of its unfinished group');});return;
   }
-  await state.gate;await state.ingress.flush();await this.run(state,0,async()=>{await this.readableEpoch(state.scope,state.epoch);if(await this.groups.pending(state.stream))fail('PAGE_CHANGED','Native feed awaits its terminal watermark');const progress=await this.options.owner.database.getFirstAsync<{unclosed:number}>('SELECT unclosed FROM gv_native_feed_progress WHERE scope=? AND epoch=?',state.scope,state.epoch);if(progress?.unclosed)fail('PAGE_CHANGED','Native feed awaits its terminal watermark');});
+  await state.gate;await state.ingress.flush();await this.run(state,0,async()=>{await this.readableEpoch(state.scope,state.epoch,state.cursorEpoch);if(await this.groups.pending(state.stream))fail('PAGE_CHANGED','Native feed awaits its terminal watermark');const progress=await this.options.owner.database.getFirstAsync<{unclosed:number}>('SELECT unclosed FROM gv_native_feed_progress WHERE scope=? AND epoch=?',state.scope,state.epoch);if(progress?.unclosed)fail('PAGE_CHANGED','Native feed awaits its terminal watermark');});
  }
- private async readableEpoch(scope:string,epoch:string){const current=await this.options.owner.database.getFirstAsync<{value:string}>("SELECT value FROM _gonvex_replica_meta WHERE scope=? AND key='currentEpoch'",scope);if(current&&current.value!==epoch)fail('PAGE_CHANGED','Canonical rows need the newly admitted database epoch');}
+ private async readableEpoch(scope:string,epoch:string,cursorEpoch?:string){const current=await this.options.owner.database.getFirstAsync<{value:string}>("SELECT value FROM _gonvex_replica_meta WHERE scope=? AND key='currentEpoch'",scope);if(!current)return;if(cursorEpoch&&current.value!==cursorEpoch)fail('PAGE_CHANGED','Canonical rows need the newly admitted database epoch');const progress=await this.options.owner.database.getFirstAsync('SELECT 1 FROM gv_native_feed_progress WHERE scope=? AND epoch=?',scope,epoch);if(!progress)fail('PAGE_CHANGED','Canonical rows have no committed admission epoch');}
  /** Only an authenticated registered source can select a pending disk stage.
   * This is display metadata, never a complete replica coverage certificate. */
  pendingSource(id:string){
