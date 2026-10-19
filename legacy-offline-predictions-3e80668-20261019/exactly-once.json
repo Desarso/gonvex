@@ -1,0 +1,11 @@
+{
+  "readOnly": true,
+  "privatePort": 14596,
+  "commandId": "5e018e4b-bd4d-41eb-a67e-e6569f9d1c0e",
+  "transactions": 1,
+  "revision": 2278,
+  "offlineReloadsWithPrediction": 2,
+  "uiRestorePassed": true,
+  "appHead": "f2a057d6307970ccb8f6da27dd28168331df4109",
+  "sdkHead": "3e80668f06c6c06b3b0812a326cd427e81fba018"
+}

@@ -1,0 +1,46 @@
+{
+  "appHead": "f2a057d6307970ccb8f6da27dd28168331df4109",
+  "sdkHead": "3e80668f06c6c06b3b0812a326cd427e81fba018",
+  "runtimeHead": "5f25a68929596f496a82c1b57db64560db2171f4",
+  "sdkPatch": {
+    "appHead": "f2a057d6307970ccb8f6da27dd28168331df4109",
+    "sdkHead": "3e80668f06c6c06b3b0812a326cd427e81fba018",
+    "sdkWorkingPatchSHA256": "9765c1a91d2d8e516eb1e403cb06663dc9b7eb5e8241697614cdc0b854edcd96",
+    "originalDistSHA256": "747c924e7d0dc4e3bd38925952c3be253585760345fa4a9ba5687259e0bbba7f",
+    "fixedDistSHA256": "570d3ec4b6dbc6f466d7fadf329a980161c7a7cd6896011a566486892afc549e",
+    "installedPatchSHA256": "52ad9ba9f12775c5b0ac3573a091081fd95d9c1c0a2e1cd46ce4d64b147dd458",
+    "policy": "Only the legacy prediction-preservation catch and its unavailable-execution classifier are backported to the same pinned installed SDK. No hydration-window or other source changes."
+  },
+  "offlineGridRealNames": 12,
+  "offlineReloadPredictions": [
+    {
+      "reload": 1,
+      "name": "Small fixture task 12 QA offline shell",
+      "connected": false,
+      "originalIntentPending": true
+    },
+    {
+      "reload": 2,
+      "name": "Small fixture task 12 QA offline shell",
+      "connected": false,
+      "originalIntentPending": true
+    }
+  ],
+  "offlineAck": {
+    "at": 1792419473951,
+    "id": "5e018e4b-bd4d-41eb-a67e-e6569f9d1c0e",
+    "originCommandId": "5e018e4b-bd4d-41eb-a67e-e6569f9d1c0e",
+    "type": "reducer.result",
+    "committedRevision": 2278
+  },
+  "authoritativeReloadAndUIRestoration": true,
+  "pageErrors": [],
+  "unitBefore": {
+    "failed": 2,
+    "passed": 68
+  },
+  "unitAfter": {
+    "clientTests": 533,
+    "reactTests": 91
+  }
+}

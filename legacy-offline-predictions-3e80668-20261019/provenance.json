@@ -1,0 +1,48 @@
+{
+  "sdkFixHead": "3e80668f06c6c06b3b0812a326cd427e81fba018",
+  "appHead": "f2a057d6307970ccb8f6da27dd28168331df4109",
+  "beforeAppHead": "e287a2bf77ab68846f4b92c8aa0650a1ba2b357a",
+  "beforeAppDifference": "Only test fixtures and generated manifest timestamp differ between e287 and f2a; no application code changes",
+  "runtimeHead": "5f25a68929596f496a82c1b57db64560db2171f4",
+  "sdk": "Pinned installed legacy 0.5.2-staging.29 with only the SDK fix backported in the after arm",
+  "fixture": "Private synthetic memory-small-2 tenant, 24 tasks total, 12 visible in tested workspace",
+  "viewport": {
+    "width": 1280,
+    "height": 900,
+    "dpr": 1
+  },
+  "files": {
+    "before-offline-reload-lost-name.png": {
+      "sha256": "e788d0f9c6a565a2da55ebab9d1193e5fffa4e0631a187d2bc149b828c40bd5d",
+      "capturedAt": "2026-10-19T13:52:43.508610+00:00"
+    },
+    "after-offline-save.png": {
+      "sha256": "aa17e95a8125cb6eeb6b797f71f26b2317298d6e2ed5599d9a26ed5e2eb08625",
+      "capturedAt": "2026-10-19T14:17:45.846654+00:00"
+    },
+    "after-offline-reload.png": {
+      "sha256": "9dc83dcbafcda03b96f88adcf73a03533f6f4b24147df03ff1b2058ef90718c6",
+      "capturedAt": "2026-10-19T14:17:48.740692+00:00"
+    },
+    "after-second-offline-reload.png": {
+      "sha256": "9dc83dcbafcda03b96f88adcf73a03533f6f4b24147df03ff1b2058ef90718c6",
+      "capturedAt": "2026-10-19T14:17:52.001734+00:00"
+    },
+    "after-authoritative-reload.png": {
+      "sha256": "bb7f475a5c50a10f379d0d8c9ed30640ea4e008375e2416ed21be25d923483bb",
+      "capturedAt": "2026-10-19T14:17:56.331791+00:00"
+    },
+    "after-ui-restoration.png": {
+      "sha256": "924eb1d6561f9a163e72a109f4a3577836093c78d67d972dfc9ddab87c707c5f",
+      "capturedAt": "2026-10-19T14:17:58.465935+00:00"
+    },
+    "proof-summary.json": {
+      "sha256": "6755c289173fb47ae9486d4a79f0190c02a79e411a4ef035ef7395419dd43cfa",
+      "capturedAt": "2026-10-19T14:19:01.110190+00:00"
+    },
+    "exactly-once.json": {
+      "sha256": "8ac60f79eb18272a7c10372afa462eb125a6622774a79217e0c33b7cd9de9d02",
+      "capturedAt": "2026-10-19T14:18:06.748129+00:00"
+    }
+  }
+}
