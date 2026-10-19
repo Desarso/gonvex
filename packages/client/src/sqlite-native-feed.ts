@@ -171,20 +171,19 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
     const source=this.source(message.id);this.cursor(state,message.cursor);
     if(message.visibilityScope!==state.scope||message.scope!==state.logicalScope||message.key!==source.key||message.path!==undefined&&message.path!==source.path||!message.snapshotId||message.snapshotId.length>128)fail('INVALID_ROW','Native start differs from generated source');
     if(source.start)fail('PAGE_CHANGED','Native source received overlapping snapshots');const startBytes=sqlitePayloadBytes(message,16384);if(this.sourceBytes+this.startBytes+this.closingBytes+startBytes>262144)fail('BUDGET','Native source header registry exceeded budget');
-    // A published snapshot's values and membership are owned by canonical
-    // aliases. Retire its staging receipt before admitting another generation;
-    // idle cleanup can be behind the startup queue after a fast reload.
-    for(;;){const more=await this.run(state,16384,async()=>{
-     const prior=await owner.database.getFirstAsync<{generation:string}>('SELECT generation FROM gv_window_generations WHERE scope=? AND signature=? AND generation<>coalesce((SELECT generation FROM gv_windows WHERE scope=? AND signature=?),\'\') LIMIT 1',state.scope,source.signature,state.scope,source.signature);
-     if(!prior)return false;await this.windows.collect(state.scope,source.signature,prior.generation);return true;
-    });if(!more)break;}
-    // A new snapshot incarnation retires prior stages of this source, including
-    // a verified warm stage disconnected before its publication watermark.
-    for(;;){const more=await this.run(state,16384,async()=>{
-     const prior=await owner.database.getFirstAsync<{snapshot:string}>(`SELECT s.snapshot FROM gv_snapshot_stages s WHERE s.scope=? AND s.subscription=? AND s.snapshot<>? LIMIT 1`,state.scope,source.id,message.snapshotId);
-     if(!prior)return false;await owner.snapshots.discard(state.scope,source.id,prior.snapshot);return true;
-    });if(!more)break;}
-    await this.run(state,16384,async()=>{await owner.snapshots.prepareTyped({scope:state.scope,subscription:source.id,snapshot:message.snapshotId,entity:source.entity});});source.deferActivation=!!(await this.run(state,0,()=>owner.database.getFirstAsync('SELECT 1 FROM gv_native_feed_progress WHERE scope=? AND epoch=? AND applied>0',state.scope,state.epoch)));source.start=message;this.startBytes+=startBytes;source.opening=true;return;
+    const priorWindow=()=>owner.database.getFirstAsync<{generation:string}>("SELECT generation FROM gv_window_generations WHERE scope=? AND signature=? AND generation<>coalesce((SELECT generation FROM gv_windows WHERE scope=? AND signature=?),'') LIMIT 1",state.scope,source.signature,state.scope,source.signature);
+    const priorStage=()=>owner.database.getFirstAsync<{snapshot:string}>('SELECT snapshot FROM gv_snapshot_stages WHERE scope=? AND subscription=? AND snapshot<>? LIMIT 1',state.scope,source.id,message.snapshotId);
+    const prepare=async()=>{await owner.snapshots.prepareTyped({scope:state.scope,subscription:source.id,snapshot:message.snapshotId,entity:source.entity});return {defer:!!await owner.database.getFirstAsync('SELECT 1 FROM gv_native_feed_progress WHERE scope=? AND epoch=? AND applied>0',state.scope,state.epoch)};};
+    // Most starts have nothing obsolete to collect. Keep their checks and
+    // preparation in one fenced transaction and one owner-queue turn.
+    const prepared=await this.run(state,16384,async()=>{if(await priorWindow()||await priorStage())return;return prepare();});
+    if(!prepared){
+     // Published aliases own their values and membership. Retire stale disk
+     // generations in the existing bounded turns before preparing another.
+     for(;;){const more=await this.run(state,16384,async()=>{const prior=await priorWindow();if(!prior)return false;await this.windows.collect(state.scope,source.signature,prior.generation);return true;});if(!more)break;}
+     for(;;){const more=await this.run(state,16384,async()=>{const prior=await priorStage();if(!prior)return false;await owner.snapshots.discard(state.scope,source.id,prior.snapshot);return true;});if(!more)break;}
+    }
+    source.deferActivation=(prepared??await this.run(state,16384,prepare)).defer;source.start=message;this.startBytes+=startBytes;source.opening=true;return;
    }
    case 'replica.closed':{
     const source=this.source(message.id),closing=source.closing;if(!closing)fail('INVALID_ROW','Unexpected native source close acknowledgement');

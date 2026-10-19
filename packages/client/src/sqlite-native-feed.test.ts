@@ -40,7 +40,7 @@ async function fixture(extra:Partial<ConstructorParameters<typeof SQLiteNativeFe
  const append=async(part:typeof rows,sequence:number,last:boolean)=>{feed.binary(new TextEncoder().encode(JSON.stringify({type:'replica.snapshotEncodedPage',id:'source',snapshotId:'base',scope:'tenant',visibilityScope:'visible',cursor:cursor(10),key:'id',sequence,last,canonicalRows:part.map(stable),path:'tasks/all',...(last?{digest:await digest()}:{})})).buffer,1);};
  const ready=async(revision=10,values=rows)=>feed.frame({type:'replica.ready',id:'source',cursor:cursor(revision),digest:await digest(values)},1);
  const transaction=(revision=12)=>feed.frame({type:'replica.transactionEncoded',cursor:cursor(revision),originCommandId:'intent',canonicalChanges:[stable({entity:'tasks',id:'a',operation:'update',newValue:{...changed,n:revision}})]},1);
- return {owner,db,engine,canonical,feed,sends,watermarks,failures,publications,start,append,ready,transaction,session,sessions,safety,runOwner};
+ return {host,owner,db,engine,canonical,feed,sends,watermarks,failures,publications,start,append,ready,transaction,session,sessions,safety,runOwner};
 }
 it('keeps the module admission epoch distinct from the database replica cursor epoch',async()=>{
  const f=await fixture({},false,'module-epoch');
@@ -345,4 +345,17 @@ it('does not rewrite disk certificates for an already published quiet watermark'
  f.feed.frame({type:'replica.ready',id:'second',cursor:cursor(10),digest:hash},1);await f.feed.assertReadable();
  expect((await new SQLiteWindowStore(f.db,()=>f.engine.verifyOwner()).header('visible','second-window'))?.header.aggregateDigest).toBe(hash);
  expect(f.failures).toEqual([]);
+});
+
+
+it('prepares a clean snapshot incarnation in one fenced owner transaction before granting any credit',async()=>{
+ const f=await fixture();f.host.takeProfile();
+ await f.start();await vi.waitFor(()=>expect(f.feed.pendingSource('source')).toMatchObject({snapshot:'base'}));
+ const profile=f.host.takeProfile();expect(profile.commits).toBe(1);
+ expect(f.sends).toEqual([]);expect(f.watermarks).toEqual([]);
+ expect(await f.canonical.loadEntityRows('visible','tasks',['a','b'])).toEqual([]);
+ await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();
+ expect(f.failures).toEqual([]);expect(f.sends).toHaveLength(1);
+ expect((await f.canonical.loadEntityRows('visible','tasks',['a','b'])).map(entry=>entry.row)).toEqual(rows);
+ expect(await f.engine.integrity()).toBe('ok');
 });
