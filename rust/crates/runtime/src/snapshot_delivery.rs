@@ -41,6 +41,7 @@ pub(crate) struct SnapshotDelivery {
     native: bool,
     pending: BTreeMap<String, Pending>,
     last_served: Option<String>,
+    retired: BTreeMap<(String, String), VecDeque<(u64, usize)>>,
 }
 
 impl SnapshotDelivery {
@@ -52,13 +53,21 @@ impl SnapshotDelivery {
     }
     pub(crate) fn clear(&mut self) {
         self.pending.clear();
+        self.retired.clear();
         self.last_served = None;
     }
     pub(crate) fn is_empty(&self) -> bool {
         self.pending.is_empty()
     }
     pub(crate) fn remove(&mut self, id: &str) {
-        self.pending.remove(id);
+        if let Some(pending) = self.pending.remove(id) {
+            // Cancellation prevents future frames; it cannot revoke bytes
+            // already sent and still occupying the client's durable queue.
+            if !pending.in_flight.is_empty() {
+                self.retired
+                    .insert((id.to_owned(), pending.snapshot), pending.in_flight);
+            }
+        }
     }
 
     pub(crate) fn close_subscription(&mut self, id: &str) -> Option<ServerMessage> {
@@ -83,6 +92,7 @@ impl SnapshotDelivery {
         if !self.pending.contains_key(&id) && self.pending.len() == SUBSCRIPTION_LIMIT {
             return Err("native snapshot subscription limit exceeded");
         }
+        self.remove(&id);
         self.pending.insert(
             id,
             Pending {
@@ -109,6 +119,19 @@ impl SnapshotDelivery {
         snapshot: &str,
         sequence: u64,
     ) -> Result<Option<ServerMessage>, &'static str> {
+        let retired_key = (id.to_owned(), snapshot.to_owned());
+        if let Some(frames) = self.retired.get_mut(&retired_key) {
+            if frames.back().is_some_and(|(sent, _)| sequence > *sent) {
+                return Err("snapshot acknowledgement exceeds sent sequence");
+            }
+            while frames.front().is_some_and(|(sent, _)| *sent <= sequence) {
+                frames.pop_front();
+            }
+            if frames.is_empty() {
+                self.retired.remove(&retired_key);
+            }
+            return Ok(None);
+        }
         let Some(pending) = self.pending.get_mut(id) else {
             return Ok(None);
         };
@@ -182,13 +205,15 @@ impl SnapshotDelivery {
             .pending
             .values()
             .flat_map(|pending| &pending.in_flight)
+            .chain(self.retired.values().flatten())
             .map(|(_, bytes)| bytes)
             .sum();
         let mut count: usize = self
             .pending
             .values()
             .map(|pending| pending.in_flight.len())
-            .sum();
+            .sum::<usize>()
+            + self.retired.values().map(VecDeque::len).sum::<usize>();
         let mut batch = DeliveryBatch::default();
         let mut blocked = 0;
         while count < IN_FLIGHT_FRAMES && bytes < IN_FLIGHT_BYTES && blocked < self.pending.len() {
@@ -245,12 +270,7 @@ impl SnapshotDelivery {
                 }
                 Err(error) => {
                     pending.last_sent = true;
-                    count -= pending.in_flight.len();
-                    bytes -= pending
-                        .in_flight
-                        .iter()
-                        .map(|(_, bytes)| bytes)
-                        .sum::<usize>();
+                    // Sent frames retain credit even when later encoding fails.
                     batch.errors.push(ServerMessage::ReplicaError {
                         id,
                         error: error.into(),
@@ -261,7 +281,7 @@ impl SnapshotDelivery {
         }
         for error in &batch.errors {
             if let ServerMessage::ReplicaError { id, .. } = error {
-                self.pending.remove(id);
+                self.remove(id);
             }
         }
         batch
@@ -600,5 +620,38 @@ mod tests {
         assert!(matches!(&next[1],ServerMessage::ReplicaReady{id,..} if id=="z-metadata"));
         delivery.remove("a-bulk");
         assert!(delivery.is_empty());
+    }
+    #[test]
+    fn canceled_and_replaced_snapshots_keep_wire_credit_until_durable_ack() {
+        let mut delivery = SnapshotDelivery::default();
+        delivery.set_native(true);
+        delivery.begin(snapshot("old", 2000)).unwrap();
+        let sent = delivery.pump();
+        assert_eq!(sent.frames.len(), 8);
+        let first: serde_json::Value = serde_json::from_slice(&sent.frames[0]).unwrap();
+        let last: serde_json::Value = serde_json::from_slice(sent.frames.last().unwrap()).unwrap();
+        assert!(matches!(
+            delivery.close_subscription("old"),
+            Some(ServerMessage::ReplicaClosed { .. })
+        ));
+        delivery.begin(snapshot("new", 1)).unwrap();
+        assert!(delivery.pump().frames.is_empty());
+        assert!(delivery
+            .acknowledge("old", first["snapshotId"].as_str().unwrap(), 999)
+            .is_err());
+        assert!(delivery.pump().frames.is_empty());
+        delivery
+            .acknowledge(
+                "old",
+                last["snapshotId"].as_str().unwrap(),
+                last["sequence"].as_u64().unwrap(),
+            )
+            .unwrap();
+        assert_eq!(delivery.pump().frames.len(), 1);
+        assert!(delivery.retired.is_empty());
+        delivery.begin(snapshot("new", 1)).unwrap();
+        assert_eq!(delivery.retired.len(), 1);
+        delivery.clear();
+        assert!(delivery.retired.is_empty());
     }
 }
