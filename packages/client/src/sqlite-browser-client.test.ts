@@ -229,3 +229,20 @@ it('keeps connection snapshots stable across unchanged controls and publishes ge
  f.handler=async input=>input.method==='controls'?{tokens:[],status:f.client.connectionState(),session,failure:null,serverInfo:{version:'2'},admissionKey:'changed'}:undefined;await f.client.pollControls();expect(scopes).toHaveLength(2);
  for(const release of releases)release();
 });
+
+it('publishes a cached-session control hint queued after the final successful poll',async()=>{
+ const f=fixture();let session='authenticated';
+ f.handler=input=>input.method==='controls'?{tokens:[],status:{},session,failure:null}:undefined;
+ await f.client.connect();await f.client.pollControls();await new Promise(resolve=>setTimeout(resolve,0));
+ let queued=false;const seen:string[]=[];
+ const release=f.client.onLocalSessionChange(()=>{
+  seen.push(f.client.localSessionState());
+  if(session==='unavailable'&&!queued){queued=true;queueMicrotask(()=>{session='restored';f.control();});}
+ });cleanup.push(release);
+ session='unavailable';await f.client.pollControls();
+ await vi.waitFor(()=>expect(seen).toEqual(['unavailable','restored']));
+ expect(f.client.localSessionState()).toBe('restored');
+ const reads=f.calls.filter(call=>call.input.method==='controls').length;
+ await new Promise(resolve=>setTimeout(resolve,30));
+ expect(f.calls.filter(call=>call.input.method==='controls')).toHaveLength(reads);
+});

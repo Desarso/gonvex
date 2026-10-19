@@ -130,7 +130,11 @@ export class SQLiteBrowserClient {
    for(const request of controls.tokens){if(request.connection!==handle.connection||request.identityKey!==handle.identityKey||this.tokenRequests.has(request.id))continue;if(this.tokenRequests.size>=8)fail('BUDGET','Native browser token request budget exhausted');this.tokenRequests.add(request.id);
     void (async()=>{try{let timer:ReturnType<typeof setTimeout>|undefined;let token:string|null|undefined;try{token=this.fetchToken?await Promise.race([this.fetchToken({forceRefreshToken:request.forceRefreshToken}),new Promise<never>((_,reject)=>{this.tokenCancels.set(request.id,()=>reject(Error('Native token request canceled')));timer=setTimeout(()=>reject(Error('Native token provider timed out')),30000);})]):this.auth.token??null;}finally{clearTimeout(timer);}this.current(revision);token??=this.auth.token??null;if(token!==null&&(typeof token!=='string'||token.length>16384))throw new TypeError('Invalid native browser token');await this.options.broker.request('clientCall',{method:'token',response:{...request,token}});}catch{if(!this.closed&&revision===this.revision)await this.options.broker.request('clientCall',{method:'token',response:{...request,error:'Token provider unavailable'}}).catch(()=>{});}finally{this.tokenRequests.delete(request.id);this.tokenCancels.delete(request.id);}})();
    }
-  }catch(error){if(!this.closed&&revision!==this.revision&&(error as {code?:string})?.code==='FENCED'){this.pollAgain=true;continue;}throw error;}}while(this.pollAgain&&!this.closed);})();this.polling=operation;void operation.then(()=>{this.polling=undefined;},()=>{this.polling=undefined;if(this.pollAgain&&!this.closed){this.pollAgain=false;queueMicrotask(()=>{void this.pollControls().catch(()=>{});});}});return operation;
+  }catch(error){if(!this.closed&&revision!==this.revision&&(error as {code?:string})?.code==='FENCED'){this.pollAgain=true;continue;}throw error;}}while(this.pollAgain&&!this.closed);})();this.polling=operation;
+  // A listener may queue a hint after the loop's last test but before this
+  // promise settles. Drain that demand on both success and failure.
+  const settled=()=>{this.polling=undefined;if(this.pollAgain&&!this.closed){this.pollAgain=false;queueMicrotask(()=>{void this.pollControls().catch(()=>{});});}};
+  void operation.then(settled,settled);return operation;
  }
  get localReplica(){return this.entityView;}
  retainReplicaEntities(entity:string,ids:readonly string[]){return this.entityView.retain(entity,ids);}
