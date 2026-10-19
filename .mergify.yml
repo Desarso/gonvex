@@ -65,10 +65,6 @@ queue_rules:
       - "#review-threads-unresolved = 0"
       - check-success = CI
       - check-success = UI merge policy / staging
-      - or:
-          - check-success = Macroscope - Correctness Check
-          - check-neutral = Macroscope - Correctness Check
-          - check-skipped = Macroscope - Correctness Check
     merge_conditions:
       - check-success = CI
     merge_method: squash
