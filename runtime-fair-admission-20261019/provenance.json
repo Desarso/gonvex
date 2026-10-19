@@ -1,0 +1,53 @@
+{
+  "appHead": "68c482e010510b96b6afd69a2e8839c38937fbab",
+  "baselineRuntimeHead": "5f25a68929596f496a82c1b57db64560db2171f4",
+  "candidateRuntimeHead": "f4cba811fb29edbc205019c380f1107bb2e8eb7e",
+  "fixture": "Private synthetic 31,012-task Whagons fixture; no customer data",
+  "largeViewport": {
+    "width": 1886,
+    "height": 1041,
+    "dpr": 1
+  },
+  "files": {
+    "before-cold.png": {
+      "sha256": "c9f2a9a844c22940582f7423ff7298bdec888d4b1dd15b68fbe50e1a0d09a2e4",
+      "capturedAt": "2026-10-19T11:42:28.190444+00:00",
+      "source": "runtime-large-1-02-baseline/cold-grid.png"
+    },
+    "after-first-names.png": {
+      "sha256": "cc204c199e9671131db727e7bf8c820b79320a50362a6d9f4eae7997f416b5a4",
+      "capturedAt": "2026-10-19T11:38:46.919708+00:00",
+      "source": "runtime-large-1-01-fair/cold-grid.png"
+    },
+    "after-related.png": {
+      "sha256": "7092df152d0330fae6915125713bd3e094cd9c9029336e0f659a96fc315b7b2c",
+      "capturedAt": "2026-10-19T11:39:37.197325+00:00",
+      "source": "runtime-large-1-01-fair/cold-related.png"
+    },
+    "before-reload-hang.png": {
+      "sha256": "c838ec6907f211142d279f876188939f973ebc1ae657b4a724b6f09b30bd5617",
+      "capturedAt": "2026-10-19T11:45:57.271066+00:00",
+      "source": "runtime-large-1-03-baseline/failure.png"
+    },
+    "after-reload-hang.png": {
+      "sha256": "7202bd0bc5a49f56c2e5ae00b6be5182fef2d87df1b04d34ab06c85708447000",
+      "capturedAt": "2026-10-19T11:41:17.515565+00:00",
+      "source": "runtime-large-1-01-fair/failure.png"
+    },
+    "small-qualification.json": {
+      "sha256": "17197847395c7ee7546421413632df50689fb24ebc09bc8fc29adacd08134653",
+      "capturedAt": "2026-10-19T11:10:08.207962+00:00",
+      "source": "runtime-cohort-4/summary.json"
+    },
+    "large-matched.json": {
+      "sha256": "25a1cc55271686931845ea8c718da852756d5fe9e0e5e88a91a9ed92f4ed0e39",
+      "capturedAt": "2026-10-19T11:49:30.861917+00:00",
+      "source": "runtime-large-1/summary.json"
+    },
+    "memory-diagnostic.json": {
+      "sha256": "fe628a79343037b323aed02bc5b6352ac39cd17ea6a6e9565f7cd920e9b2d8e4",
+      "capturedAt": "2026-10-19T11:33:41.585417+00:00",
+      "source": "runtime-cohort-memory-1/gc-summary.json"
+    }
+  }
+}

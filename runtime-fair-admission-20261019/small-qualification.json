@@ -1,0 +1,440 @@
+{
+  "summary": {
+    "baseline": {
+      "cold-grid": {
+        "n": 20,
+        "p50": 2062.0,
+        "p95": 2575,
+        "min": 1792,
+        "max": 2652
+      },
+      "warm-reload": {
+        "n": 20,
+        "p50": 1279.5,
+        "p95": 1867,
+        "min": 999,
+        "max": 1918
+      },
+      "first-dialog-visualMs": {
+        "n": 20,
+        "p50": 176.0,
+        "p95": 427,
+        "min": 156,
+        "max": 552
+      },
+      "first-dialog-previewMs": {
+        "n": 20,
+        "p50": 263.5,
+        "p95": 511,
+        "min": 234,
+        "max": 776
+      },
+      "first-dialog-ms": {
+        "n": 20,
+        "p50": 807.5,
+        "p95": 1336,
+        "min": 768,
+        "max": 1750
+      },
+      "first-dialog-usableMs": {
+        "n": 20,
+        "p50": 815.5,
+        "p95": 1338,
+        "min": 771,
+        "max": 1752
+      },
+      "repeat-dialog-visualMs": {
+        "n": 40,
+        "p50": 44.5,
+        "p95": 60,
+        "min": 9,
+        "max": 66
+      },
+      "repeat-dialog-previewMs": {
+        "n": 40,
+        "p50": 57.0,
+        "p95": 92,
+        "min": 47,
+        "max": 101
+      },
+      "repeat-dialog-ms": {
+        "n": 40,
+        "p50": 242.5,
+        "p95": 300,
+        "min": 211,
+        "max": 334
+      },
+      "repeat-dialog-usableMs": {
+        "n": 40,
+        "p50": 247.0,
+        "p95": 306,
+        "min": 213,
+        "max": 348
+      },
+      "workspace-switch": {
+        "n": 60,
+        "p50": 129.0,
+        "p95": 174,
+        "min": 97,
+        "max": 193
+      },
+      "workspace-return": {
+        "n": 60,
+        "p50": 121.5,
+        "p95": 143,
+        "min": 99,
+        "max": 159
+      },
+      "settings-entry": {
+        "n": 60,
+        "p50": 124.0,
+        "p95": 231,
+        "min": 75,
+        "max": 270
+      },
+      "settings-return": {
+        "n": 60,
+        "p50": 136.0,
+        "p95": 168,
+        "min": 114,
+        "max": 190
+      },
+      "settled-cold-grid-renderer-MB": {
+        "n": 20,
+        "p50": 212.64793600000002,
+        "p95": 219.082752,
+        "min": 207.118336,
+        "max": 220.516352
+      },
+      "settled-cold-grid-whole-Chrome-MB": {
+        "n": 20,
+        "p50": 613.251072,
+        "p95": 627.044352,
+        "min": 604.360704,
+        "max": 627.433472
+      },
+      "settled-warm-reload-renderer-MB": {
+        "n": 20,
+        "p50": 315.070464,
+        "p95": 320.016384,
+        "min": 294.866944,
+        "max": 343.883776
+      },
+      "settled-warm-reload-whole-Chrome-MB": {
+        "n": 20,
+        "p50": 714.713088,
+        "p95": 723.562496,
+        "min": 694.575104,
+        "max": 747.282432
+      },
+      "settled-after-3-dialogs-renderer-MB": {
+        "n": 20,
+        "p50": 219.547648,
+        "p95": 327.704576,
+        "min": 215.732224,
+        "max": 369.0496
+      },
+      "settled-after-3-dialogs-whole-Chrome-MB": {
+        "n": 20,
+        "p50": 639.455232,
+        "p95": 745.824256,
+        "min": 632.68864,
+        "max": 784.318464
+      },
+      "settled-after-route-tour-renderer-MB": {
+        "n": 20,
+        "p50": 211.51129600000002,
+        "p95": 351.834112,
+        "min": 204.115968,
+        "max": 376.004608
+      },
+      "settled-after-route-tour-whole-Chrome-MB": {
+        "n": 20,
+        "p50": 633.079808,
+        "p95": 772.390912,
+        "min": 625.463296,
+        "max": 795.144192
+      },
+      "continuous-renderer-peak-MB": {
+        "n": 20,
+        "p50": 341.682176,
+        "p95": 389.287936,
+        "min": 330.0352,
+        "max": 408.211456
+      }
+    },
+    "fair": {
+      "cold-grid": {
+        "n": 20,
+        "p50": 1878.5,
+        "p95": 2329,
+        "min": 1655,
+        "max": 2913
+      },
+      "warm-reload": {
+        "n": 20,
+        "p50": 879.0,
+        "p95": 1670,
+        "min": 772,
+        "max": 1815
+      },
+      "first-dialog-visualMs": {
+        "n": 20,
+        "p50": 172.0,
+        "p95": 500,
+        "min": 133,
+        "max": 524
+      },
+      "first-dialog-previewMs": {
+        "n": 20,
+        "p50": 260.0,
+        "p95": 569,
+        "min": 225,
+        "max": 615
+      },
+      "first-dialog-ms": {
+        "n": 20,
+        "p50": 792.5,
+        "p95": 1203,
+        "min": 666,
+        "max": 1434
+      },
+      "first-dialog-usableMs": {
+        "n": 20,
+        "p50": 806.5,
+        "p95": 1204,
+        "min": 671,
+        "max": 1435
+      },
+      "repeat-dialog-visualMs": {
+        "n": 40,
+        "p50": 42.0,
+        "p95": 60,
+        "min": 9,
+        "max": 76
+      },
+      "repeat-dialog-previewMs": {
+        "n": 40,
+        "p50": 56.0,
+        "p95": 96,
+        "min": 42,
+        "max": 103
+      },
+      "repeat-dialog-ms": {
+        "n": 40,
+        "p50": 245.0,
+        "p95": 308,
+        "min": 194,
+        "max": 323
+      },
+      "repeat-dialog-usableMs": {
+        "n": 40,
+        "p50": 252.0,
+        "p95": 316,
+        "min": 196,
+        "max": 347
+      },
+      "workspace-switch": {
+        "n": 60,
+        "p50": 129.5,
+        "p95": 180,
+        "min": 91,
+        "max": 191
+      },
+      "workspace-return": {
+        "n": 60,
+        "p50": 121.0,
+        "p95": 143,
+        "min": 97,
+        "max": 165
+      },
+      "settings-entry": {
+        "n": 60,
+        "p50": 113.5,
+        "p95": 227,
+        "min": 78,
+        "max": 251
+      },
+      "settings-return": {
+        "n": 60,
+        "p50": 135.0,
+        "p95": 166,
+        "min": 113,
+        "max": 168
+      },
+      "settled-cold-grid-renderer-MB": {
+        "n": 20,
+        "p50": 212.25881600000002,
+        "p95": 219.848704,
+        "min": 205.479936,
+        "max": 220.983296
+      },
+      "settled-cold-grid-whole-Chrome-MB": {
+        "n": 20,
+        "p50": 611.776512,
+        "p95": 621.699072,
+        "min": 597.200896,
+        "max": 627.163136
+      },
+      "settled-warm-reload-renderer-MB": {
+        "n": 20,
+        "p50": 314.488832,
+        "p95": 331.173888,
+        "min": 292.61824,
+        "max": 336.912384
+      },
+      "settled-warm-reload-whole-Chrome-MB": {
+        "n": 20,
+        "p50": 714.610688,
+        "p95": 732.143616,
+        "min": 692.604928,
+        "max": 734.109696
+      },
+      "settled-after-3-dialogs-renderer-MB": {
+        "n": 20,
+        "p50": 219.547648,
+        "p95": 412.663808,
+        "min": 215.908352,
+        "max": 412.729344
+      },
+      "settled-after-3-dialogs-whole-Chrome-MB": {
+        "n": 20,
+        "p50": 638.4783359999999,
+        "p95": 828.94848,
+        "min": 634.642432,
+        "max": 830.316544
+      },
+      "settled-after-route-tour-renderer-MB": {
+        "n": 20,
+        "p50": 212.1728,
+        "p95": 355.094528,
+        "min": 207.515648,
+        "max": 395.173888
+      },
+      "settled-after-route-tour-whole-Chrome-MB": {
+        "n": 20,
+        "p50": 637.184,
+        "p95": 774.49216,
+        "min": 627.142656,
+        "max": 814.931968
+      },
+      "continuous-renderer-peak-MB": {
+        "n": 20,
+        "p50": 350.06054400000005,
+        "p95": 442.228736,
+        "min": 323.121152,
+        "max": 442.92096
+      }
+    }
+  },
+  "paired": {
+    "cold-grid": {
+      "fairMinusBaseline": [
+        -670,
+        177,
+        -206,
+        53,
+        318,
+        -366,
+        -552,
+        540,
+        -320,
+        -806,
+        164,
+        -152,
+        -200,
+        242,
+        123,
+        -157,
+        -365,
+        40,
+        36,
+        -158
+      ],
+      "median": -154.5,
+      "min": -806,
+      "max": 540
+    },
+    "warm-reload": {
+      "fairMinusBaseline": [
+        525,
+        -324,
+        -281,
+        -1069,
+        -191,
+        -48,
+        -553,
+        -139,
+        -1038,
+        -464,
+        -369,
+        -102,
+        -470,
+        16,
+        -711,
+        187,
+        85,
+        -706,
+        -418,
+        -227
+      ],
+      "median": -302.5,
+      "min": -1069,
+      "max": 525
+    }
+  },
+  "rankTests": {
+    "cold-grid": {
+      "U_fair": 140.0,
+      "twoSidedAsymptoticP": 0.10749486521489632,
+      "method": "tie-corrected ranks with continuity correction; descriptive, not proof of equivalence"
+    },
+    "warm-reload": {
+      "U_fair": 83.0,
+      "twoSidedAsymptoticP": 0.0016252575462520687,
+      "method": "tie-corrected ranks with continuity correction; descriptive, not proof of equivalence"
+    }
+  },
+  "gate": {
+    "cold-grid": {
+      "p50": true,
+      "p95": true
+    },
+    "warm-reload": {
+      "p50": true,
+      "p95": true
+    }
+  },
+  "gatePassed": true,
+  "protocol": {
+    "endpoint": "authorized-visible-workspace-frame-and-12-real-task-name-cells-and-two-animation-frames",
+    "runtimeHeads": {
+      "fair": "f4cba811fb29edbc205019c380f1107bb2e8eb7e",
+      "baseline": "5f25a68929596f496a82c1b57db64560db2171f4"
+    },
+    "hosts": {
+      "GONVEX_MODULE_HOST_BINARY": {
+        "path": "/mnt/data/work/wh-memory-impl/visibility-private/bin/gonvex-module-host",
+        "sha256": "9c09ef5fae968613f6372a7fc3680449593e0364a0048adc72506bab464a57f6"
+      },
+      "GONVEX_SANDBOX_WORKER_BINARY": {
+        "path": "/mnt/data/work/wh-memory-impl/visibility-private/bin/gonvex-sandbox-worker",
+        "sha256": "9c8f11a911095cad84e3d6320fb4dfc9cb6d1ef0faf92e0142050bbb66b021bb"
+      }
+    },
+    "count": 20,
+    "app": "68c482e010510b96b6afd69a2e8839c38937fbab",
+    "authPolicy": "Before each profile, refresh through a separate real UI login if canonical or Firebase token has less than 180 seconds remaining. No measured-profile SPA prewarm.",
+    "harness": "62a32d02c749efbc170349b94a85ab4e0794d7deb53293c3f1a7ed469b465ce4",
+    "binaries": {
+      "fair": {
+        "path": "/mnt/data/work/wh-memory-impl/visibility-private/bin/gonvex-runtime-fair-candidate",
+        "sha256": "a8ecaa0d804d01d79aae49576edb3d5e48646145287b34c120eadd037a5ea226"
+      },
+      "baseline": {
+        "path": "/mnt/data/work/wh-memory-impl/visibility-private/bin/gonvex-runtime-base-5f25a68",
+        "sha256": "0a3ed40640f4b7118e662f5c04639df21efd7f6b90ea580583fcbb90900fdbc2"
+      }
+    }
+  }
+}

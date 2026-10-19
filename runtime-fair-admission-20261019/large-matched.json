@@ -1,0 +1,79 @@
+[
+  {
+    "label": "runtime-large-1-01-fair",
+    "variant": "fair",
+    "errors": [
+      "TimeoutError: page.waitForFunction: Timeout 90000ms exceeded."
+    ],
+    "peakRendererMB": 833.511424,
+    "phases": [
+      {
+        "phase": "cold",
+        "gridMs": 5478,
+        "relatedMs": 55761,
+        "passed": true
+      },
+      {
+        "phase": "reload"
+      }
+    ]
+  },
+  {
+    "label": "runtime-large-1-02-baseline",
+    "variant": "baseline",
+    "errors": [],
+    "peakRendererMB": 999.497728,
+    "phases": [
+      {
+        "phase": "cold",
+        "gridMs": 52495,
+        "relatedMs": 52782,
+        "passed": true
+      },
+      {
+        "phase": "reload",
+        "gridMs": 3581,
+        "relatedMs": 7259,
+        "passed": true
+      }
+    ]
+  },
+  {
+    "label": "runtime-large-1-03-baseline",
+    "variant": "baseline",
+    "errors": [
+      "TimeoutError: page.waitForFunction: Timeout 90000ms exceeded."
+    ],
+    "peakRendererMB": 955.387904,
+    "phases": [
+      {
+        "phase": "cold",
+        "gridMs": 59910,
+        "relatedMs": 60247,
+        "passed": true
+      },
+      {
+        "phase": "reload"
+      }
+    ]
+  },
+  {
+    "label": "runtime-large-1-04-fair",
+    "variant": "fair",
+    "errors": [
+      "TimeoutError: page.waitForFunction: Timeout 90000ms exceeded."
+    ],
+    "peakRendererMB": 775.503872,
+    "phases": [
+      {
+        "phase": "cold",
+        "gridMs": 5559,
+        "relatedMs": 54157,
+        "passed": true
+      },
+      {
+        "phase": "reload"
+      }
+    ]
+  }
+]

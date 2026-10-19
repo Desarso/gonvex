@@ -1,0 +1,248 @@
+{
+  "baseline": {
+    "n": 6,
+    "samples": [
+      {
+        "label": "runtime-cohort-memory-1-02-baseline",
+        "privateBefore": 220258304,
+        "privateAfterGC": 219758592,
+        "documentsBefore": 6,
+        "documentsAfter": 6,
+        "heapBefore": {
+          "usedSize": 52970592,
+          "totalSize": 57528320,
+          "embedderHeapUsedSize": 6673144,
+          "backingStorageSize": 13601869
+        },
+        "heapAfter": {
+          "usedSize": 52785436,
+          "totalSize": 55169024,
+          "embedderHeapUsedSize": 6663480,
+          "backingStorageSize": 13596077
+        }
+      },
+      {
+        "label": "runtime-cohort-memory-1-03-baseline",
+        "privateBefore": 216543232,
+        "privateAfterGC": 215834624,
+        "documentsBefore": 6,
+        "documentsAfter": 6,
+        "heapBefore": {
+          "usedSize": 52980052,
+          "totalSize": 55955456,
+          "embedderHeapUsedSize": 6804528,
+          "backingStorageSize": 13601848
+        },
+        "heapAfter": {
+          "usedSize": 52764844,
+          "totalSize": 54906880,
+          "embedderHeapUsedSize": 6243096,
+          "backingStorageSize": 13596018
+        }
+      },
+      {
+        "label": "runtime-cohort-memory-1-06-baseline",
+        "privateBefore": 348741632,
+        "privateAfterGC": 218861568,
+        "documentsBefore": 10,
+        "documentsAfter": 6,
+        "heapBefore": {
+          "usedSize": 71004416,
+          "totalSize": 132763648,
+          "embedderHeapUsedSize": 28049728,
+          "backingStorageSize": 14174246
+        },
+        "heapAfter": {
+          "usedSize": 52944772,
+          "totalSize": 57266176,
+          "embedderHeapUsedSize": 6855112,
+          "backingStorageSize": 13596519
+        }
+      },
+      {
+        "label": "runtime-cohort-memory-1-07-baseline",
+        "privateBefore": 218902528,
+        "privateAfterGC": 218136576,
+        "documentsBefore": 6,
+        "documentsAfter": 6,
+        "heapBefore": {
+          "usedSize": 52977596,
+          "totalSize": 55693312,
+          "embedderHeapUsedSize": 6918432,
+          "backingStorageSize": 13601607
+        },
+        "heapAfter": {
+          "usedSize": 52757816,
+          "totalSize": 55431168,
+          "embedderHeapUsedSize": 6811000,
+          "backingStorageSize": 13595780
+        }
+      },
+      {
+        "label": "runtime-cohort-memory-1-10-baseline",
+        "privateBefore": 339238912,
+        "privateAfterGC": 217468928,
+        "documentsBefore": 8,
+        "documentsAfter": 6,
+        "heapBefore": {
+          "usedSize": 80626132,
+          "totalSize": 145260544,
+          "embedderHeapUsedSize": 25621928,
+          "backingStorageSize": 14130382
+        },
+        "heapAfter": {
+          "usedSize": 53106920,
+          "totalSize": 56393728,
+          "embedderHeapUsedSize": 7074256,
+          "backingStorageSize": 13599915
+        }
+      },
+      {
+        "label": "runtime-cohort-memory-1-11-baseline",
+        "privateBefore": 342798336,
+        "privateAfterGC": 220975104,
+        "documentsBefore": 10,
+        "documentsAfter": 6,
+        "heapBefore": {
+          "usedSize": 83424868,
+          "totalSize": 135122944,
+          "embedderHeapUsedSize": 32778232,
+          "backingStorageSize": 14303504
+        },
+        "heapAfter": {
+          "usedSize": 52864868,
+          "totalSize": 56217600,
+          "embedderHeapUsedSize": 7039888,
+          "backingStorageSize": 13609042
+        }
+      }
+    ],
+    "beforePrivateMedian": 279748608.0,
+    "beforePrivateMax": 348741632,
+    "afterPrivateMedian": 218499072.0,
+    "afterPrivateMax": 220975104
+  },
+  "fair": {
+    "n": 6,
+    "samples": [
+      {
+        "label": "runtime-cohort-memory-1-01-fair",
+        "privateBefore": 219279360,
+        "privateAfterGC": 218882048,
+        "documentsBefore": 6,
+        "documentsAfter": 6,
+        "heapBefore": {
+          "usedSize": 53017592,
+          "totalSize": 56217600,
+          "embedderHeapUsedSize": 6739928,
+          "backingStorageSize": 13603368
+        },
+        "heapAfter": {
+          "usedSize": 52819752,
+          "totalSize": 55169024,
+          "embedderHeapUsedSize": 6770960,
+          "backingStorageSize": 13597537
+        }
+      },
+      {
+        "label": "runtime-cohort-memory-1-04-fair",
+        "privateBefore": 219770880,
+        "privateAfterGC": 219348992,
+        "documentsBefore": 6,
+        "documentsAfter": 6,
+        "heapBefore": {
+          "usedSize": 52882164,
+          "totalSize": 55955456,
+          "embedderHeapUsedSize": 6788712,
+          "backingStorageSize": 13601916
+        },
+        "heapAfter": {
+          "usedSize": 52706688,
+          "totalSize": 54644736,
+          "embedderHeapUsedSize": 6773264,
+          "backingStorageSize": 13596124
+        }
+      },
+      {
+        "label": "runtime-cohort-memory-1-05-fair",
+        "privateBefore": 218210304,
+        "privateAfterGC": 217927680,
+        "documentsBefore": 6,
+        "documentsAfter": 6,
+        "heapBefore": {
+          "usedSize": 52941416,
+          "totalSize": 55169024,
+          "embedderHeapUsedSize": 6717104,
+          "backingStorageSize": 13601862
+        },
+        "heapAfter": {
+          "usedSize": 52764360,
+          "totalSize": 54906880,
+          "embedderHeapUsedSize": 6756104,
+          "backingStorageSize": 13596072
+        }
+      },
+      {
+        "label": "runtime-cohort-memory-1-08-fair",
+        "privateBefore": 216207360,
+        "privateAfterGC": 215609344,
+        "documentsBefore": 6,
+        "documentsAfter": 6,
+        "heapBefore": {
+          "usedSize": 52779016,
+          "totalSize": 55169024,
+          "embedderHeapUsedSize": 6746416,
+          "backingStorageSize": 13601880
+        },
+        "heapAfter": {
+          "usedSize": 52571932,
+          "totalSize": 54644736,
+          "embedderHeapUsedSize": 6670112,
+          "backingStorageSize": 13596049
+        }
+      },
+      {
+        "label": "runtime-cohort-memory-1-09-fair",
+        "privateBefore": 218902528,
+        "privateAfterGC": 218595328,
+        "documentsBefore": 6,
+        "documentsAfter": 6,
+        "heapBefore": {
+          "usedSize": 52977048,
+          "totalSize": 55431168,
+          "embedderHeapUsedSize": 6657232,
+          "backingStorageSize": 13601845
+        },
+        "heapAfter": {
+          "usedSize": 52792636,
+          "totalSize": 54644736,
+          "embedderHeapUsedSize": 6709736,
+          "backingStorageSize": 13596053
+        }
+      },
+      {
+        "label": "runtime-cohort-memory-1-12-fair",
+        "privateBefore": 220401664,
+        "privateAfterGC": 219959296,
+        "documentsBefore": 6,
+        "documentsAfter": 6,
+        "heapBefore": {
+          "usedSize": 53031376,
+          "totalSize": 56393728,
+          "embedderHeapUsedSize": 6828840,
+          "backingStorageSize": 13601689
+        },
+        "heapAfter": {
+          "usedSize": 52823892,
+          "totalSize": 55083008,
+          "embedderHeapUsedSize": 6665944,
+          "backingStorageSize": 13595861
+        }
+      }
+    ],
+    "beforePrivateMedian": 219090944.0,
+    "beforePrivateMax": 220401664,
+    "afterPrivateMedian": 218738688.0,
+    "afterPrivateMax": 219959296
+  }
+}
