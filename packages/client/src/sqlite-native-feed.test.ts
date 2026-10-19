@@ -209,6 +209,24 @@ it('verifies resumed ready only after its changed membership publishes at the te
  expect((await new SQLiteWindowStore(f.db,()=>f.engine.verifyOwner()).header('visible','tasks-all'))?.header.aggregateDigest).toBe(await digest([changed,rows[1]]));
 });
 
+it('accepts an unchanged resumed certificate without rewriting its already committed cohort',async()=>{
+ const f=await fixture();await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();
+ const before=await f.db.getFirstAsync('SELECT total_changes() n');
+ f.feed.register({id:'resume-quiet',signature:'tasks-all',entity:'tasks',key:'id',path:'tasks/all'});
+ f.feed.frame({type:'replica.ready',id:'resume-quiet',cursor:cursor(10),digest:await digest()},1);await f.feed.assertReadable();
+ expect(f.feed.stats().opening).toBe(0);expect(f.failures).toEqual([]);
+ expect(await f.db.getFirstAsync('SELECT total_changes() n')).toEqual(before);
+ expect((await f.canonical.loadEntityRows('visible','tasks',['a','b'])).map(row=>row.row)).toEqual(rows);
+});
+
+it('does not treat an incompatible resumed truncation certificate as an unchanged cohort',async()=>{
+ const f=await fixture();await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();
+ f.feed.register({id:'resume-bad',signature:'tasks-all',entity:'tasks',key:'id',path:'tasks/all'});
+ f.feed.frame({type:'replica.ready',id:'resume-bad',cursor:cursor(10),digest:await digest(),truncated:true},1);
+ await vi.waitFor(()=>expect(f.failures).toHaveLength(1));expect(f.failures[0]).toMatchObject({code:'PAGE_CHANGED'});
+ expect((await f.canonical.loadEntityRows('visible','tasks',['a','b'])).map(row=>row.row)).toEqual(rows);
+});
+
 it('accounts shared schema column names as references under the unchanged source registry cap',()=>{
  const fields=Object.fromEntries(['id',...Array.from({length:100},(_,n)=>'shared_generated_column_name_'+n)].map(name=>[name,{kind:'text'}]));
  const owner={database:{},engine:{schema:{tasks:{key:'id',fields,indexes:[]}}},runOwner:async()=>undefined} as unknown as SQLiteOwnerProgramContext;

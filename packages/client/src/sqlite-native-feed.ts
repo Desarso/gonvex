@@ -209,6 +209,20 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
    case 'replica.readyMany':for(const ready of message.ready)await this.process(state,{type:'replica.ready',...ready});return;
    case 'replica.ready':{
     const source=this.source(message.id);this.cursor(state,message.cursor);
+    if(source.opening&&!source.start&&!source.deferActivation&&(message.truncated===undefined||typeof message.truncated==='boolean')){
+     // A resumed source can repeat an existing durable certificate verbatim.
+     // No new rows, cursor or completeness become authoritative in this case.
+     const unchanged=await this.run(state,0,async()=>{
+      if(!await owner.database.getFirstAsync(`SELECT 1 FROM gv_native_feed_progress p WHERE p.scope=? AND p.epoch=? AND p.unclosed=0 AND p.applied>=?
+       AND NOT EXISTS(SELECT 1 FROM gv_native_feed_resets r WHERE r.scope=p.scope)
+       AND EXISTS(SELECT 1 FROM _gonvex_replica_meta m WHERE m.scope=p.scope AND m.key='currentEpoch' AND m.value=?)`,state.scope,state.epoch,message.cursor.revision,message.cursor.epoch)||await this.groups.pending(state.stream))return false;
+      const header=(await this.windows.header(state.scope,source.signature))?.header,columns=source.columns??Object.keys(owner.engine.schema[source.entity]!.fields);
+      return header?.kind==='replica'&&header.source==='server'&&header.entity===source.entity&&header.key===source.key&&header.artifactHash===this.options.artifactHash
+       &&header.cursor?.epoch===message.cursor.epoch&&header.cursor.revision===message.cursor.revision&&header.aggregateDigest===message.digest
+       &&header.completeness===(message.truncated?'partial':'complete')&&header.columns?.length===columns.length&&header.columns.every((column,index)=>column===columns[index]);
+     });
+     if(unchanged){source.opening=false;this.options.sourceReady?.(source.id);await this.publishWatermark(state);return;}
+    }
     if(source.deferActivation&&source.start){
      await this.run(state,16384,()=>this.groups.append(state.stream,message));source.opening=false;await this.publishWatermark(state);return;
     }
