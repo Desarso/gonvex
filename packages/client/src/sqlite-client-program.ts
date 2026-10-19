@@ -282,7 +282,17 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
  async call(value:unknown,caller:SQLiteOwnerCaller):Promise<unknown>{
   sqlitePayloadBytes(value,131072);if(!value||typeof value!=='object'||Array.isArray(value))throw new TypeError('Invalid native client request');const input=structuredClone(value) as any;if(this.closed||caller.signal.aborted)fail('FENCED','Native client is closed');
   if(input.method==='connect')return this.connect(input,caller);
-  const connection=this.connection(caller.tabID),callerAuthVersion=connection.authVersion;if((connection.controlOnly||connection.public)&&['resetLocalReplica','localLivePage','entities','replicaPage','replicaPendingPage','collectionPage','livePage','livePendingPage'].includes(input.method))fail('INVALID_ROW','This connection has no tenant replica');if(connection.controlOnly&&['query','action','reducer','prepareReducer'].includes(input.method)&&this.ref(input.path).scope!=='control')fail('INVALID_ROW','Control connections cannot invoke tenant functions');if(['resetLocalReplica','localLivePage','entities','replicaPage','replicaPendingPage','collectionPage','livePage','livePendingPage','reducer'].includes(input.method)){await connection.restoring;if(connection.authVersion!==callerAuthVersion)fail('FENCED','Caller authentication changed during restoration');if(connection.migrationBlocked)throw connection.migrationBlocked;}
+  const connection=this.connection(caller.tabID),callerAuthVersion=connection.authVersion;
+  const cachedReadGeneration=['localLivePage','entities','replicaPage','collectionPage','livePage'].includes(input.method)?this.admission(connection)?.readGeneration:undefined;
+  if((connection.controlOnly||connection.public)&&['resetLocalReplica','localLivePage','entities','replicaPage','replicaPendingPage','collectionPage','livePage','livePendingPage'].includes(input.method))fail('INVALID_ROW','This connection has no tenant replica');
+  if(connection.controlOnly&&['query','action','reducer','prepareReducer'].includes(input.method)&&this.ref(input.path).scope!=='control')fail('INVALID_ROW','Control connections cannot invoke tenant functions');
+  if(['resetLocalReplica','localLivePage','entities','replicaPage','replicaPendingPage','collectionPage','livePage','livePendingPage','reducer'].includes(input.method)){
+   await connection.restoring;
+   // Only committed reads can cross a same-identity credential refresh. Writes
+   // and unverified pending stages retain their strict authentication fence.
+   if(connection.authVersion!==callerAuthVersion&&(!cachedReadGeneration||this.sessions.resolveTab(caller.tabID).readGeneration!==cachedReadGeneration))fail('FENCED','Caller authentication changed during restoration');
+   if(connection.migrationBlocked)throw connection.migrationBlocked;
+  }
   switch(input.method){
    case 'controls':{
     const admitted=this.admission(connection);let key:string|null|undefined;

@@ -288,3 +288,30 @@ it('returns an obsolete entity-page generation without entering the feed bootstr
  expect(barrier).not.toHaveBeenCalled();
  expect((await f.call({method:'entities',entity:'tasks',ids:['a']}) as any).rows[0].value.n).toBe(1);
 });
+
+it('serves a cached page crossing token refresh while its verified identity remains unchanged',async()=>{
+ const f=await fixture();await f.authenticate();const source:any=await f.call({method:'watchReplica',path:'__local.tasks',args:{}});
+ const connection=[...(f.program as any).connections.values()][0] as any;
+ let release!:()=>void;connection.restoring=new Promise<void>(resolve=>release=resolve);
+ const page=f.call({method:'replicaPage',signature:source.signature,limit:10});
+ await f.call({method:'auth',auth:{token:'refreshed-same-account'}});release();
+ expect((await page as any).rows[0].value.n).toBe(1);
+});
+
+it.each(['reducer','replicaPendingPage'])('keeps %s admission strict across the same token refresh',async method=>{
+ const f=await fixture();await f.authenticate();const source:any=await f.call({method:'watchReplica',path:'__local.tasks',args:{}});
+ const connection=[...(f.program as any).connections.values()][0] as any;
+ let release!:()=>void;connection.restoring=new Promise<void>(resolve=>release=resolve);
+ const pending=f.call(method==='reducer'?{method,path:'tasks.increment',args:{},now:100}:{method,signature:source.signature});
+ const fenced=expect(pending).rejects.toMatchObject({code:'FENCED'});
+ await f.call({method:'auth',auth:{token:'refreshed-same-account'}});release();await fenced;
+ expect(f.executions).toBe(0);expect((await f.call({method:'entities',entity:'tasks',ids:['a']}) as any).rows[0].value.n).toBe(1);
+});
+
+it('rejects a cached read crossing refresh when the member is definitively revoked',async()=>{
+ const f=await fixture(),{socket}=await f.authenticate(),source:any=await f.call({method:'watchReplica',path:'__local.tasks',args:{}});
+ const connection=[...(f.program as any).connections.values()][0] as any;
+ let release!:()=>void;connection.restoring=new Promise<void>(resolve=>release=resolve);
+ const pending=f.call({method:'replicaPage',signature:source.signature,limit:10}),fenced=expect(pending).rejects.toMatchObject({code:'FENCED'});
+ await f.call({method:'auth',auth:{token:'refreshed-same-account'}});socket.receive({type:'auth.error',id:'membership-changed',error:'Member removed',code:'member_removed'});release();await fenced;
+});
