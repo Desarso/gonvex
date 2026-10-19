@@ -257,8 +257,8 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
       try{selected=await this.legacy.prepare(scope,saved?.artifactHash===this.binding.artifactHash?saved:undefined,current);}catch(error){if((error as any)?.code!=='SCHEMA_MISMATCH')throw error;}
       if(!current())return;
       if(selected){record.lastIdentity??=stable(selected.identity as JsonValue);record.migrationSession=selected;record.recovered=false;}
-      try{await this.sessions.restore(id,current);}catch(error){if((error as any)?.code!=='SCHEMA_MISMATCH')throw error;}
-     })();record.restoring=restoring;void restoring.then(()=>{if(record.restoring===restoring){record.restoring=undefined;record.migrationBlocked=undefined;}this.scheduleMigration(record);this.notify(record);},error=>{record.migrationBlocked=error;record.failure={code:String((error as any)?.code??'SQLITE'),message:String((error as any)?.message??error).slice(0,512)};this.notify(record);});
+      try{await this.sessions.restore(id,current);}catch(error){if((error as any)?.code!=='SCHEMA_MISMATCH'&&((error as any)?.code!=='FENCED'||current()))throw error;}
+     })();record.restoring=restoring;void restoring.then(()=>{if(record.restoring!==restoring)return;record.restoring=undefined;record.migrationBlocked=undefined;this.scheduleMigration(record);this.notify(record);},error=>{if(record.restoring!==restoring)return;record.migrationBlocked=error;record.failure={code:String((error as any)?.code??'SQLITE'),message:String((error as any)?.message??error).slice(0,512)};this.notify(record);});
     };
     const host={opening:restore,authenticating:restore,session:async(session:any,current:()=>boolean)=>{
      await record.restoring?.catch(()=>{});const identity=session.identity?stable(session.identity):undefined;if(record.lastIdentity&&record.lastIdentity!==identity){record.authVersion++;record.supportCommands.length=0;}
@@ -300,7 +300,13 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
     return {tokens:this.tokens.poll(caller.tabID),status:connection.client.connectionState(),serverInfo:connection.client.serverInfo(),authentication:connection.client.authenticationState(),session:admitted?admitted.online?'authenticated':'restored':connection.client.localSessionState(),...(key!==undefined?{admissionKey:key}:{}),failure:connection.failure??null,rejections:connection.rejections.filter(event=>event.sequence>(connection.rejectionCursors.get(caller.tabID)??0)),supportCommands:connection.supportCommands.filter(event=>event.sequence>(connection.supportCursors.get(caller.tabID)??0)),authError:connection.authError??null,...(connection.developer&&!connection.developer.acked.has(caller.tabID)?{developerCredential:{id:connection.developer.id,token:connection.developer.token}}:{})};
    }
    case 'reportError':{const version=connection.authVersion;await connection.client.reportError(input.type,input.payload);if(caller.signal.aborted||this.tabs.get(caller.tabID)!==connection.id||version!==connection.authVersion)fail('FENCED','Error report caller session changed');return null;}
-   case 'restoreSession':await connection.restoring;if(connection.migrationBlocked)throw connection.migrationBlocked;return !!this.admission(connection);
+   case 'restoreSession':{
+    // Reconnect may replace the restoration while an offline caller awaits it.
+    // Follow the current same-identity operation, never an obsolete socket's
+    // readiness result. This does not wait for network authentication.
+    for(;;){const restoring=connection.restoring;if(!restoring)break;await restoring;if(caller.signal.aborted||this.tabs.get(caller.tabID)!==connection.id||this.connections.get(connection.id)!==connection)fail('FENCED','Restore caller detached');if(connection.restoring===restoring)break;}
+    if(connection.migrationBlocked)throw connection.migrationBlocked;return !!this.admission(connection);
+   }
    case 'resetLocalReplica':{
     if(input.keepOutbox!==undefined&&typeof input.keepOutbox!=='boolean')throw new TypeError('Invalid cache reset option');
     const admitted=this.checkCaller(caller,connection),version=connection.authVersion;

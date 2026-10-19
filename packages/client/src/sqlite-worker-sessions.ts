@@ -69,7 +69,8 @@ export class SQLiteWorkerSessions {
  private current(record:Connection,revision:number,isCurrent:()=>boolean){return this.connections.get(record.id)===record&&record.revision===revision&&isCurrent();}
  private check(record:Connection,revision:number,isCurrent:()=>boolean){if(!this.current(record,revision,isCurrent))fail('FENCED','Worker session admission changed');}
  async restore(id:string,isCurrent:()=>boolean=()=>true){
-  const record=this.connection(id),revision=record.revision,scope=record.intentScope;key(scope,512);
+  const record=this.connection(id),scope=record.intentScope;key(scope,512);
+  for(;;){const revision=record.revision;try{
   if(record.phase==='quarantined')return false;if(record.phase==='online')return true;
   await this.durability;this.check(record,revision,isCurrent);
   if(await this.options.safety.sessionRevoked(scope)){this.check(record,revision,isCurrent);record.session=undefined;record.phase='quarantined';record.bytes=2048;return false;}
@@ -82,6 +83,13 @@ export class SQLiteWorkerSessions {
   // During token refresh reads use the cached admission, but native frames
   // remain quarantined until activate publishes a durable online session.
   if(record.phase!=='authenticating')record.phase='offline';return true;
+  }catch(error){
+   // Socket close invalidates frame admission even while a cached disk read is
+   // pending. Retry only that same identity's changed session revision. Owner,
+   // revocation, route and caller fences still terminate the restore.
+   if((error as {code?:string})?.code==='FENCED'&&record.revision!==revision&&this.connections.get(id)===record&&record.intentScope===scope&&record.phase!=='quarantined'&&isCurrent())continue;
+   throw error;
+  }}
  }
  /** Seed a fenced legacy cache only before this identity has any native
   * session. The shared durability lane orders this against authoritative auth,

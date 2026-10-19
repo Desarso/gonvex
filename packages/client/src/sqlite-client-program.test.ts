@@ -111,6 +111,23 @@ it('restores cached pages and durable offline edits before a replacement socket 
  const receipt:any=await f.call({method:'reducer',path:'tasks.increment',args:{},now:100},'one','cold-offline-command');expect(receipt.result).toBe(2);expect((await f.call({method:'entities',entity:'tasks',ids:['a']}) as any).rows[0].value.n).toBe(2);expect(replacement.sent).toEqual([]);expect(await f.engine.integrity()).toBe('ok');
 });
 
+it.each([false,true])('finishes cached restoration when an unopened socket disconnects during the session disk read, reconnect=%s',async reconnect=>{
+ const f=await fixture();await f.authenticate();f.program.detachTab('one');
+ const registry=(f.program as any).sessions,safety=registry.options.safety;
+ const restore=registry.restore.bind(registry),revoked=safety.sessionRevoked.bind(safety);
+ let reading=false,held=false,release!:()=>void,started!:()=>void;
+ const gate=new Promise<void>(resolve=>{release=resolve;}),entered=new Promise<void>(resolve=>{started=resolve;});
+ vi.spyOn(registry,'restore').mockImplementation(async(...args:unknown[])=>{reading=true;try{return await restore(...args);}finally{reading=false;}});
+ vi.spyOn(safety,'sessionRevoked').mockImplementation(async(...args:unknown[])=>{if(reading&&!held){held=true;started();await gate;}return revoked(...args);});
+ await f.call(connect);const replacement=Socket.instances.at(-1)!;await entered;
+ const pending=f.call({method:'restoreSession'});void pending.catch(()=>{});replacement.close();if(reconnect)(f.program as any).connections.values().next().value.client.connect();release();
+ await expect(pending).resolves.toBe(true);
+ expect((await f.call({method:'controls'}) as any).session).toBe('restored');
+ const source:any=await f.call({method:'watchReplica',path:'__local.tasks',args:{}});
+ expect((await f.call({method:'replicaPage',signature:source.signature,limit:10}) as any).rows[0].value.n).toBe(1);
+ expect(replacement.sent).toEqual([]);
+});
+
 it('opens a visible source before eager-only dependencies so its first page arrives first',async()=>{
  const f=await fixture(true,true);await f.call(connect);const source:any=await f.call({method:'watchReplica',path:'__local.tasks',args:{}});const {socket}=await f.authenticate(true);
  expect(socket.sent.filter(message=>message.type==='replica.open').map(message=>message.path)).toEqual(['__local.tasks','__local.backgroundTasks']);

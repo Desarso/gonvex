@@ -114,3 +114,18 @@ it('keeps cached-read admission stable across transport retries and changes it f
   await f.registry.quarantine('one',3);expect(()=>f.registry.resolveTab('tab')).toThrow('unavailable');
  }finally{f.close();}
 });
+
+it.each(['revoke','route','close'] as const)('does not retry cached restoration across %s while its disk read is pending',async mode=>{
+ const f=await fixture();try{
+  await f.registry.activate('one',admitted(),()=>true);f.registry.disconnected('one');f.registry.authenticating('one','identity\u0000a',2);
+  let release!:()=>void,started!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;}),entered=new Promise<void>(resolve=>{started=resolve;});
+  const revoked=f.safety.sessionRevoked.bind(f.safety);let held=false;
+  vi.spyOn(f.safety,'sessionRevoked').mockImplementation(async scope=>{if(!held){held=true;started();await gate;}return revoked(scope);});
+  const restoring=f.registry.restore('one');void restoring.catch(()=>{});await entered;
+  if(mode==='revoke')await f.registry.quarantine('one',2);
+  else if(mode==='route')f.registry.authenticating('one','identity\u0000other',3);
+  else f.registry.close('one');
+  release();await expect(restoring).rejects.toMatchObject({code:'FENCED'});
+  expect(()=>f.registry.resolveTab('tab')).toThrow();
+ }finally{vi.restoreAllMocks();f.close();}
+});
