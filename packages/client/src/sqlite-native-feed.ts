@@ -153,6 +153,10 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
     const start=source.start,stage=await this.options.owner.database.getFirstAsync<{digest:string;complete:number}>('SELECT digest,complete FROM gv_snapshot_stages WHERE scope=? AND subscription=? AND snapshot=? AND discarded=0',state.scope,source.id,start.snapshotId);
     if(!stage?.complete)fail('PAGE_CHANGED','Warm snapshot has no verified disk stage');
     await this.options.owner.activation.activate({scope:state.scope,subscription:source.id,snapshot:start.snapshotId,header:this.snapshotHeader(source,start,stage.digest)});
+    // Native credits can delay snapshotStart after the subscription is live.
+    // Deltas received before that header are buffered, even for a warm source.
+    // Replay them against this base before validating its terminal certificate.
+    await this.replay(state,source);
    }
    await this.groups.drain(state.stream,revision,async frame=>{
     if(frame.type==='replica.transactionEncoded'){const keys=Object.fromEntries(Object.entries(this.options.owner.engine.schema).map(([entity,table])=>[entity,table.key]));await this.mutate(state.scope,async()=>{await this.options.owner.canonical.applyTransaction({cursor:frame.cursor,changes:decodeSQLiteNativeTransaction(frame,keys)},empty,state.scope);});}

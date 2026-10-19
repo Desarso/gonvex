@@ -396,3 +396,21 @@ it('prepares an independent source while earlier binary ingress waits outside SQ
   expect(await f.engine.integrity()).toBe('ok');
  }finally{release();}
 });
+
+it('replays a newly mounted source delta received before its credit-delayed warm snapshot header',async()=>{
+ const f=await fixture();await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();
+ f.feed.register({id:'second',signature:'second-window',entity:'tasks',key:'id',path:'tasks/second'});
+ // The server installs the subscription before native delivery has a free
+ // binary credit. Its later delta can reach the socket before snapshotStart.
+ const newer=[changed,rows[1]],hash=await digest();
+ f.feed.frame({type:'replica.delta',id:'second',cursor:cursor(14),canonicalUpserts:[stable(changed)],deleted:[],digest:await digest(newer)},1);
+ f.feed.frame({type:'replica.snapshotStart',id:'second',snapshotId:'delayed',scope:'tenant',visibilityScope:'visible',cursor:cursor(12),key:'id',digest:hash,path:'tasks/second'},1);
+ f.feed.binary(new TextEncoder().encode(JSON.stringify({type:'replica.snapshotEncodedPage',id:'second',snapshotId:'delayed',scope:'tenant',visibilityScope:'visible',cursor:cursor(12),key:'id',sequence:0,last:true,canonicalRows:rows.map(stable),digest:hash,path:'tasks/second'})).buffer,1);
+ f.feed.frame({type:'replica.ready',id:'second',cursor:cursor(14),digest:await digest(newer)},1);
+ await vi.waitFor(()=>expect(f.sends).toHaveLength(2));expect((await f.canonical.loadEntityRows('visible','tasks',['a','b'])).map(entry=>entry.row)).toEqual(rows);
+ f.feed.frame({type:'replica.watermark',revision:14},1);await f.feed.assertReadable();
+ expect(f.failures).toEqual([]);expect((await f.canonical.loadEntityRows('visible','tasks',['a','b'])).map(entry=>entry.row)).toEqual(newer);
+ expect((await new SQLiteWindowStore(f.db,()=>f.engine.verifyOwner()).header('visible','second-window'))?.header.cursor).toEqual(cursor(14));
+ expect((await new SQLiteDeferredReplicaFrames(f.db,'artifact',()=>f.engine.verifyOwner()).summary('visible')).frames).toBe(0);
+ expect(await f.engine.integrity()).toBe('ok');
+});
