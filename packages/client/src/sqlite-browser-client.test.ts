@@ -178,3 +178,12 @@ it('retains a verified replica projection and waits for a feed hint when its nex
  expect(reads).toBe(1);expect(watch.localReplicaState()).toBe(before);
  f.handler=undefined;f.change();await vi.waitFor(()=>expect(watch.localReplicaState()).not.toBe(before));
 });
+
+it('coalesces identical mounted page reads and lets one lease close without canceling another',async()=>{
+ const f=fixture(),one=f.client.watchReplica({path:'tasks/all'}),two=f.client.watchReplica({path:'tasks/all'});cleanup.push(()=>{one.close();two.close();});
+ let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});f.handler=async input=>{if(input.method==='replicaPage'){await gate;return {generation:{epoch:1,sequence:1},rows:[],window:{header:{}}};}};
+ const first=one.page({limit:128}),second=two.page({limit:128}),rejected=expect(first).rejects.toMatchObject({code:'FENCED'});
+ await vi.waitFor(()=>expect(f.calls.filter(call=>call.input.method==='replicaPage')).toHaveLength(1));one.close();release();await rejected;
+ await expect(second).resolves.toMatchObject({rows:[]});expect(two.snapshot().page).toBeDefined();
+ expect(f.client.budgets().find(value=>value.name==='browser-shared-reads')).toMatchObject({entries:0,bytes:0});
+});
