@@ -148,11 +148,16 @@ export class SQLiteReducerCore {
        try{return {transaction:await this.options.runtime.execute(entry.path,entry.args as JsonValue,{
         async select(read){try{return await view.select(read);}catch(error){readFailure={error};throw error;}}
        },execution)};}
-       catch(error){if(readFailure)throw readFailure.error;return {unavailable:true as const};}
+       catch(error){
+        // Missing certified coverage can be detected before view.select runs.
+        // Keep the prior durable prediction while other sources catch up.
+        if(error instanceof Error&&error.name==='IncompleteReplicaError')return {unavailable:true as const,preserve:true as const};
+        if(readFailure)throw readFailure.error;return {unavailable:true as const};
+       }
       });
       const transaction=outcome.transaction;
       if(transaction)sqlitePayloadBytes(transaction,262144);
-      patches=transaction?.patches??[];
+      patches=transaction?.patches??(outcome.preserve?patches:[]);
       const dependencies=transaction?{reads:transaction.readRows??[],writes:transaction.patches.map(patch=>({entity:patch.entity,rowId:patch.rowId})),scans:transaction.scanTables??transaction.readTables}:entry.dependencies;
       const updated=await this.options.journal.update(captured.intentScope,entry.id,[entry.state],before=>({...before,patches,localExecution:execution,...(dependencies?{dependencies}:{})}));
       if(!updated)fail('FENCED','Intent changed during prediction replay');

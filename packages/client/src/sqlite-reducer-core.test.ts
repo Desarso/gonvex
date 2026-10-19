@@ -236,3 +236,23 @@ it('redacts an existing original reply after permission change while retaining i
 it('recovers a prepared reply before a lost canonical base returns without blocking bootstrap or inventing a partial row',async()=>{
  const before=await fixture(),after=await fixture();try{const input={scope:'s',path:'increment',commandId:'missing-base',now:100,args:{id:'a'}};let prepared!:SQLitePreparedReducer;const receipt=await before.core.invoke(input,async(_input,_context,value)=>{prepared=structuredClone(value);});await after.canonical.applyTransaction({cursor:{epoch:'e',revision:2},changes:[{entity:'tasks',id:'a',operation:'delete'}]},{entities:{},liveQueries:{}},'s');expect(await after.core.recover(input,prepared)).toEqual(receipt);expect(await after.predictions.entities('s','tasks',['a'])).toEqual([]);expect(await after.core.rebase('s')).toMatchObject({retained:1,unavailable:1});expect((await after.journal.page('s')).entries[0]).toMatchObject({sentAt:100,patches:[{entity:'tasks',rowId:'a',op:'patch',fields:{n:2}}]});await after.core.rebase('s',()=>after.canonical.applyTransaction({cursor:{epoch:'e',revision:3},changes:[{entity:'tasks',id:'a',operation:'insert',newValue:{id:'a',n:2}}]},{entities:{},liveQueries:{}},'s').then(()=>{}));expect((await after.predictions.entities('s','tasks',['a']))[0].row.n).toBe(2);expect(after.calls).toBe(0);expect(await after.core.invoke(input)).toEqual(receipt);}finally{before.sql.close();after.sql.close();}
 });
+
+it('keeps durable predictions and original replies across repeated offline recovery without coverage or code',async()=>{
+ const f=await fixture();try{
+  const input={scope:'s',path:'scan',commandId:'offline-restarts',now:100,args:{}};
+  const receipt=await f.core.invoke(input),saved=(await f.journal.page('s')).entries[0];
+  for(let restart=0;restart<2;restart++){
+   const uncovered=new SQLiteReducerCore({...f.options,async context(scope){return {...await f.options.context(scope),coverage:{tasks:{key:'id',complete:false}}};}});
+   await uncovered.rebase('s');
+   expect((await f.journal.page('s')).entries[0].patches).toEqual(saved.patches);
+   expect((await f.predictions.entities('s','tasks',['a']))[0].row.n).toBe(99);
+   expect(await uncovered.invoke(input)).toEqual(receipt);
+   const cold=new SQLiteReducerCore({...f.options,runtime:{isPrepared:()=>false,prepare:async()=>{throw new TypeError('Failed to fetch dynamically imported module');},execute:f.options.runtime.execute.bind(f.options.runtime)}});
+   await expect(cold.rebase('s')).rejects.toMatchObject({code:'MODULE_REQUIRED',path:'scan'});
+   await expect(cold.prepare('scan')).rejects.toThrow('Failed to fetch dynamically imported module');
+   expect((await f.journal.page('s')).entries[0].patches).toEqual(saved.patches);
+   expect((await f.predictions.entities('s','tasks',['a']))[0].row.n).toBe(99);
+   expect(await cold.invoke(input)).toEqual(receipt);
+  }
+ }finally{f.sql.close();}
+});
