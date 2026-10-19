@@ -10,10 +10,10 @@ Source: 2026-10-18 code-quality comparison F8 (client stale generators: 35/51 fi
 
 ## Pull requests and deployment
 
-- Target all pull requests at `main`, never `production`.
+- Target the active development branch requested for the task; never target `production`.
 - Keep `production` a fast-forward of the approved `main` commit. Do not create a production merge commit; both branches must identify the same release SHA after promotion.
 - Include clearly labeled before and after screenshots in the PR description for UI changes.
-- Open ready-for-review PRs. Merge or deploy only when the user authorizes it.
+- Open ready-for-review PRs. Under the standing PR-speed authorization, merge non-UI PRs when required CI is green. UI scope comes only from the complete changed-file diff through `.github/scripts/ui-diff-classifier.cjs`, including rename originals. Tests, docs, workflows, server, bridge, backend and Rust skip UI labels, browser/media/AI visual requirements and the veto window. UI PRs require current-head browser evidence, a passing AI visual check and a 24-hour veto window; Gabriel’s genuine approval ends the wait early. There is no reviewer-approval or owner-review gate. Agents never add or remove UI labels by hand; trusted automation reconciles them. Preserve explicit holds, product-fit flags and drafts; never bypass required protection. Deployment still requires authorization.
 - Verify CI and the exact healthy dev deployment before promoting production. Follow the release checks in `scripts/release-gates.mjs` and the ordered rollout in `scripts/deploy-coolify.mjs`.
 
 ## Error triage
