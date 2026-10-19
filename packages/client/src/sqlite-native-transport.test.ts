@@ -139,3 +139,18 @@ it('does not replace a pending immutable reducer command when another delivery a
  f.socket.receive({type:'reducer.result',id:'stable',originCommandId:'stable',result:'one',committedRevision:1});f.client.advanceOwnerWatermark(1);
  expect(await first).toBe('one');expect(f.budget.stats()).toMatchObject({bytes:0,entries:0});
 });
+
+it('keeps identical auth and metadata-only fetcher changes off the wire without superseding a pending call',async()=>{
+ const f=fixture({token:'opaque',fetchToken:undefined});await f.authenticate();
+ const pending=f.client.query({kind:'query',path:'tasks.one'});void pending.catch(()=>{});
+ await vi.waitFor(()=>expect(f.socket.sent.some(message=>message.type==='query.call')).toBe(true));
+ const before=vi.fn();f.client.setAuth({token:'opaque'},before);f.client.setAuth({fetchToken:async()=> 'later-token'},before);
+ await new Promise(resolve=>setTimeout(resolve,0));
+ expect(f.socket.sent.filter(message=>message.type==='auth')).toHaveLength(1);expect(before).not.toHaveBeenCalled();
+ expect(f.authenticating).toHaveLength(1);expect(f.client.localSessionState()).toBe('authenticated');
+ const call=f.socket.sent.find(message=>message.type==='query.call');f.socket.receive({type:'query.result',id:call.id,result:'still-current'});
+ await expect(pending).resolves.toBe('still-current');
+ const order:string[]=[];f.host.authenticating=()=>{order.push('authenticating');};
+ f.client.setAuth({token:'replacement',fetchToken:undefined},()=>{order.push('fence');});
+ expect(order).toEqual(['fence','authenticating']);await vi.waitFor(()=>expect(f.socket.sent.filter(message=>message.type==='auth')).toHaveLength(2));
+});

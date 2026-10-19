@@ -19,7 +19,7 @@ const error=(message:string,code:'auth'|'closed'|'disconnected'|'superseded'|'ti
  * retry an unknown reducer outcome. */
 export class SQLiteNativeTransport {
  private auth:GonvexClientAuth;private socket?:WebSocket;private generation=0;private authSerial=0;private identityRevision=0;
- private latestAuth?:string;private activeAuth?:string;private authInFlight=true;private installing=false;private closed=false;private disposed=false;private quarantined=false;
+ private latestAuth?:string;private activeAuth?:string;private authInFlight=true;private installing=false;private closed=false;private disposed=false;private quarantined=false;private authFrames=0;
  private capabilities:ServerCapabilities={};private artifact='';private watermark=0;private watermarkFence='';private session:'unavailable'|'authenticated'='unavailable';
  private readonly ephemeral=crypto.randomUUID();private readonly pending=new Map<string,Pending>();private waiting=0;private readonly controlWatches=new Set<ControlWatch>();private readonly nativeErrors=new Map<string,NativeError>();
  private readonly admissionFrames:AdmissionFrame[]=[];private admissionBytes=0;
@@ -50,11 +50,17 @@ export class SQLiteNativeTransport {
   // prove whether a preceding server write committed.
   socket.addEventListener('error',()=>{});
  }
- setAuth(input:GonvexClientAuth){
+ setAuth(input:GonvexClientAuth,beforeChange?:()=>void):boolean{
   if(this.disposed)throw error('Native transport was disposed','closed');
-  this.clearAdmission();this.identityRevision++;this.authSerial++;this.quarantined=false;this.auth={...this.auth,...input};this.refreshed=false;this.refreshedToken=undefined;this.latestAuth=undefined;this.activeAuth=undefined;
+  const next={...this.auth,...input},changes=this.auth.project!==next.project||this.auth.tenant!==next.tenant||this.auth.token!==next.token||this.auth.identity?.sub!==next.identity?.sub||this.auth.identity?.iss!==next.identity?.iss;
+  const needsFetcher=!next.token&&next.fetchToken!==undefined&&next.fetchToken!==this.auth.fetchToken;
+  // Installing the same credential or a refresh callback for its next use has
+  // no authorization effect. Keep active calls, feed admission and watches.
+  if(!changes&&!needsFetcher){this.auth=next;return false;}
+  beforeChange?.();
+  this.clearAdmission();this.identityRevision++;this.authSerial++;this.quarantined=false;this.auth=next;this.refreshed=false;this.refreshedToken=undefined;this.latestAuth=undefined;this.activeAuth=undefined;
   this.rejectAll(error('Credentials changed while the operation was pending','superseded'));this.rejectNativeErrors(Error('Error report credentials changed'));
-  const socket=this.socket;if(socket?.readyState===1)void this.authenticate(socket,this.generation,false);else this.connect();
+  const socket=this.socket;if(socket?.readyState===1)void this.authenticate(socket,this.generation,false);else this.connect();return true;
  }
  private async authenticate(socket:WebSocket,generation:number,forceRefresh:boolean){
   if(!this.current(socket,generation)||socket.readyState!==1)return;const serial=++this.authSerial;this.tokenCancel?.();this.tokenCancel=undefined;
@@ -68,7 +74,7 @@ export class SQLiteNativeTransport {
    this.auth={...this.auth,token};if(this.scope()!==previousScope){this.identityRevision++;for(const pending of [...this.pending.values()])if(!pending.public)this.finish(pending,undefined,error('Token identity changed before dispatch','superseded'));this.rejectNativeErrors(Error('Error report token identity changed'));this.options.ownerHost.authenticating(this.scope(),generation);}const id=this.latestAuth=crypto.randomUUID();
    this.sendNow({type:'auth',id,token,project:this.auth.project,tenant:this.auth.tenant,controlOnly:this.options.controlOnly||!this.auth.tenant,...(this.options.public?{public:true}:{}),...(this.options.clientContract?{clientContract:this.options.clientContract.version}:{}),
     capabilities:{replicaNativeRows:1,replicaSetDigest:1,replicaSnapshotPages:1,tenantControl:1,replicaReadyMany:1,replicaWatermark:1}});
-   this.flush();
+   this.authFrames=Math.min(Number.MAX_SAFE_INTEGER,this.authFrames+1);this.flush();
   }catch{if(this.current(socket,generation)&&serial===this.authSerial)socket.close();}
  }
  private receive(socket:WebSocket,generation:number,message:ServerMessage){
@@ -194,6 +200,7 @@ export class SQLiteNativeTransport {
  action<T extends JsonValue=JsonValue>(ref:FunctionReference,args:JsonValue={}):Promise<T>{return this.invoke('action',ref,args);}
  callOwnerReducer<T extends JsonValue=JsonValue>(ref:FunctionReference,args:JsonValue,command:string):Promise<T>{if(!command||command.length>256)return Promise.reject(Error('Invalid durable command ID'));return this.invoke('reducer',ref,args,command);}
  serverInfo(){return this.capabilities;}
+ diagnostics(){return {authenticationFrames:this.authFrames};}
  authenticationState(){return this.quarantined?'denied':this.activeAuth&&!this.authInFlight?'authenticated':this.socket?'authenticating':'unavailable';}
  localSessionState(){return this.session;}
  connectionState():ConnectionState{const values=[...this.pending.values()];return {isWebSocketConnected:this.socket?.readyState===1,hasEverConnected:this.hasEver,connectionCount:this.connectionCount,connectionRetries:this.reconnectAttempts,hasInflightRequests:!!values.length,inflightReducers:values.filter(p=>p.kind==='reducer').length,inflightActions:values.filter(p=>p.kind==='action').length,inflightOneShotQueries:values.filter(p=>p.kind==='query').length};}
