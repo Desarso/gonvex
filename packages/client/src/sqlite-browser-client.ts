@@ -69,9 +69,10 @@ export class SQLiteBrowserClient {
   this.ledger.register('browser-auth',()=>({name:'browser-auth',bytes:sqlitePayloadBytes(this.auth,65536),entries:1,maxBytes:65536,maxEntries:1,evictions:0,refusals:0}));
   this.ledger.register('browser-controls',()=>({name:'browser-controls',bytes:this.controlsValue?sqlitePayloadBytes(this.controlsValue,65536):0,entries:Number(!!this.controlsValue),maxBytes:65536,maxEntries:1,evictions:0,refusals:0}));
   this.ledger.register('browser-token-requests',()=>({name:'browser-token-requests',bytes:this.tokenRequests.size*40960,entries:this.tokenRequests.size,maxBytes:327680,maxEntries:8,evictions:0,refusals:0}));
-  this.releaseChanges=options.broker.subscribeChanges(()=>{
+  this.releaseChanges=options.broker.subscribeChanges((scope)=>{
    const epoch=options.broker.stats().ownerEpoch;if(epoch!==undefined&&this.epoch!==undefined&&epoch!==this.epoch)this.invalidate(false);if(epoch!==undefined)this.epoch=epoch;
-   for(const watch of this.watches.values()){watch.stale=true;this.notify(watch);}this.controlQueries.refresh();this.entityView.refresh();void this.pollControls().catch(()=>{});
+   if(scope!=='@control'){for(const watch of this.watches.values()){watch.stale=true;this.notify(watch);}this.entityView.refresh();}
+   this.controlQueries.refresh();void this.pollControls().catch(()=>{});
   });
   if(options.errorReporting&&this.auth.project){this.reporter=new GonvexErrorReporter({...options.errorReporting,project:this.auth.project,tenant:this.auth.tenant,client:this,transport:(kind,payload)=>this.reportError(kind,payload)});this.ledger.register('error-reporting',()=>this.reporter!.memoryBudget());}
  }

@@ -19,7 +19,7 @@ function fixture(fetchToken?:()=>Promise<string|null>){
   throw Error('Unexpected mock RPC '+input.method);
  },subscribeChanges(listener:(...args:any[])=>void){changes.add(listener);return ()=>{changes.delete(listener);};},stats(){return {ownerEpoch:epoch} as ReturnType<SQLiteReplicaBroker['stats']>;},close(){closed=true;}};
  const client=new SQLiteBrowserClient('ws://private-synthetic.test/ws',{broker,auth:{project:'project',tenant:'tenant',identity:{sub:'a'}},fetchToken});cleanup.push(()=>client.close());
- return {client,calls,responses,get closed(){return closed;},set handler(next:typeof handler){handler=next;},admit(key:string|null){admissionKey=key;for(const notify of changes)notify('*',1,true);},change(){for(const notify of changes)notify('scope',1);},replaceOwner(){epoch++;connection='';tokenPending=false;for(const notify of changes)notify('*',1,true);}};
+ return {client,calls,responses,get closed(){return closed;},set handler(next:typeof handler){handler=next;},admit(key:string|null){admissionKey=key;for(const notify of changes)notify('*',1,true);},control(){for(const notify of changes)notify('@control',1);},change(){for(const notify of changes)notify('scope',1);},replaceOwner(){epoch++;connection='';tokenPending=false;for(const notify of changes)notify('*',1,true);}};
 }
 it('services a single selected-tab token request, shares a watch, retains a bounded stable page snapshot and restores after owner change',async()=>{
  const fetchToken=vi.fn(async()=> 'opaque'),f=fixture(fetchToken),one=f.client.watchReplica({path:'tasks/all'}),two=f.client.watchReplica({path:'tasks/all'});cleanup.push(()=>{one.close();two.close();});
@@ -152,4 +152,12 @@ it('retains only canonical live IDs without opening an extra transport query and
  expect(f.client.replicaWindowMembership(signature)).toMatchObject({entity:'tasks',ids:['canonical'],total:10000,limit:250});
  expect(f.calls.filter(call=>call.input.method==='watchLive')).toHaveLength(1);expect(notify).toHaveBeenCalled();
  unwatch();watch.close();stop();release();expect(f.client.budgets().find(value=>value.name==='browser-live-memberships')?.bytes).toBe(0);
+});
+
+it('services control hints without invalidating every mounted data page',async()=>{
+ const f=fixture(),watch=f.client.watchReplica({path:'tasks/all'});cleanup.push(()=>watch.close());
+ const page=await watch.page();const notify=vi.fn(),stop=watch.subscribe(notify);
+ f.control();await f.client.pollControls();
+ expect(watch.snapshot().stale).toBe(false);expect(watch.snapshot().page).toBe(page);expect(notify).not.toHaveBeenCalled();
+ f.change();expect(watch.snapshot().stale).toBe(true);expect(notify).toHaveBeenCalledOnce();stop();
 });
