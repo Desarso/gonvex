@@ -582,6 +582,7 @@ export class LocalReplica implements LocalReplicaView {
       this.liveQueries = new Map(this.liveQueries).set(signature,normalizeWindow(loaded.window));
       if(loaded.window.kind==='replica' && loaded.window.completeness==='complete' && !loaded.window.truncated && loaded.rows.length===loaded.window.ids.length)this.residentPartialTables.delete(loaded.window.entity);
       this.markEntityChanged(loaded.window.entity,loaded.window.ids);
+      this.markWindowsForRows(loaded.window.entity, new Set(loaded.window.ids), signature);
       this.markWindowChanged(signature);
       this.notify(true);
     }, true);
@@ -624,14 +625,7 @@ export class LocalReplica implements LocalReplicaView {
       }
       this.entities=new Map(this.entities).set(entity,next);
       this.markEntityChanged(entity,missing);
-      // A window may have been read before its rows became resident. Entity
-      // leases must invalidate that cached projection and wake window readers,
-      // even when a later window lease can skip its disk read.
-      for (const window of this.liveQueries.values()) {
-        if (window.entity === entity && window.ids.some(id => loadedIDs.has(id))) {
-          this.markWindowChanged(window.signature);
-        }
-      }
+      this.markWindowsForRows(entity, loadedIDs);
       this.notify(true);
     }, true);
 
@@ -1865,6 +1859,17 @@ export class LocalReplica implements LocalReplicaView {
     // Clear before callbacks so reentrant optimistic writes get their own batch.
     this.changedEntities.clear(); this.changedWindows.clear(); this.invalidateSubscriptions = false;
     for (const [callback, ids] of callbacks) callback(ids);
+  }
+
+  /** Residency changes must wake every overlapping window, not only the lease
+   * that loaded the rows. Otherwise a cached empty projection can outlive them. */
+  private markWindowsForRows(entity: string, ids: ReadonlySet<string>, except?: string) {
+    if (!ids.size) return;
+    for (const window of this.liveQueries.values()) {
+      if (window.signature !== except && window.entity === entity && window.ids.some(id => ids.has(id))) {
+        this.markWindowChanged(window.signature);
+      }
+    }
   }
 
   private markEntityChanged(entity: string, ids?: Iterable<string>) {

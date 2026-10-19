@@ -45,3 +45,30 @@ it('publishes retained-window rows hydrated through an entity lease before a win
   releaseRows();
   unsubscribe();
 });
+
+it('invalidates a cached live projection when another retained window hydrates the same rows', async () => {
+  const grid: ReplicaWindow = {
+    signature: 'grid', kind: 'live', entity: 'tasks', key: 'id', ids: ['a'],
+    completeness: 'complete', source: 'server',
+  };
+  const collection: ReplicaWindow = { ...grid, signature: 'tasks', kind: 'replica' };
+  const row = { id: 'a', name: 'Cached task' };
+  const loadWindowRows = vi.fn(async (_scope: string, signature: string) => ({
+    window: signature === 'tasks' ? collection : grid, rows: [row],
+  }));
+  const replica = new LocalReplica({
+    load: async () => ({ entities: {}, liveQueries: { grid, tasks: collection } }),
+    loadWindowRows, applyTransaction: async () => {},
+  });
+  await replica.hydrate();
+  expect(replica.liveQuerySnapshot('grid').ids).toEqual([]);
+  const releaseCollection = replica.retainWindow('tasks');
+  await replica.withReadView(() => ({}), false, async () => undefined);
+  expect(replica.liveQuery('grid').ids).toEqual(['a']);
+  const releaseGrid = replica.retainWindow('grid');
+  await replica.withReadView(() => ({}), false, async () => undefined);
+  expect(loadWindowRows).toHaveBeenCalledTimes(1);
+  expect(replica.liveQuerySnapshot('grid')).toMatchObject({ ids: ['a'], rows: [row] });
+  releaseGrid();
+  releaseCollection();
+});
