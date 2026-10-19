@@ -126,15 +126,16 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
  private checkCachedCaller(caller:SQLiteOwnerCaller,connection:Connection,generation:string){const current=this.checkCaller(caller,connection);if(current.readGeneration!==generation)fail('FENCED','Cached read admission changed');return current;}
  private async readCommitted<T>(connection:Connection,admitted:ReturnType<SQLiteWorkerSessions['resolveTab']>,caller:SQLiteOwnerCaller,read:()=>Promise<T>){
   await this.recover(connection);
+  let reconciliationRequired=false;
   const attempt=()=>this.owner.runOwner(131072,async()=>{
    let result!:T;await this.owner.database.withTransactionAsync(async()=>{
     this.checkCachedCaller(caller,connection,admitted.readGeneration);const saved=await this.owner.canonical.loadSession(admitted.intentScope);
     if(!saved||saved.directive.visibilityScope!==admitted.scope)fail('FENCED','Cached read session changed');
-    await connection.feed.assertCommittedReadable({scope:admitted.scope,epoch:saved.directive.epoch});
+    try{await connection.feed.assertCommittedReadable({scope:admitted.scope,epoch:saved.directive.epoch});}catch(error){reconciliationRequired=true;throw error;}
     result=await read();this.checkCachedCaller(caller,connection,admitted.readGeneration);
    });return result;
   });
-  try{const result=await attempt();if(result!==null&&result!==undefined)return result;}catch(error){if((error as {code?:string})?.code!=='PAGE_CHANGED')throw error;}
+  try{const result=await attempt();if(result!==null&&result!==undefined)return result;}catch(error){if((error as {code?:string})?.code!=='PAGE_CHANGED'||!reconciliationRequired)throw error;}
   // A cold/mixed bootstrap has no committed page yet. Wait outside the owner
   // queue for the existing feed barrier, then recheck in the read transaction.
   const saved=await this.owner.runOwner(0,()=>this.owner.canonical.loadSession(admitted.intentScope));
@@ -383,7 +384,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
   for(const source of connection.sources.values())if(source.tabs.has(tabID)){this.releaseSourceInterest(connection,source,tabID);if(!source.tabs.size&&!source.eager)void this.closeSource(connection,source).catch(()=>{});}
   if(!connection.tabs.size){if(connection.lastScope)void this.maintenance.retire(connection.lastScope,[...connection.sources.values()].map(source=>source.id)).catch(()=>{});if(connection.timer)clearTimeout(connection.timer);clearTimeout(connection.reconnectTimer);clearTimeout(connection.migrationTimer);this.tokens.invalidate(id);connection.delivery.close();connection.client.dispose();connection.feed.close();this.sessions.close(id);this.connections.delete(id);}
  }
- async diagnostics(){return {feeds:[...this.connections.values()].map(connection=>connection.feed.stats()),progress:await this.owner.database.getAllAsync('SELECT observed,applied,unclosed FROM gv_native_feed_progress LIMIT 8')};}
+ async diagnostics(){return {feeds:[...this.connections.values()].map(connection=>({...connection.feed.stats(),restoring:!!connection.restoring,recovering:!!connection.recovering,recovered:!!connection.recovered})),progress:await this.owner.database.getAllAsync('SELECT observed,applied,unclosed FROM gv_native_feed_progress LIMIT 8')};}
  budgets(){return this.ledger.snapshot();}
  close(){if(this.closed)return;this.closed=true;this.maintenance.close();for(const tab of [...this.tabs.keys()])this.detachTab(tab);this.tokens.close();this.legacy.close();}
 }

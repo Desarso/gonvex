@@ -278,3 +278,13 @@ it('fences an in-flight cached page immediately when tenant admission is revoked
  const page=f.call({method:'replicaPage',signature:source.signature,limit:10}),rejected=expect(page).rejects.toMatchObject({code:'FENCED'});await entered;
  socket.receive({type:'auth.error',id:'membership-changed',error:'Member removed',code:'member_removed'});release();await rejected;
 });
+
+it('returns an obsolete entity-page generation without entering the feed bootstrap barrier',async()=>{
+ const f=await fixture();await f.authenticate();
+ const page:any=await f.call({method:'entities',entity:'tasks',ids:['a']});
+ const connection=[...(f.program as any).connections.values()][0] as any;
+ const barrier=vi.spyOn(connection.feed,'assertReadable').mockRejectedValue(Error('A new snapshot cannot repair a caller generation'));
+ await expect(f.call({method:'entities',entity:'tasks',ids:['a'],expected:{...page.generation,sequence:page.generation.sequence+1}})).rejects.toMatchObject({code:'PAGE_CHANGED'});
+ expect(barrier).not.toHaveBeenCalled();
+ expect((await f.call({method:'entities',entity:'tasks',ids:['a']}) as any).rows[0].value.n).toBe(1);
+});
