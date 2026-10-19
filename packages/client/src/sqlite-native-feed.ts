@@ -18,6 +18,7 @@ type State={stream:string;generation:number;scope:string;epoch:string;cursorEpoc
 type Options={owner:SQLiteOwnerProgramContext;sessions:SQLiteWorkerSessions;connection:string;artifactHash:string;
  reserve?(bytes:number):()=>void;
  sourceReady?(id:string):void;
+ freshSnapshot?(id:string):Promise<void>;
  windowsPending?(scope:string,epoch:string,revision:number):Promise<boolean>;
  publishWindows?(scope:string,epoch:string,revision:number):Promise<void>;
  send(message:ClientMessage):void;advanceWatermark(revision:number):void;failed(error:unknown):void;
@@ -191,7 +192,8 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
     await this.run(state,16384,async()=>{await this.replay(state,source);await this.windows.confirmReady(state.scope,source.signature,message.cursor,message.digest,message.truncated??false);});if(source.start)this.startBytes-=sqlitePayloadBytes(source.start,16384);source.start=undefined;source.opening=false;this.options.sourceReady?.(source.id);await this.publishWatermark(state);return;
    }
    case 'replica.watermark':if(!Number.isSafeInteger(message.revision)||message.revision<0)fail('INVALID_ROW','Invalid native watermark');state.watermark=Math.max(state.watermark??0,message.revision);await this.publishWatermark(state);return;
-   case 'replica.reset':case 'replica.needHashes':{const source=this.source(message.id);throw Object.assign(Error(`Native source requires fresh snapshot reconciliation (${source.path}: ${'reason'in message?message.reason:'hashes requested'})`),{code:'PAGE_CHANGED',resetSource:source.id});}
+   case 'replica.needHashes':{const source=this.source(message.id);if(this.options.freshSnapshot&&!source.start){source.opening=true;await this.options.freshSnapshot(source.id);return;}throw Object.assign(Error(`Native source requires fresh snapshot reconciliation (${source.path}: hashes requested)`),{code:'PAGE_CHANGED',resetSource:source.id});}
+   case 'replica.reset':{const source=this.source(message.id);throw Object.assign(Error(`Native source requires fresh snapshot reconciliation (${source.path}: ${message.reason})`),{code:'PAGE_CHANGED',resetSource:source.id});}
    case 'replica.error':fail('PAGE_CHANGED','Native source requires reconciliation');
    default:fail('INVALID_ROW','Unexpected native replica control');
   }

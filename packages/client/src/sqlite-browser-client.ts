@@ -231,7 +231,7 @@ export class SQLiteBrowserClient {
    const descriptor={watch:selected.key,version:selected.version,revision,dataRevision,method,options:options as JsonValue};const bytes=sqlitePayloadBytes(descriptor,131072)+256,key=stable(descriptor);let pending=this.reads.get(key);
    if(!pending){
     if(this.reads.size>=384||this.readBytes+bytes>524288)fail('BUDGET','Shared native read metadata exhausted');
-    pending=(async()=>{await this.open(selected);const value=await this.rpc<Page>({method,signature:selected.source!.signature,...options as object});this.current(revision);if(dataRevision!==this.dataRevision||!selected.refs)fail('FENCED','Native watch admission changed');if(value!==null||this.pages.get(selected.key)===undefined)this.store(selected,value);return value;})();
+    const queryOptions=structuredClone(options);pending=(async()=>{await this.open(selected);const value=await this.rpc<Page>({method,signature:selected.source!.signature,...queryOptions as object});this.current(revision);if(dataRevision!==this.dataRevision||!selected.refs)fail('FENCED','Native watch admission changed');if(value!==null||this.pages.get(selected.key)===undefined)this.store(selected,value);return value;})();
     this.reads.set(key,pending);this.readBytes+=bytes;const operation=pending,release=()=>{if(this.reads.get(key)===operation){this.reads.delete(key);this.readBytes-=bytes;}};void operation.then(release,release);
    }
    const value=await pending;if(closed)fail('FENCED','Native watch closed during read');return value as T;

@@ -187,3 +187,9 @@ it('coalesces identical mounted page reads and lets one lease close without canc
  await expect(second).resolves.toMatchObject({rows:[]});expect(two.snapshot().page).toBeDefined();
  expect(f.client.budgets().find(value=>value.name==='browser-shared-reads')).toMatchObject({entries:0,bytes:0});
 });
+
+it('captures a page request before asynchronous source opening',async()=>{
+ const f=fixture(),watch=f.client.watchReplica({path:'tasks/all'});cleanup.push(()=>watch.close());
+ const options={limit:10},pending=watch.page(options);options.limit=100;await pending;
+ expect(f.calls.find(call=>call.input.method==='replicaPage')?.input.limit).toBe(10);
+});

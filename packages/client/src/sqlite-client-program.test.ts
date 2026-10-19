@@ -234,3 +234,12 @@ it('reopens a server-reset source from a fresh snapshot instead of repeating its
  const second=await f.authenticate();expect(second.open.cursor).toBeUndefined();expect(second.open.digest).toBe('sum128-v1:'+'0'.repeat(32));
  expect((await f.call({method:'replicaPage',signature:source.signature}) as any).rows[0].value).toEqual({id:'a',n:1});
 });
+
+it('answers a hash request with a fresh snapshot open on the same admitted socket',async()=>{
+ const f=await fixture();const first=await f.authenticate();const source:any=await f.call({method:'watchReplica',path:'__local.tasks',args:{}});await f.call({method:'replicaPage',signature:source.signature});
+ first.socket.receive({type:'replica.needHashes',id:first.open.id});
+ await vi.waitFor(()=>expect(first.socket.sent.filter(frame=>frame.type==='replica.open')).toHaveLength(2));
+ const reopened=first.socket.sent.filter(frame=>frame.type==='replica.open').at(-1);
+ expect(reopened.cursor).toBeUndefined();expect(reopened.digest).toBe('sum128-v1:'+'0'.repeat(32));expect(Socket.instances).toHaveLength(1);
+ expect((await f.call({method:'controls'}) as any).failure).toBeNull();
+});
