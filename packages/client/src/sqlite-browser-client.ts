@@ -26,7 +26,7 @@ export type SQLiteCollectionPageResult=SQLiteTypedPage&{generation:string};
 export type SQLiteLocalQueryPage=(SQLiteTypedPage&{supported:true;complete:boolean;generation:string})|{supported:false;reason:string;generation:string;rows?:never};
 type Page=SQLiteLocalQueryPage|SQLitePendingLivePage|SQLiteNativeWindowResult|SQLitePendingSnapshotPage|SQLiteNativeEntityResult|SQLiteCollectionPageResult|null;
 type WatchSnapshot={page:Page|undefined;stale:boolean;version:number};
-type Watch={kind:'replica'|'live';state:WatchSnapshot;retiring?:Promise<void>;key:string;lease:string;path:string;args:JsonValue;bytes:number;refs:number;source?:{id?:string;signature:string};bound:number;opening?:Promise<void>;listeners:Set<()=>void>;unpin?:()=>void;stale:boolean;version:number;pendingDisplay?:boolean};
+type Watch={kind:'replica'|'live';state:WatchSnapshot;retiring?:Promise<void>;key:string;lease:string;path:string;args:JsonValue;bytes:number;refs:number;source?:{id?:string;signature:string};bound:number;opening?:Promise<void>;listeners:Set<()=>void>;unpin?:()=>void;stale:boolean;version:number;pendingDisplay?:boolean;compatibleFirstPage?:boolean};
 export type SQLiteBrowserOptions={broker:Broker;artifactHash?:string;onUpdateRequired?:GonvexClientOptions['onUpdateRequired'];onLocalExecutionFallback?:GonvexClientOptions['onLocalExecutionFallback'];errorReporting?:GonvexClientOptions['errorReporting'];role?:'control';public?:{tenant:string};auth?:Auth;fetchToken?:GonvexClientAuth['fetchToken']};
 export type SQLiteWatchOptions={view?:JsonValue;deferStart?:boolean};
 export type SQLiteReplicaPageOptions={offset?:number;limit?:number;generation?:string;expected?:SQLiteNativeWindowResult['generation']};
@@ -184,10 +184,10 @@ export class SQLiteBrowserClient {
   if(!watch.refs)fail('FENCED','Native watch is closed');if(watch.retiring)await watch.retiring;await this.connect();if(!watch.refs)fail('FENCED','Native watch is closed');if(watch.bound===this.revision&&watch.source)return;if(watch.opening)return watch.opening;
   const revision=this.revision,operation=this.rpc<{id?:string;signature:string}>({method:watch.kind==='live'?'watchLive':'watchReplica',path:watch.path,args:watch.args,lease:watch.lease}).then(source=>{this.current(revision);watch.source=source;watch.bound=revision;});watch.opening=operation;void operation.then(()=>{if(watch.opening===operation)watch.opening=undefined;},()=>{if(watch.opening===operation)watch.opening=undefined;});return operation;
  }
- private store(watch:Watch,value:Page){
+ private store(watch:Watch,value:Page,compatibleFirstPage=false,stale=false){
   if(!watch.refs)fail('FENCED','Native watch closed during read');const bytes=sqlitePayloadBytes({key:watch.key,value},262144);watch.unpin?.();watch.unpin=undefined;
   try{this.pages.put(watch.key,value,bytes);}finally{watch.unpin=this.pages.pin(watch.key);}
-  watch.stale=false;this.notify(watch);
+  watch.compatibleFirstPage=compatibleFirstPage;watch.stale=stale;this.notify(watch);
  }
  private deferredBounded(ref:Pick<FunctionReference,'path'>,args:JsonValue,options:SQLiteWatchOptions,kind:'replica'|'live'){
   sqlitePayloadBytes({path:ref.path,args,view:options.view??null},32768);const path=ref.path,owned=structuredClone(args),view=structuredClone(options.view);let selected:ReturnType<SQLiteBrowserClient['watchBounded']>|undefined,closed=false,refs=0,held=false;const empty:WatchSnapshot={page:undefined,stale:true,version:0};
@@ -228,15 +228,21 @@ export class SQLiteBrowserClient {
   return {localLiveQueryResult:()=>result,onUpdate:(listener:()=>void)=>{if(closed)fail('FENCED','Native live watch is closed');listeners.add(listener);if(!stop){releaseMembership=this.memberships.retain(signature);stop=watch.subscribe(()=>{if(watch.snapshot().stale)void refresh();});void refresh();}return ()=>{listeners.delete(listener);if(!listeners.size){stop?.();stop=undefined;releaseMembership?.();releaseMembership=undefined;result=undefined;}};},close:()=>{if(closed)return;closed=true;stop?.();releaseMembership?.();releaseMembership=undefined;listeners.clear();result=undefined;watch.close();}};
  }
  watchReplica<T extends JsonValue=JsonValue,Args extends JsonValue=JsonValue>(ref:FunctionReference<Args,T>,args:Args={} as Args,options:SQLiteWatchOptions={}):SQLiteReplicaWatch<T>{
-  if(options.deferStart){const watch=this.deferredBounded(ref,args,options,'replica');return this.compatibleReplica<T>({page:options=>watch.read(value=>value.page(options)),queryPage:(plan,generation)=>watch.read(value=>value.queryPage(plan,generation)),localQueryPage:(ref,args)=>watch.read(value=>value.localQueryPage(ref,args)),pendingPage:options=>watch.read(value=>value.pendingReplica(options)),snapshot:watch.snapshot,subscribe:watch.subscribe,close:watch.close});}
-  const watch=this.watchBounded(ref,args,options,'replica');return this.compatibleReplica<T>({...watch,pendingPage:watch.pendingReplica});
+  if(options.deferStart){const watch=this.deferredBounded(ref,args,options,'replica');return this.compatibleReplica<T>({page:options=>watch.read(value=>value.page(options)),queryPage:(plan,generation)=>watch.read(value=>value.queryPage(plan,generation)),localQueryPage:(ref,args)=>watch.read(value=>value.localQueryPage(ref,args)),pendingPage:options=>watch.read(value=>value.pendingReplica(options)),snapshot:watch.snapshot,subscribe:watch.subscribe,close:watch.close},this.cachedReplicaPage(ref,args,options));}
+  const watch=this.watchBounded(ref,args,options,'replica');return this.compatibleReplica<T>({...watch,pendingPage:watch.pendingReplica},this.cachedReplicaPage(ref,args,options));
  }
- private compatibleReplica<T extends JsonValue>(base:Pick<SQLiteReplicaWatch,'page'|'queryPage'|'localQueryPage'|'pendingPage'|'snapshot'|'subscribe'|'close'>):SQLiteReplicaWatch<T>{
+ // Mounted compatibility consumers share only the exact default first-page read.
+ // Explicit page calls still consult the owner, and invalidation fences the cache.
+ private cachedReplicaPage(ref:Pick<FunctionReference,'path'>,args:JsonValue,options:SQLiteWatchOptions){
+  const key=stable({kind:'replica',path:ref.path,args,view:options.view??null});
+  return ()=>{const watch=this.watches.get(key);return watch?.compatibleFirstPage&&!watch.stale?this.pages.get(key) as SQLiteNativeWindowResult|null|undefined:undefined;};
+ }
+ private compatibleReplica<T extends JsonValue>(base:Pick<SQLiteReplicaWatch,'page'|'queryPage'|'localQueryPage'|'pendingPage'|'snapshot'|'subscribe'|'close'>,cached:()=>SQLiteNativeWindowResult|null|undefined):SQLiteReplicaWatch<T>{
   let state:ReplicaCollectionSubscriptionState<T & ReplicaRow>|undefined,loading=false,again=false,closed=false,stop:(()=>void)|undefined;
   const listeners=new Set<()=>void>();
   const publish=()=>{for(const listener of listeners)try{listener();}catch{/* Observer only. */}};
   const clear=()=>{if(state!==undefined){state=undefined;publish();}};
-  const refresh=async()=>{if(this.closed||closed||!listeners.size)return;if(loading){again=true;return;}loading=true;try{do{again=false;const page=await base.page({limit:128});if(closed||!listeners.size)return;
+  const refresh=async()=>{if(this.closed||closed||!listeners.size)return;if(loading){again=true;return;}loading=true;try{do{again=false;const retained=cached(),page=retained===undefined?await base.page({limit:128}):retained;if(closed||!listeners.size)return;
     if(page){const rows=page.rows.filter(slot=>slot.value!==null).map(slot=>slot.value as T & ReplicaRow),header=page.window.header,truncated=Boolean(header.truncated||page.nextOffset!==null),complete=header.completeness==='complete'&&!truncated;
      state={rows,ids:page.rows.map(slot=>slot.id),total:page.window.total,source:header.source,completeness:complete?'complete':'partial',freshness:this.connectionState().isWebSocketConnected?'current':'offline',truncated,isUpToDate:complete,computedRevision:page.generation.sequence};publish();}
    }while(again&&!closed);}catch(error){const code=(error as {code?:string})?.code,page=base.snapshot().page;const certified=page&&'window'in page&&page.window.header.completeness==='complete'&&!page.window.header.truncated&&page.nextOffset===null;if(code!=='PAGE_CHANGED'&&(code!=='FENCED'||!certified))clear();}finally{loading=false;if(again&&!this.closed&&!closed&&listeners.size)setTimeout(()=>{void refresh();},25);}};
@@ -252,7 +258,7 @@ export class SQLiteBrowserClient {
    const descriptor={watch:selected.key,version:selected.version,revision,dataRevision,method,options:options as JsonValue};const bytes=sqlitePayloadBytes(descriptor,131072)+256,key=stable(descriptor);let pending=this.reads.get(key);
    if(!pending){
     if(this.reads.size>=384||this.readBytes+bytes>524288)fail('BUDGET','Shared native read metadata exhausted');
-    const queryOptions=structuredClone(options);pending=(async()=>{await this.open(selected);const value=await this.rpc<Page>({method,signature:selected.source!.signature,...queryOptions as object});this.current(revision);if(dataRevision!==this.dataRevision||!selected.refs)fail('FENCED','Native watch admission changed');if(value!==null||this.pages.get(selected.key)===undefined)this.store(selected,value);return value;})();
+    const queryOptions=structuredClone(options);pending=(async()=>{await this.open(selected);const observed=selected.version,value=await this.rpc<Page>({method,signature:selected.source!.signature,...queryOptions as object});this.current(revision);if(dataRevision!==this.dataRevision||!selected.refs)fail('FENCED','Native watch admission changed');if(value!==null||this.pages.get(selected.key)===undefined){const pageOptions=queryOptions as SQLiteReplicaPageOptions,compatible=method==='replicaPage'&&pageOptions.limit===128&&(pageOptions.offset??0)===0&&pageOptions.generation===undefined&&pageOptions.expected===undefined;this.store(selected,value,compatible,selected.version!==observed);}return value;})();
     this.reads.set(key,pending);this.readBytes+=bytes;const operation=pending,release=()=>{if(this.reads.get(key)===operation){this.reads.delete(key);this.readBytes-=bytes;}};void operation.then(release,release);
    }
    const value=await pending;if(closed)fail('FENCED','Native watch closed during read');return value as T;

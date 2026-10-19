@@ -321,3 +321,38 @@ it('bounds queued preparation with the existing shared budget and cancels queued
  expect(f.calls.filter(call=>call.input.method==='prepareReducer')).toHaveLength(1);
  expect(f.client.budgets().find(value=>value.name==='browser-request-admission')?.bytes).toBe(0);
 });
+
+
+it('reuses a fresh bounded collection page for another mounted consumer without another owner read',async()=>{
+ const f=fixture();f.handler=input=>input.method==='replicaPage'?{generation:{epoch:1,sequence:1},offset:0,nextOffset:null,rows:[{id:'row',value:{id:'row'}}],window:{generation:'one',total:1,header:{source:'server',completeness:'complete'}}}:undefined;
+ const one=f.client.watchReplica({path:'tasks/all'}),stopOne=one.onUpdate(()=>{});cleanup.push(()=>{stopOne();one.close();});
+ await vi.waitFor(()=>expect(one.localReplicaResult()).toEqual([{id:'row'}]));
+ const before=f.calls.filter(call=>call.input.method==='replicaPage').length;
+ const two=f.client.watchReplica({path:'tasks/all'}),stopTwo=two.onUpdate(()=>{});cleanup.push(()=>{stopTwo();two.close();});
+ await vi.waitFor(()=>expect(two.localReplicaResult()).toEqual([{id:'row'}]));expect(f.calls.filter(call=>call.input.method==='replicaPage')).toHaveLength(before);
+ // Explicit public page reads still ask the owner for a fenced result.
+ await two.page({limit:128});expect(f.calls.filter(call=>call.input.method==='replicaPage')).toHaveLength(before+1);
+});
+
+it('shares a not-yet-published collection page until canonical invalidation admits rows',async()=>{
+ const f=fixture();let ready=false;f.handler=input=>input.method==='replicaPage'?(ready?{generation:{epoch:1,sequence:2},offset:0,nextOffset:null,rows:[{id:'row',value:{id:'row'}}],window:{generation:'one',total:1,header:{source:'server',completeness:'complete'}}}:null):undefined;
+ const one=f.client.watchReplica({path:'tasks/all'}),stopOne=one.onUpdate(()=>{});cleanup.push(()=>{stopOne();one.close();});await vi.waitFor(()=>expect(one.snapshot().page).toBeNull());
+ const before=f.calls.filter(call=>call.input.method==='replicaPage').length;
+ const two=f.client.watchReplica({path:'tasks/all'}),stopTwo=two.onUpdate(()=>{});cleanup.push(()=>{stopTwo();two.close();});await new Promise(resolve=>setTimeout(resolve,0));
+ expect(two.localReplicaResult()).toBeUndefined();expect(f.calls.filter(call=>call.input.method==='replicaPage')).toHaveLength(before);
+ ready=true;f.change();await vi.waitFor(()=>expect(two.localReplicaResult()).toEqual([{id:'row'}]));expect(one.localReplicaResult()).toEqual([{id:'row'}]);expect(f.calls.filter(call=>call.input.method==='replicaPage')).toHaveLength(before+1);
+});
+
+it('rereads when canonical invalidation crosses a collection read instead of treating its old reply as fresh',async()=>{
+ const f=fixture();let release!:()=>void;const held=new Promise<void>(resolve=>{release=resolve;});let reads=0;
+ f.handler=async input=>{if(input.method!=='replicaPage')return;const value=++reads;if(value===1)await held;return {generation:{epoch:1,sequence:value},offset:0,nextOffset:null,rows:[{id:'row',value:{id:'row',value}}],window:{generation:'one',total:1,header:{source:'server',completeness:'complete'}}};};
+ const one=f.client.watchReplica({path:'tasks/all'}),stop=one.onUpdate(()=>{});cleanup.push(()=>{stop();one.close();});await vi.waitFor(()=>expect(reads).toBe(1));f.change();release();await vi.waitFor(()=>expect(one.localReplicaResult()).toEqual([{id:'row',value:2}]));expect(reads).toBe(2);
+});
+
+
+it('does not substitute a differently sized explicit page for a mounted collection read',async()=>{
+ const f=fixture();f.handler=input=>input.method==='replicaPage'?{generation:{epoch:1,sequence:1},offset:0,nextOffset:null,rows:[{id:'row',value:{id:'row'}}],window:{generation:'one',total:1,header:{source:'server',completeness:'complete'}}}:undefined;
+ const one=f.client.watchReplica({path:'tasks/all'});cleanup.push(()=>one.close());await one.page({limit:1});
+ const two=f.client.watchReplica({path:'tasks/all'}),stop=two.onUpdate(()=>{});cleanup.push(()=>{stop();two.close();});await vi.waitFor(()=>expect(two.localReplicaResult()).toEqual([{id:'row'}]));
+ expect(f.calls.filter(call=>call.input.method==='replicaPage').map(call=>call.input.limit)).toEqual([1,128]);
+});
