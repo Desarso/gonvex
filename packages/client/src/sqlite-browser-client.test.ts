@@ -62,6 +62,15 @@ it('updates the main-thread token provider without cloning a function to the own
  const old=vi.fn(async()=> 'old'),next=vi.fn(async()=> 'next'),f=fixture(old);await f.client.connect();await vi.waitFor(()=>expect(f.responses).toHaveLength(1));await f.client.setAuth({fetchToken:next});f.replaceOwner();await vi.waitFor(()=>expect(f.responses).toHaveLength(2));expect(next).toHaveBeenCalledOnce();expect(f.responses.at(-1).token).toBe('next');expect(f.calls.every(call=>!('fetchToken'in(call.input.auth??{})))).toBe(true);
 });
 
+it('retries a control poll superseded by the initial identity admission',async()=>{
+ const f=fixture();let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});let held=false;
+ f.handler=async input=>{if(input.method==='controls'&&!held){held=true;await gate;return {tokens:[],status:{},session:'unavailable',failure:null};}};
+ await f.client.connect();await vi.waitFor(()=>expect(held).toBe(true));
+ const admission=f.client.setAuth({identity:{sub:'b'}});release();await admission;
+ await expect(f.client.pollControls()).resolves.toBeUndefined();
+ expect(f.calls.filter(call=>call.input.method==='controls').length).toBeGreaterThan(1);
+});
+
 it('waits for correlated authoritative authentication, rejects superseded waiters and cancels on close',async()=>{
  const f=fixture();let authentication='authenticating';f.handler=async input=>{if(input.method==='controls')return {tokens:[],status:{isWebSocketConnected:true},authentication,session:'unavailable',failure:null};};const first=f.client.authenticate({token:'first'});void first.catch(()=>{});await vi.waitFor(()=>expect(f.calls.some(call=>call.input.method==='auth')).toBe(true));const second=f.client.authenticate({token:'second'});void second.catch(()=>{});await expect(first).rejects.toMatchObject({code:'superseded'});authentication='authenticated';f.change();await expect(second).resolves.toBeUndefined();expect(f.client.localSessionState()).toBe('unavailable');
  authentication='authenticating';const closing=f.client.authenticate({token:'third'});void closing.catch(()=>{});await vi.waitFor(()=>expect(f.calls.filter(call=>call.input.method==='auth')).toHaveLength(3));f.client.close();await expect(closing).rejects.toMatchObject({code:'closed'});
