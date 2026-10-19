@@ -178,7 +178,12 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
    case 'replica.readyMany':for(const ready of message.ready)await this.process(state,{type:'replica.ready',...ready});return;
    case 'replica.ready':{
     const source=this.source(message.id);this.cursor(state,message.cursor);
-    if(!source.opening){await this.run(state,16384,()=>this.groups.append(state.stream,message));return;}
+    if(!source.opening||!source.start){
+     await this.run(state,16384,()=>this.groups.append(state.stream,message));
+     // A resumed source has no snapshot stage. Its delta and ready certificate
+     // belong to the same terminal group; verify after applying that delta.
+     if(source.opening){source.opening=false;if(state.watermark!==undefined&&state.watermark>=message.cursor.revision)await this.publishWatermark(state);}return;
+    }
     await this.run(state,16384,async()=>{await this.replay(state,source);await this.windows.confirmReady(state.scope,source.signature,message.cursor,message.digest,message.truncated??false);});if(source.start)this.startBytes-=sqlitePayloadBytes(source.start,16384);source.start=undefined;source.opening=false;await this.publishWatermark(state);return;
    }
    case 'replica.watermark':if(!Number.isSafeInteger(message.revision)||message.revision<0)fail('INVALID_ROW','Invalid native watermark');state.watermark=Math.max(state.watermark??0,message.revision);await this.publishWatermark(state);return;

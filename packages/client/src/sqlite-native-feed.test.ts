@@ -197,3 +197,14 @@ it('reclaims published staging metadata before repeated snapshots without waitin
  }
  expect(await f.engine.integrity()).toBe('ok');
 });
+
+it('verifies resumed ready only after its changed membership publishes at the terminal watermark',async()=>{
+ const f=await fixture();await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();
+ f.feed.register({id:'resume',signature:'tasks-all',entity:'tasks',key:'id',path:'tasks/all'});
+ f.feed.frame({type:'replica.delta',id:'resume',cursor:cursor(12),canonicalUpserts:[stable(changed)],deleted:[],digest:await digest([changed,rows[1]])},1);
+ f.feed.frame({type:'replica.ready',id:'resume',cursor:cursor(12),digest:await digest([changed,rows[1]])},1);
+ await expect(f.feed.assertReadable()).rejects.toMatchObject({code:'PAGE_CHANGED'});expect(f.failures).toEqual([]);
+ f.feed.frame({type:'replica.watermark',revision:12},1);await f.feed.assertReadable();
+ expect(f.failures).toEqual([]);expect((await f.canonical.loadEntityRows('visible','tasks',['a','b'])).map(entry=>entry.row)).toEqual([changed,rows[1]]);
+ expect((await new SQLiteWindowStore(f.db,()=>f.engine.verifyOwner()).header('visible','tasks-all'))?.header.aggregateDigest).toBe(await digest([changed,rows[1]]));
+});
