@@ -1,3 +1,4 @@
+import {preloadSQLiteWasm} from './sqlite-wasm-preload.js';
 import {sqliteRequestBytes,sqliteTransferRequest} from './sqlite-request-frame.js';
 import { sqliteWorkerOperations as publicOperations,sqliteWorkerProtocol,sqliteOwnerRequestCapacity } from './sqlite-worker-protocol.js';
 import { sqlitePayloadBytes } from './sqlite-admission.js';
@@ -226,6 +227,7 @@ export class SQLiteReplicaBroker {
       if (this.closed || this.failed) return;
       let release!: () => void;
       const released = new Promise<void>(resolve => { release = resolve; });
+      preloadSQLiteWasm();
       const adapter=this.adapter,worker = this.options.createWorker?.()??new Worker(this.options.workerURL!, { type: 'module' });
       const token = crypto.randomUUID(), channel = new BroadcastChannel(controlName + ':owner:' + token);
       const g: Generation = { token, worker, adapter, channel, release, ready: false, epoch: 0, lastProgress: Date.now() };
