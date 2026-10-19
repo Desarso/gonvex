@@ -128,7 +128,7 @@ it('keeps durable Reducer replay but reports a single-shot refusal as an unknown
 
 it('joins an identical stable reducer request even at capacity, rejects changed content and keeps its command ID in replay',async()=>{
  const broker=client() as any;broker.owner={id:'test',token:'owner',epoch:1,seen:Date.now()};broker.send=vi.fn();const input={method:'reducer',path:'tasks/change',args:{id:'a'},now:100};
- const pending=broker.request('clientCall',input,90000,'stable-command'),others=Array.from({length:15},(_,n)=>broker.request('clientCall',{...input,now:101+n}));expect(broker.pending.size).toBe(16);expect(broker.request('clientCall',input,90000,'stable-command')).toBe(pending);
+ const pending=broker.request('clientCall',input,90000,'stable-command'),others=Array.from({length:127},(_,n)=>broker.request('clientCall',{...input,now:101+n}));expect(broker.pending.size).toBe(128);expect(broker.request('clientCall',input,90000,'stable-command')).toBe(pending);
  await expect(broker.request('clientCall',{...input,args:{id:'b'}},90000,'stable-command')).rejects.toMatchObject({code:'INTENT_CONFLICT'});await expect(broker.request('clientCall',input)).rejects.toMatchObject({code:'BUDGET'});expect(broker.pending.get('stable-command').args).toEqual(input);
  for(const call of [...broker.pending.values()])broker.receiveReply({protocol:2,to:'test',token:'owner',id:call.id,value:call.id});expect(await pending).toBe('stable-command');await Promise.all(others);expect(broker.pendingBytes).toBe(0);
  await expect(broker.request('clientCall',{method:'action',path:'external'},90000,'stable-command')).rejects.toMatchObject({code:'OPERATION'});
@@ -140,14 +140,14 @@ it('delivers fresh credited control hints at the same SQL generation while rejec
  const reset={...message,scope:'*',reset:true,notification:3};broker.receiveControl(reset);broker.receiveControl({...reset,notification:4});broker.receiveControl({...reset,notification:4});expect(calls).toEqual(['@control','@control','*','*']);expect(broker.acknowledgeChange).toHaveBeenCalledTimes(7);
 });
 
-it('elects the generated IndexedDB owner after an OPFS startup refusal',async()=>{
+it('fails unsupported startup without selecting a different storage engine',async()=>{
  const originalDocument=globalThis.document,originalNavigator=globalThis.navigator;
  const channels:any[]=[];class Channel{onmessage?:Function;constructor(_name:string){channels.push(this);}postMessage(_value:unknown){}close(){}}
  const workers:{kind:string;terminated:boolean}[]=[];
  const makeWorker=(kind:string)=>{const state={kind,terminated:false};workers.push(state);return {onmessage:null as null|((event:{data:any})=>void),onerror:null as null|(()=>void),postMessage(this:any,message:any){if(message.op==='open')queueMicrotask(()=>this.onmessage?.({data:{id:message.id,sentAt:Date.now(),...(kind==='sqlite'?{error:{code:'UNSUPPORTED',message:'OPFS is unavailable'}}:{value:{epoch:2,adapter:'indexeddb'}})}}));else if(message.op==='ping')queueMicrotask(()=>this.onmessage?.({data:{id:message.id,sentAt:Date.now(),value:{ready:true}}}));},terminate(){state.terminated=true;}} as unknown as Worker;};
  vi.stubGlobal('BroadcastChannel',Channel);vi.stubGlobal('document',{addEventListener(){},removeEventListener(){}});vi.stubGlobal('addEventListener',()=>{});vi.stubGlobal('removeEventListener',()=>{});
  vi.stubGlobal('navigator',{locks:{request:async(_name:string,_options:unknown,run:()=>Promise<void>)=>run()}});
- const broker=new SQLiteReplicaBroker({schemaVersion:'a'.repeat(64),createWorker:()=>makeWorker('sqlite'),createFallbackWorker:()=>makeWorker('indexeddb')});
- try{await vi.waitFor(()=>expect(broker.stats()).toMatchObject({state:'ready',adapter:'indexeddb',ownerEpoch:2}),{timeout:3000});expect(workers.map(worker=>worker.kind)).toEqual(['sqlite','indexeddb']);expect(workers[0]?.terminated).toBe(true);}
+ const broker=new SQLiteReplicaBroker({schemaVersion:'a'.repeat(64),createWorker:()=>makeWorker('sqlite')});
+ try{await vi.waitFor(()=>expect(broker.stats()).toMatchObject({state:'unavailable',adapter:'sqlite'}),{timeout:3000});expect(workers.map(worker=>worker.kind)).toEqual(['sqlite']);expect(workers[0]?.terminated).toBe(true);}
  finally{broker.close();vi.unstubAllGlobals();if(originalDocument)vi.stubGlobal('document',originalDocument);if(originalNavigator)vi.stubGlobal('navigator',originalNavigator);for(const channel of channels)channel.close();}
 });

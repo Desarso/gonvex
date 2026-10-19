@@ -9,7 +9,7 @@ import {sqliteTypedReplicaStorage} from './sqlite-typed-row-layout.js';
 import {SQLiteSnapshotPages} from './sqlite-snapshot-pages.js';
 import {SQLiteSnapshotActivator} from './sqlite-snapshot-activation.js';
 import {SQLiteWorkerSessions} from './sqlite-worker-sessions.js';
-import {SQLiteSafetyJournal} from './sqlite-safety-journal.js';
+import {SQLiteSessionJournal} from './sqlite-session-journal.js';
 import {SQLiteReducerPreparationRequiredError} from './sqlite-reducer-core.js';
 import {SQLiteNativeFeed} from './sqlite-native-feed.js';
 import {SQLiteWindowStore} from './sqlite-window-store.js';
@@ -26,12 +26,13 @@ const rows=[{id:'a',name:'Before café 東京',n:1},{id:'b',name:'Second',n:2}],
 const digest=async(values=rows)=>replicaSumDigest(await replicaRowsHashes(values,'id'));
 async function fixture(extra:Partial<ConstructorParameters<typeof SQLiteNativeFeed>[0]>={},completeEntity=false,moduleEpoch='e'){
  const raw=new sqlite.oo1.DB(':memory:'),host=officialSQLiteDatabase(sqlite,raw),db=sqliteOwnerTransactions(host.database),engine=new SQLiteTypedReplicaEngine(db,schema);await engine.open('feed');const canonical=sqliteTypedReplicaStorage(db,schema);await canonical.ready();
- const fence=()=>engine.verifyOwner(),snapshots=new SQLiteSnapshotPages(db,fence,schema),activation=new SQLiteSnapshotActivator(db,canonical,fence,schema),safety=new SQLiteSafetyJournal('feed',new IDBFactory(),IDBKeyRange);
+ const fence=()=>engine.verifyOwner(),snapshots=new SQLiteSnapshotPages(db,fence,schema),activation=new SQLiteSnapshotActivator(db,canonical,fence,schema);
  let lane=Promise.resolve();const runOwner=<T>(_bytes:number,run:()=>Promise<T>)=>{const next=lane.then(run);lane=next.then(()=>{},()=>{});return next;};
- const sessions=new SQLiteWorkerSessions({artifactHash:'artifact',offlineMaxAgeMs:5000,database:db,canonical,safety,runOwner,fence});sessions.open('one');sessions.attachTab('tab','one');
  const owner={database:db,engine,canonical,snapshots,activation,runOwner} as SQLiteOwnerProgramContext;
+ const safety=new SQLiteSessionJournal(owner);
+ const sessions=new SQLiteWorkerSessions({artifactHash:'artifact',offlineMaxAgeMs:5000,database:db,canonical,safety,runOwner,fence});sessions.open('one');sessions.attachTab('tab','one');
  const sends:any[]=[],watermarks:number[]=[],failures:unknown[]=[];const feed=new SQLiteNativeFeed({owner,sessions,connection:'one',artifactHash:'artifact',send:message=>sends.push(message),advanceWatermark:revision=>watermarks.push(revision),failed:error=>failures.push(error),...extra});
- cleanup.push(()=>{feed.close();safety.close();raw.close();});
+ cleanup.push(()=>{feed.close();raw.close();});
  feed.register({id:'source',signature:'tasks-all',entity:'tasks',key:'id',path:'tasks/all',...(completeEntity?{completeEntity:true as const}:{})});feed.authenticating('identity',1);
  const session={connectionGeneration:1,directive:{protocolVersion:1 as const,scope:'tenant',visibilityScope:'visible',epoch:moduleEpoch},identity:{auth:{account:{id:'account'}},tenant:{id:'tenant'},member:{id:'member',accountId:'account',permissions:{}}},artifactHash:'artifact',intentScope:'identity',lastOnlineAtMs:1000,capabilities:{replicaNativeRows:1}};
  await feed.session(session,()=>true);

@@ -11,7 +11,6 @@ import {SQLiteSnapshotPages} from './sqlite-snapshot-pages.js';
 import {SQLiteSnapshotActivator} from './sqlite-snapshot-activation.js';
 import {SQLiteNativeReplicaReader} from './sqlite-native-replica-reader.js';
 import {SQLitePendingSnapshotReader} from './sqlite-pending-snapshot-reader.js';
-import {SQLiteSafetyJournal} from './sqlite-safety-journal.js';
 import {reducerOutboxScope} from './client-auth-wire.js';
 import {SQLiteClientProgram} from './sqlite-client-program.js';
 import {replicaRowsHashes,replicaSumDigest} from './replica-integrity.js';
@@ -66,10 +65,10 @@ it('rejects unknown function metadata, oversized tokens and unowned native windo
  const f=await fixture();await f.authenticate();await expect(f.call({method:'reducer',path:'unknown',args:{},now:100})).rejects.toMatchObject({code:'INVALID_ROW'});await expect(f.call({method:'replicaPage',signature:'other-user-source'})).rejects.toMatchObject({code:'FENCED'});await expect(f.call({method:'auth',auth:{tenant:'other'}})).rejects.toThrow('identity changes require a new connection');await expect(f.call({method:'auth',auth:{token:'x'.repeat(16385)}})).rejects.toThrow('Invalid native');
 });
 
-it('recovers a prepared command before retry after SQLite fails following independent durability',async()=>{
+it('rolls back a failed local command atomically and retries the same immutable ID',async()=>{
  const f=await fixture(),{socket}=await f.authenticate();socket.close();await f.owner.runOwner(0,()=>f.db.execAsync("CREATE TRIGGER fail_native_receipt BEFORE INSERT ON gv_reducer_invocations BEGIN SELECT RAISE(ABORT,'late SQL failure'); END;"));
  const input={method:'reducer',path:'tasks.increment',args:{},now:100};await expect(f.call(input,'one','recover-command')).rejects.toThrow('late SQL failure');expect(f.executions).toBe(1);
- await f.owner.runOwner(0,()=>f.db.execAsync('DROP TRIGGER fail_native_receipt'));const receipt:any=await f.call(input,'one','recover-command');expect(receipt.result).toBe(2);expect(f.executions).toBe(1);expect((await f.call({method:'entities',entity:'tasks',ids:['a']}) as any).rows[0].value.n).toBe(2);expect((await f.owner.runOwner(0,()=>f.db.getFirstAsync<{n:number}>('SELECT count(*) n FROM gv_reducer_journal')))?.n).toBe(1);expect(socket.sent.filter(message=>message.type==='reducer.call')).toEqual([]);expect(await f.engine.integrity()).toBe('ok');
+ await f.owner.runOwner(0,()=>f.db.execAsync('DROP TRIGGER fail_native_receipt'));const receipt:any=await f.call(input,'one','recover-command');expect(receipt.result).toBe(2);expect(f.executions).toBe(2);expect((await f.call({method:'entities',entity:'tasks',ids:['a']}) as any).rows[0].value.n).toBe(2);expect((await f.owner.runOwner(0,()=>f.db.getFirstAsync<{n:number}>('SELECT count(*) n FROM gv_reducer_journal')))?.n).toBe(1);expect(socket.sent.filter(message=>message.type==='reducer.call')).toEqual([]);expect(await f.engine.integrity()).toBe('ok');
 });
 
 it('delivers authenticated first-sync rows as an incomplete page before activation without granting complete coverage',async()=>{
@@ -97,9 +96,14 @@ it('automatically reauthenticates a reset native feed and reopens its sources wh
  await vi.waitFor(()=>expect(Socket.instances).toHaveLength(2),{timeout:2500});const replacement=Socket.instances[1];replacement.open();await vi.waitFor(async()=>expect((await f.call({method:'controls'}) as any).tokens).toHaveLength(1));const token=(await f.call({method:'controls'}) as any).tokens[0];await f.call({method:'token',response:{...token,token:'opaque'}});await vi.waitFor(()=>expect(replacement.sent.some(message=>message.type==='auth')).toBe(true));const auth=replacement.sent.find(message=>message.type==='auth');replacement.receive({type:'session.ready',capabilities:{replicaNativeRows:1,replicaWatermark:1}});replacement.receive({type:'auth.result',id:auth.id,result:{artifactHash:'artifact',localIdentity:identity,replica:{protocolVersion:1,scope:'tenant',visibilityScope:'visible',epoch:'e'}}});await vi.waitFor(()=>expect(replacement.sent.some(message=>message.type==='replica.open')).toBe(true));expect(replacement.sent.find(message=>message.type==='replica.open').id).toBe(open.id);expect((await f.call({method:'entities',entity:'tasks',ids:['a']}) as any).rows[0].value.n).toBe(1);expect(await f.engine.integrity()).toBe('ok');
 });
 
-it('recovers an independently durable legacy rejection in place and retires its safety body without sending it again',async()=>{
- const f=await fixture();await f.authenticate();const status:any=await f.call({method:'status'}),scope=status.admission.intentScope,saved=await f.owner.runOwner(0,()=>f.canonical.loadSession(scope));const safety=new SQLiteSafetyJournal();
- try{const invocation={scope:'visible',path:'tasks.increment',commandId:'legacy-rejected',args:{},now:100},legacy={id:44,scope,path:invocation.path,args:{},idempotencyKey:invocation.commandId,entityKeys:[],patches:[],localExecution:{scope:'visible',commandId:invocation.commandId,now:100,artifactHash:'artifact',identity},createdAt:101,attempts:1,nextAttemptAt:101,state:'rejected' as const,lastError:'Synthetic authoritative rejection',lastErrorClass:'rejected' as const};await safety.appendLegacy(invocation,legacy,saved!,scope);f.program.detachTab('one');const {socket}=await f.authenticate();await vi.waitFor(async()=>expect(await safety.count(scope)).toBe(0));expect(socket.sent.filter(message=>message.type==='reducer.call')).toEqual([]);expect((await f.owner.runOwner(0,()=>f.db.getFirstAsync<{state:string}>("SELECT state FROM gv_reducer_journal WHERE intent_key='legacy-rejected'")))?.state).toBe('rejected');expect(f.executions).toBe(0);expect(await f.engine.integrity()).toBe('ok');}finally{safety.close();}
+it('retains a rejected SQL command on reconnect without sending or executing it again',async()=>{
+ const f=await fixture();await f.authenticate();const status:any=await f.call({method:'status'}),scope=status.admission.intentScope;
+ await f.owner.runOwner(0,()=>f.program['reducer'].journal.append({scope,path:'tasks.increment',args:{},idempotencyKey:'legacy-rejected',entityKeys:[],patches:[],createdAt:100,attempts:1,nextAttemptAt:100,state:'rejected',lastError:'Synthetic authoritative rejection',lastErrorClass:'rejected'}));
+ f.program.detachTab('one');const {socket}=await f.authenticate();
+ expect((await f.call({method:'entities',entity:'tasks',ids:['a']}) as any).rows[0].value.n).toBe(1);
+ expect(socket.sent.filter(message=>message.type==='reducer.call')).toEqual([]);
+ expect((await f.owner.runOwner(0,()=>f.db.getFirstAsync<{state:string}>("SELECT state FROM gv_reducer_journal WHERE intent_key='legacy-rejected'")))?.state).toBe('rejected');
+ expect(f.executions).toBe(0);expect(await f.engine.integrity()).toBe('ok');
 });
 
 it('restores cached pages and durable offline edits before a replacement socket can open',async()=>{

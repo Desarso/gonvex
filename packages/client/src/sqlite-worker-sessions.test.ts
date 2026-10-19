@@ -1,8 +1,9 @@
 import {DatabaseSync} from 'node:sqlite';
-import {IDBFactory,IDBKeyRange} from 'fake-indexeddb';
 import {expect,it,vi} from 'vitest';
 import {SQLiteWorkerSessions} from './sqlite-worker-sessions.js';
-import {SQLiteSafetyJournal} from './sqlite-safety-journal.js';
+import {SQLiteSessionJournal} from './sqlite-session-journal.js';
+import {SQLiteIntentJournal} from './sqlite-intent-journal.js';
+import type {SQLiteOwnerProgramContext} from './sqlite-owner-actor.js';
 import {SQLiteTypedReplicaEngine} from './sqlite-typed-engine.js';
 import {sqliteTypedReplicaStorage} from './sqlite-typed-row-layout.js';
 import {sqliteOwnerTransactions} from './sqlite-owner-transactions.js';
@@ -15,10 +16,13 @@ async function fixture(){
  const sql=new DatabaseSync(':memory:');
  const db=sqliteOwnerTransactions({async execAsync(query){sql.exec(query);},async runAsync(query,...args){return sql.prepare(query).run(...args as any[]);},async getFirstAsync<T>(query:string,...args:unknown[]){return sql.prepare(query).get(...args as any[]) as T??null;},async getAllAsync<T>(query:string,...args:unknown[]){return sql.prepare(query).all(...args as any[]) as T[];},async withTransactionAsync(run){sql.exec('BEGIN');try{await run();sql.exec('COMMIT');}catch(error){sql.exec('ROLLBACK');throw error;}}} satisfies SQLiteReplicaDatabase);
  const typed={tasks:{key:'id',fields:{id:{kind:'text' as const}},indexes:[]}},engine=new SQLiteTypedReplicaEngine(db,typed);await engine.open('sessions');const canonical=sqliteTypedReplicaStorage(db,typed);await canonical.ready();
- const safety=new SQLiteSafetyJournal('sessions',new IDBFactory(),IDBKeyRange);let lane=Promise.resolve();
+ let lane=Promise.resolve();
+ const runOwner=<T>(_bytes:number,run:()=>Promise<T>)=>{const next=lane.then(run);lane=next.then(()=>{},()=>{});return next;};
+ const safety=new SQLiteSessionJournal({database:db,engine,canonical,runOwner} as SQLiteOwnerProgramContext);
+ const journal=new SQLiteIntentJournal(db,()=>engine.verifyOwner());await runOwner(0,()=>journal.ready());
  const options={artifactHash:'artifact',offlineMaxAgeMs:5000,database:db,canonical,safety,runOwner<T>(_bytes:number,run:()=>Promise<T>){const next=lane.then(run);lane=next.then(()=>{},()=>{});return next;},fence:()=>engine.verifyOwner()};
  const registry=new SQLiteWorkerSessions(options);registry.open('one');registry.attachTab('tab','one');registry.authenticating('one','identity\u0000a',1);
- return {sql,db,canonical,safety,registry,options,close(){safety.close();sql.close();}};
+ return {sql,db,canonical,safety,journal,registry,options,close(){sql.close();}};
 }
 it('admits only durable correlated identity, maps tabs centrally and preserves offline editing policy',async()=>{
  const f=await fixture();try{
@@ -46,12 +50,12 @@ it('rolls back stale SQLite admission and fences queued IDB admission before pub
 it('quarantines every connection for a revoked identity immediately, retains commands, and restores only after fresh admission',async()=>{
  const f=await fixture();try{
   await f.registry.activate('one',admitted(),()=>true);f.registry.open('two');f.registry.attachTab('other-tab','two');f.registry.authenticating('two','identity\u0000a',1);await f.registry.restore('two');
-  await f.safety.append({scope:'visible',path:'tasks/create',args:{},commandId:'pending',now:1000},saved,'identity\u0000a');
+  await f.journal.append({scope:'identity\u0000a',path:'tasks/create',args:{},idempotencyKey:'pending',createdAt:1000,nextAttemptAt:1000,attempts:0,state:'pending',patches:[],entityKeys:[]});
   const revoked=f.registry.quarantine('one',1);expect(()=>f.registry.resolveTab('tab')).toThrow('unavailable');expect(()=>f.registry.resolveTab('other-tab')).toThrow('unavailable');
-  await revoked;expect(await f.safety.count('identity\u0000a')).toBe(1);expect(await f.canonical.loadSession('identity\u0000a')).toBeUndefined();
+  await revoked;expect((await f.journal.summary('identity\u0000a')).count).toBe(1);expect(await f.canonical.loadSession('identity\u0000a')).toBeUndefined();
   f.registry.close('two');f.registry.open('two');f.registry.attachTab('other-tab','two');f.registry.authenticating('two','identity\u0000a',1);expect(await f.registry.restore('two')).toBe(false);
   await expect(f.registry.activate('one',admitted(),()=>true)).rejects.toMatchObject({code:'FENCED'});
-  f.registry.authenticating('one','identity\u0000a',2);await f.registry.activate('one',admitted('identity\u0000a',2),()=>true);expect(f.registry.resolveTab('tab').online).toBe(true);expect(await f.safety.count('identity\u0000a')).toBe(1);
+  f.registry.authenticating('one','identity\u0000a',2);await f.registry.activate('one',admitted('identity\u0000a',2),()=>true);expect(f.registry.resolveTab('tab').online).toBe(true);expect((await f.journal.summary('identity\u0000a')).count).toBe(1);
   await f.registry.quarantine('one',1);expect(f.registry.resolveTab('tab').online).toBe(true);
  }finally{f.close();}
 });
@@ -98,10 +102,4 @@ it('imports a fenced cached session before network admission without refreshing 
 });
 it('does not let cached migration revive revocation or overwrite a newer authoritative admission',async()=>{
  const f=await fixture();try{await f.safety.revokeSession('identity\u0000a');expect(await f.registry.importCached('one',saved)).toBe(false);expect(await f.canonical.loadSession('identity\u0000a')).toBeUndefined();await f.registry.activate('one',{...admitted(),lastOnlineAtMs:3000},()=>true);expect(await f.registry.importCached('one',saved)).toBe(false);expect((await f.safety.session('identity\u0000a'))?.lastOnlineAtMs).toBe(3000);expect((await f.canonical.loadSession('identity\u0000a'))?.lastOnlineAtMs).toBe(3000);}finally{f.close();}
-});
-
-it('shares correlated admission and revocation behavior with the bounded IndexedDB persistence adapter',async()=>{
- const {IndexedDBReplicaEngine}=await import('./indexeddb-replica-engine.js'),factory=new IDBFactory(),engine=new IndexedDBReplicaEngine({tasks:{key:'id',fields:{id:{}}}},'idb-session',factory,IDBKeyRange),safety=new SQLiteSafetyJournal('idb-session-safety',factory,IDBKeyRange);await engine.claim('owner');const registry=new SQLiteWorkerSessions({artifactHash:'artifact',offlineMaxAgeMs:5000,storage:engine,safety,async runOwner<T>(_bytes:number,run:()=>Promise<T>){return run();}});registry.open('one');registry.attachTab('tab','one');registry.authenticating('one','identity',1);
- try{await registry.activate('one',admitted('identity'),()=>true);expect(registry.resolveTab('tab').scope).toBe('visible');expect(await engine.loadSession('identity')).toEqual(saved);registry.disconnected('one');expect(registry.resolveTab('tab').online).toBe(false);await registry.quarantine('one',1);expect(await engine.loadSession('identity')).toBeUndefined();expect(()=>registry.resolveTab('tab')).toThrow('unavailable');registry.close('one');registry.open('one');registry.attachTab('tab','one');registry.authenticating('one','identity',1);expect(await registry.restore('one')).toBe(false);registry.authenticating('one','identity',2);await registry.activate('one',admitted('identity',2),()=>true);expect(registry.resolveTab('tab').online).toBe(true);expect(await safety.sessionRevoked('identity')).toBe(false);
- }finally{engine.close();safety.close();}
 });

@@ -1,7 +1,7 @@
 import type {LocalReplicaSession} from './local-replica.js';
 import type {SQLiteTransportSession} from './sqlite-transport-host.js';
 import type {SQLiteLocalReplicaStorage,SQLiteReplicaDatabase} from './sqlite-replica-storage.js';
-import type {SQLiteSafetyJournal} from './sqlite-safety-journal.js';
+import type {SQLiteSessionJournal} from './sqlite-session-journal.js';
 import {ByteLedger} from './byte-budget.js';
 import {fail,sqlitePayloadBytes} from './sqlite-admission.js';
 
@@ -10,7 +10,7 @@ type Connection={id:string;intentScope:string;transportGeneration:number;revisio
 export type WorkerSessionStorage={loadSession(scope:string):Promise<LocalReplicaSession|undefined>;saveSession(scope:string,session:LocalReplicaSession|undefined,options:{current():boolean;ifAbsent?:boolean}):Promise<void>};
 type Options={
  artifactHash:string;offlineMaxAgeMs:number|null;
- safety:Pick<SQLiteSafetyJournal,'session'|'sessionRevoked'|'saveSession'|'revokeSession'>;
+ safety:Pick<SQLiteSessionJournal,'session'|'sessionRevoked'|'saveSession'|'revokeSession'>;
  runOwner<T>(bytes:number,run:()=>Promise<T>):Promise<T>;
 } & ({storage:WorkerSessionStorage}|{database:SQLiteReplicaDatabase;canonical:Pick<SQLiteLocalReplicaStorage,'loadSession'|'saveSession'>;fence():Promise<unknown>});
 const maxConnections=8,maxTabs=64,maxSessionBytes=32768,maxBytes=maxConnections*(maxSessionBytes+2048)+maxTabs*512;
@@ -20,7 +20,7 @@ function key(value:string,max:number){if(typeof value!=='string'||!value||value.
 /** Trusted owner-only session registry. Application RPCs must never call its
  * admission methods or supply a visibility scope. A tab maps to an owner
  * connection; the correlated transport supplies identity and visibility.
- * Network waits and independent IDB durability stay outside the SQL FIFO. */
+ * Network waits stay outside the SQL FIFO. */
 export class SQLiteWorkerSessions {
  private readonly connections=new Map<string,Connection>();
  private readonly tabs=new Map<string,string>();

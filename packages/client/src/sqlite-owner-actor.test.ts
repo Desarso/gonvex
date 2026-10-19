@@ -1,5 +1,4 @@
 import {IDBFactory,IDBKeyRange} from 'fake-indexeddb';
-import {IndexedDBIntentLedger} from './indexeddb-intent-ledger.js';
 import {DatabaseSync} from 'node:sqlite';
 import {expect,it,vi} from 'vitest';
 import type {SQLiteReplicaDatabase} from './sqlite-replica-storage.js';
@@ -24,7 +23,7 @@ it('runs generated-program network waits outside the fenced SQL queue and preser
   expect((await request('clientCall',{method:'increment',id:'a'},'write-tab','write-a')).value).toEqual(writes[0].value);expect(changes.filter(change=>change.to==='write-tab'&&!change.reset)).toHaveLength(3);
   expect((await request('clientCall',{method:'void'})).value).toBeNull();release({network:'finished'});expect((await pending).value).toEqual({network:'finished'});
   await expect(context.runOwner(2097153,async()=>null)).rejects.toMatchObject({code:'BUSY'});
-  const replacement=new IndexedDBIntentLedger();expect((await replacement.claim('fallback-owner')).epoch).toBe(2);const forbidden=vi.fn(async()=>{throw Error('Old SQL callback must not run');});await expect(context.runOwner(0,forbidden)).rejects.toMatchObject({code:'FENCED'});expect(forbidden).not.toHaveBeenCalled();replacement.close();
+  sql.exec('UPDATE gv_storage_meta SET epoch=epoch+1');const forbidden=vi.fn(async()=>{throw Error('Old SQL callback must not run');});await expect(context.runOwner(0,forbidden)).rejects.toMatchObject({code:'FENCED'});expect(forbidden).not.toHaveBeenCalled();
   await dispose();await dispose();expect(close).toHaveBeenCalledOnce();await expect(context.runOwner(0,async()=>null)).rejects.toMatchObject({code:'FENCED'});
  }finally{await dispose();interval.mockRestore();vi.unstubAllGlobals();delete (globalThis as any).onmessage;sql.close();}
 });

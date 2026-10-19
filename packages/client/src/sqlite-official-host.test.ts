@@ -1,7 +1,7 @@
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import type {Database} from '@sqlite.org/sqlite-wasm';
 import {initializePinnedSQLite} from '../test/sqlite-wasm-host.mjs';
-import { officialSQLiteDatabase, openOfficialSQLiteHost } from './sqlite-official-host.js';
+import { officialSQLiteDatabase, openOfficialSQLiteHost, openInitializedOfficialSQLiteHost } from './sqlite-official-host.js';
 import { sqliteSearchName, sqliteTableName, sqliteIdentifier as q } from './sqlite-typed-schema.js';
 import { SQLiteTypedReplicaEngine } from './sqlite-typed-engine.js';
 import { sqliteTypedReplicaStorage } from './sqlite-typed-row-layout.js';
@@ -367,4 +367,33 @@ it('opens and reopens a full generated schema without returning its signature ac
   await new SQLiteTypedReplicaEngine(host.database, schema).open('third');
   await host.database.runAsync('UPDATE gv_storage_meta SET schema=?', JSON.stringify({ format: 6, tables: {} }));
   await expect(new SQLiteTypedReplicaEngine(host.database, schema).open('incompatible')).rejects.toMatchObject({ code: 'SCHEMA_MISMATCH' });
+});
+
+it('uses the same real SQLite engine without OPFS and loses only memory data on reopen',async()=>{
+ vi.stubGlobal('navigator',{});
+ let host=await openInitializedOfficialSQLiteHost(sqlite3);
+ try {
+  expect(host.persistence).toBe('memory');
+  await host.database.execAsync('CREATE TABLE volatile(n); INSERT INTO volatile VALUES(1)');
+  expect(await host.database.getFirstAsync('SELECT n FROM volatile')).toEqual({n:1});host.close();
+  host=await openInitializedOfficialSQLiteHost(sqlite3);
+  expect(await host.database.getFirstAsync("SELECT name FROM sqlite_master WHERE name='volatile'")).toBeNull();
+ } finally {host.close();vi.unstubAllGlobals();}
+});
+it('selects memory on OPFS permission denial and surfaces quota or corruption',async()=>{
+ vi.stubGlobal('navigator',{storage:{getDirectory(){}}});
+ const install=vi.spyOn(sqlite3,'installOpfsSAHPoolVfs');
+ try {
+  install.mockRejectedValueOnce(new DOMException('Denied','NotAllowedError'));
+  const host=await openInitializedOfficialSQLiteHost(sqlite3);expect(host.persistence).toBe('memory');host.close();
+  install.mockRejectedValueOnce(new DOMException('Full','QuotaExceededError'));
+  await expect(openInitializedOfficialSQLiteHost(sqlite3)).rejects.toMatchObject({name:'QuotaExceededError'});
+  install.mockRejectedValueOnce(Error('corrupt pool'));
+  await expect(openInitializedOfficialSQLiteHost(sqlite3)).rejects.toThrow('corrupt pool');
+ } finally {install.mockRestore();vi.unstubAllGlobals();}
+});
+it('explains the per-site Lockdown exclusion when WebAssembly is disabled',async()=>{
+ vi.stubGlobal('postMessage',()=>{});vi.stubGlobal('WebAssembly',undefined);
+ try {await expect(openOfficialSQLiteHost()).rejects.toMatchObject({code:'UNSUPPORTED',message:expect.stringMatching(/Lockdown Mode.*this website/)});}
+ finally {vi.unstubAllGlobals();}
 });

@@ -19,7 +19,7 @@ import {SQLiteNativeFeed} from './sqlite-native-feed.js';
 import {ReplicaSetDigest} from './replica-set-digest.js';
 import {SQLiteReducerOwner} from './sqlite-reducer-owner.js';
 import {SQLiteReducerDelivery} from './sqlite-reducer-delivery.js';
-import {SQLiteSafetyJournal} from './sqlite-safety-journal.js';
+import {SQLiteSessionJournal} from './sqlite-session-journal.js';
 import {SQLiteLegacyBootstrap} from './sqlite-legacy-bootstrap.js';
 import type {LocalReplicaSession} from './local-replica.js';
 import {sqliteCollectionPagePlan} from './sqlite-collection-plan.js';
@@ -46,7 +46,7 @@ function text(value:unknown,max:number):asserts value is string{if(typeof value!
  * migration/fallback contract are complete. */
 export class SQLiteClientProgram implements SQLiteOwnerProgram {
  private readonly liveWindows:SQLiteLiveWindows;
- private readonly safety=new SQLiteSafetyJournal();private readonly sessions:SQLiteWorkerSessions;private readonly tokens:SQLiteWorkerTokens;
+ private readonly safety:SQLiteSessionJournal;private readonly sessions:SQLiteWorkerSessions;private readonly tokens:SQLiteWorkerTokens;
  private readonly reducer:SQLiteReducerOwner;private readonly windows:SQLiteWindowStore;
  private readonly references=new Map<string,FunctionReference>();private readonly connections=new Map<string,Connection>();private readonly tabs=new Map<string,string>();
  private readonly maintenance:SQLiteOwnerMaintenance;private readonly legacy:SQLiteLegacyBootstrap;
@@ -58,13 +58,12 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
   for(const ref of [...builtins,...binding.references]){if(this.references.size>=4096)fail('BUDGET','Native function catalog entry limit exceeded');text(ref.path,1024);if(this.references.has(ref.path))throw new TypeError('Duplicate generated native reference');this.references.set(ref.path,ref);}
   this.catalogBytes+=sqlitePayloadBytes(builtins,262144)+builtins.length*64;if(this.catalogBytes>2097152)fail('BUDGET','Native function catalog exceeds its metadata allowance');
   for(const path of binding.collections){const ref=this.references.get(path);if(ref?.delivery!=='replica'||!ref.replica)throw new TypeError('Generated native dependency is not a Replica Collection');}
+  this.safety=new SQLiteSessionJournal(owner);
   this.sessions=new SQLiteWorkerSessions({artifactHash:binding.artifactHash,offlineMaxAgeMs:binding.offlineMaxAgeMs,database:owner.database,canonical:owner.canonical,safety:this.safety,runOwner:owner.runOwner,fence:()=>owner.engine.verifyOwner()});
   this.windows=new SQLiteWindowStore(owner.database,()=>owner.engine.verifyOwner());this.liveWindows=new SQLiteLiveWindows(owner,binding.artifactHash);void owner.runOwner(0,()=>this.liveWindows.ready()).catch(()=>{});
   this.tokens=new SQLiteWorkerTokens({recipient:(id,key,exclude)=>[...(this.connections.get(id)?.tabs??[])].find(tab=>tab!==exclude&&this.tabs.get(tab)===id&&this.connections.get(id)?.identityKey===key),eligible:(tab,id,key)=>this.tabs.get(tab)===id&&this.connections.get(id)?.identityKey===key,notifyTab:tab=>owner.notifyTab(tab)});
-  this.reducer=new SQLiteReducerOwner(owner,{runtime:binding.runtime,artifactHash:binding.artifactHash,resolveTab:tab=>this.sessions.resolveTab(tab,true),context:scope=>this.context(scope),settledReply:(input,context)=>this.safety.settledReply(input,context.intentScope,{identity:context.identity,artifactHash:binding.artifactHash}),persistIntent:async(input,context,prepared)=>{
-   const saved=await owner.canonical.loadSession(context.intentScope);if(!saved||saved.directive.visibilityScope!==input.scope||saved.artifactHash!==binding.artifactHash)fail('FENCED','Intent recovery session changed');await this.safety.appendPrepared(input,prepared,saved,context.intentScope);
-  }});
-  this.legacy=new SQLiteLegacyBootstrap({owner,journal:this.reducer.journal,safety:this.safety,artifactHash:binding.artifactHash,replicaName:binding.legacyStorage?.replicaName??'gonvex-local-replica',outboxName:binding.legacyStorage?.outboxName??'gonvex-outbox'});
+  this.reducer=new SQLiteReducerOwner(owner,{runtime:binding.runtime,artifactHash:binding.artifactHash,resolveTab:tab=>this.sessions.resolveTab(tab,true),context:scope=>this.context(scope)});
+  this.legacy=new SQLiteLegacyBootstrap({owner,journal:this.reducer.journal,artifactHash:binding.artifactHash,replicaName:binding.legacyStorage?.replicaName??'gonvex-local-replica',outboxName:binding.legacyStorage?.outboxName??'gonvex-outbox'});
   this.ledger.register('native-function-catalog',()=>({name:'native-function-catalog',bytes:this.catalogBytes,entries:this.references.size,maxBytes:2097152,maxEntries:4096,evictions:0,refusals:0}));
   this.ledger.register('native-source-interests',()=>({name:'native-source-interests',bytes:[...this.connections.values()].reduce((sum,value)=>sum+value.sourceBytes,0),entries:[...this.connections.values()].reduce((sum,value)=>sum+value.sources.size,0),maxBytes:2097152,maxEntries:1024,evictions:0,refusals:0}));
   this.ledger.register('native-live-watches',()=>({name:'native-live-watches',bytes:[...this.connections.values()].reduce((sum,value)=>sum+value.liveBytes,0),entries:[...this.connections.values()].reduce((sum,value)=>sum+value.lives.size,0),maxBytes:524288,maxEntries:256,evictions:0,refusals:0}));
@@ -104,15 +103,16 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
  private recover(connection:Connection):Promise<void>{
   if(connection.recovered)return Promise.resolve();if(connection.recovering)return connection.recovering;
   const operation=(async()=>{
-   const admitted=this.admission(connection);if(!admitted)return;let after=0;
+   const admitted=this.admission(connection);if(!admitted)return;
    for(;;){
-    const page=await this.safety.page(admitted.intentScope,after,8);
-    for(const entry of page.entries){
-     const prepared=entry.prepared,legacy=entry.legacy;if(!prepared&&!legacy)fail('SCHEMA_MISMATCH','Pending command has no prepared recovery envelope');
-     await this.owner.runOwner(262144,()=>this.owner.database.withTransactionAsync(async()=>{const current=this.admission(connection);if(!current||current.scope!==admitted.scope||current.intentScope!==admitted.intentScope||current.generation!==admitted.generation)fail('FENCED','Recovery admission changed');if(prepared)await this.reducer.core.recover({...entry.invocation,scope:admitted.scope},prepared);else await this.reducer.core.recoverLegacy({...entry.invocation,scope:admitted.scope},legacy!);if(legacy?.state==='rejected'){const imported=await this.reducer.journal.find(admitted.intentScope,entry.invocation.commandId);if(imported){const prior=await this.owner.database.getFirstAsync<{status:string;intent_id:number}>('SELECT status,intent_id FROM gv_reducer_delivery_settlements WHERE scope=? AND command=?',admitted.intentScope,entry.invocation.commandId);if(prior&&(prior.status!=='rejected'||prior.intent_id!==imported.id))fail('INTENT_CONFLICT','Legacy rejection conflicts with authoritative settlement');await this.owner.database.runAsync("INSERT OR IGNORE INTO gv_reducer_delivery_settlements(scope,command,intent_id,status) VALUES(?,?,?,'rejected')",admitted.intentScope,entry.invocation.commandId,imported.id);}}const latest=this.admission(connection);if(!latest||latest.generation!==admitted.generation)fail('FENCED','Recovery admission changed');}),[admitted.scope]);
-    }
-    if(page.nextSequence===null)break;after=page.nextSequence;
-   }await this.reducer.rebase(admitted.scope);connection.recovered=true;
+    const count=await this.owner.runOwner(262144,async()=>{let count=0;await this.owner.database.withTransactionAsync(async()=>{
+     const current=this.admission(connection);if(!current||current.generation!==admitted.generation)fail('FENCED','Recovery admission changed');
+     const entries=await this.reducer.journal.unrecovered(admitted.intentScope);
+     for(const entry of entries)await this.reducer.core.recoverLegacy({scope:admitted.scope,path:entry.path,commandId:entry.idempotencyKey,args:entry.args as JsonValue,now:entry.localExecution?.now??entry.createdAt,...(entry.localExecution?.intentEntropy===undefined?{}:{intentEntropy:entry.localExecution.intentEntropy})},entry);
+     count=entries.length;
+    });return count;});if(!count)break;
+   }
+   await this.reducer.rebase(admitted.scope);connection.recovered=true;
   })();connection.recovering=operation;void operation.then(()=>{connection.recovering=undefined;},()=>{connection.recovering=undefined;});return operation;
  }
  private checkCaller(caller:SQLiteOwnerCaller,connection:Connection,generation?:string){
@@ -246,7 +246,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
      })();record.restoring=cutover;try{await cutover;record.migrationBlocked=undefined;}catch(error){record.migrationBlocked=error;throw error;}finally{if(record.restoring===cutover)record.restoring=undefined;}
     },binary:(frame:ArrayBuffer,generation:number)=>feed.binary(frame,generation),frame:(message:any,generation:number)=>feed.frame(message,generation),quarantined:(generation:number)=>{record.denied=true;record.rejections.length=0;record.supportCommands.length=0;for(const source of record.controls.values())if(source.ref.authorization!=='public'){record.controlBytes-=source.resultBytes;source.resultBytes=0;source.value=undefined;source.error='Session unavailable';source.version++;}feed.quarantined(generation);this.notify(record);},authenticated:()=>this.notify(record),authError:(message:string,details:{definitive:boolean;code?:string})=>{record.authError={id:crypto.randomUUID(),message:message.slice(0,512),...details,...(details.code?{code:details.code.slice(0,128)}:{})};this.notify(record);},supportCommand:(command:SupportCommand)=>{if(record.supportSequence>=Number.MAX_SAFE_INTEGER){record.failure={code:'FENCED',message:'Support notification sequence exhausted'};this.notify(record);return;}record.supportCommands.push({...command,sequence:++record.supportSequence});if(record.supportCommands.length>8)record.supportCommands.shift();this.notify(record);},developerCredential:(token:string)=>{record.developer={id:crypto.randomUUID(),token,acked:new Set()};this.notify(record);},disconnected:()=>{feed.disconnected();this.notify(record);},failed:(error:unknown)=>feed.failed(error)};
     const client=new SQLiteNativeTransport(url.href,{...auth,controlOnly,public:publicClient,reserve:bytes=>this.transport.reserve(bytes),releaseAuth:this.transportAuth.reserve(65536),clientContract:this.binding.clientContract,ownerHost:host,fetchToken:publicClient?undefined:request=>this.tokens.fetch(id,identityKey,request.forceRefreshToken)});
-    const delivery=new SQLiteReducerDelivery({owner:this.owner,reducer:this.reducer,safety:this.safety,admission:()=>{const current=this.admission(record);return current&&{scope:current.scope,intentScope:current.intentScope,generation:current.generation,online:current.online};},rejected:event=>{if(record.rejectionSequence>=Number.MAX_SAFE_INTEGER){record.failure={code:'FENCED',message:'Intent notification sequence exhausted'};return;}record.rejections.push({...event,error:event.error.slice(0,512),sequence:++record.rejectionSequence});if(record.rejections.length>8)record.rejections.shift();this.notify(record);},send:entry=>client.callOwnerReducer({...this.ref(entry.path,'reducer'),artifactHash:entry.localExecution?.artifactHash??this.binding.artifactHash,intentEntropy:entry.localExecution?.intentEntropy},entry.args as JsonValue,entry.idempotencyKey),updateRequired:message=>{record.failure={code:'SCHEMA_MISMATCH',message};this.notify(record);}});
+    const delivery=new SQLiteReducerDelivery({owner:this.owner,reducer:this.reducer,admission:()=>{const current=this.admission(record);return current&&{scope:current.scope,intentScope:current.intentScope,generation:current.generation,online:current.online};},rejected:event=>{if(record.rejectionSequence>=Number.MAX_SAFE_INTEGER){record.failure={code:'FENCED',message:'Intent notification sequence exhausted'};return;}record.rejections.push({...event,error:event.error.slice(0,512),sequence:++record.rejectionSequence});if(record.rejections.length>8)record.rejections.shift();this.notify(record);},send:entry=>client.callOwnerReducer({...this.ref(entry.path,'reducer'),artifactHash:entry.localExecution?.artifactHash??this.binding.artifactHash,intentEntropy:entry.localExecution?.intentEntropy},entry.args as JsonValue,entry.idempotencyKey),updateRequired:message=>{record.failure={code:'SCHEMA_MISMATCH',message};this.notify(record);}});
     record=connection={liveStream:crypto.randomUUID(),lives:new Map(),liveBytes:0,rejections:[],rejectionSequence:0,rejectionCursors:new Map(),supportCommands:[],supportSequence:0,supportCursors:new Map(),controlOnly,public:publicClient,authVersion:0,route:{project:auth.project,tenant:auth.tenant,identity:auth.identity},id,url:url.href,identityKey,client,feed,delivery,tabs:new Set(),sources:new Map(),sourceBytes:0,controls:new Map(),controlBytes:0};this.connections.set(id,record);
     if(!controlOnly&&!publicClient)for(const path of this.binding.collections){const ref=this.ref(path);if(ref.replica?.maxRows!==undefined&&ref.replica.maxRows>0&&ref.replica.maxRows<=1000)await this.addSource(record,ref,{},undefined,true);}
    }
@@ -319,5 +319,5 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
  }
  async diagnostics(){return {feeds:[...this.connections.values()].map(connection=>connection.feed.stats()),progress:await this.owner.database.getAllAsync('SELECT observed,applied,unclosed FROM gv_native_feed_progress LIMIT 8')};}
  budgets(){return this.ledger.snapshot();}
- close(){if(this.closed)return;this.closed=true;this.maintenance.close();for(const tab of [...this.tabs.keys()])this.detachTab(tab);this.tokens.close();this.legacy.close();this.safety.close();}
+ close(){if(this.closed)return;this.closed=true;this.maintenance.close();for(const tab of [...this.tabs.keys()])this.detachTab(tab);this.tokens.close();this.legacy.close();}
 }

@@ -26,8 +26,6 @@ export type {SQLiteReducerInvocation,SQLiteReducerReceipt,SQLiteReducerContext} 
 
 export {SQLiteReducerOwner} from './sqlite-reducer-owner.js';
 export type {SQLiteReducerOwnerOptions,SQLiteOwnerReducerCall,SQLiteTabAdmission} from './sqlite-reducer-owner.js';
-export {SQLiteSafetyJournal} from './sqlite-safety-journal.js';
-export type {SQLiteSafetyPage,SQLiteSafetyEntry} from './sqlite-safety-journal.js';
 export {SQLiteIndexedDBMigrationSource} from './sqlite-idb-migration-source.js';
 export type {SQLiteMigrationSourcePage} from './sqlite-idb-migration-source.js';
 export {SQLiteLegacyIntentMigration} from './sqlite-legacy-intent-migration.js';

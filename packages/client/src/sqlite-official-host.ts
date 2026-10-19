@@ -4,6 +4,7 @@ import { SQLiteBridgeBudgetError } from './wasm-sqlite-database.js';
 
 export type OfficialSQLiteHost = {
   database: SQLiteReplicaDatabase;
+  readonly persistence?: 'opfs' | 'memory';
   memoryBytes(): number;
   statementBytes(): number;
   memoryStats?(): {allocated:number;peakAllocated:number;schema:number;cache:number;statements:number};
@@ -20,6 +21,8 @@ export type OfficialSQLiteHost = {
 export async function openOfficialSQLiteHost(): Promise<OfficialSQLiteHost> {
   if (typeof globalThis.postMessage !== 'function' || 'document' in globalThis || 'onconnect' in globalThis)
     throw new Error('SQLite OPFS must open in the elected dedicated worker');
+  if (typeof WebAssembly !== 'object' || typeof WebAssembly.instantiate !== 'function')
+    throw Object.assign(new Error('This browser cannot run this app because WebAssembly is disabled. In Safari, open the page menu, choose Website Settings, and turn off Lockdown Mode for this website, then reload. On Mac, use Safari Settings > Websites > Lockdown Mode to exclude this website. You can also use a browser with WebAssembly enabled.'), {code:'UNSUPPORTED'});
   // Disable unused proxy VFS initialization and its helper workers. Configure
   // this before importing/initializing the pinned official module.
   (globalThis as typeof globalThis & { sqlite3ApiConfig?: unknown }).sqlite3ApiConfig = {
@@ -28,28 +31,39 @@ export async function openOfficialSQLiteHost(): Promise<OfficialSQLiteHost> {
   const { default: initialize } = await import('@gonvex/client/sqlite-module');
   const initializePinned: (options?:{INITIAL_MEMORY:number})=>ReturnType<typeof initialize> = initialize;
   const sqlite3 = await initializePinned({ INITIAL_MEMORY: 16 * 1024 * 1024 });
-  // On failed initialization preserve existing files and the unsent outbox.
-  const pool = await sqlite3.installOpfsSAHPoolVfs({ directory: '.gonvex-sqlite-v1', initialCapacity: 6, preserveOnInitFailure: true } as Parameters<typeof sqlite3.installOpfsSAHPoolVfs>[0]);
+  return openInitializedOfficialSQLiteHost(sqlite3);
+}
+
+/** Both modes use the pinned engine and the identical storage/query program.
+ * Only capability/permission refusal during pool installation selects memory.
+ * Corruption, quota and failures opening an existing DB must remain visible. */
+export async function openInitializedOfficialSQLiteHost(sqlite3: Sqlite3Static): Promise<OfficialSQLiteHost> {
+  let pool: Awaited<ReturnType<Sqlite3Static['installOpfsSAHPoolVfs']>> | undefined;
+  if (typeof navigator !== 'undefined' && typeof navigator.storage?.getDirectory === 'function') {
+    try {
+      pool = await sqlite3.installOpfsSAHPoolVfs({ directory: '.gonvex-sqlite-v1', initialCapacity: 6, preserveOnInitFailure: true } as Parameters<typeof sqlite3.installOpfsSAHPoolVfs>[0]);
+    } catch (error) {
+      const e=error as Error;
+      if (!['SecurityError','NotSupportedError','NotAllowedError'].includes(e.name) && !/OPFS.*(?:unavailable|not supported)|(?:unavailable|not supported).*OPFS/i.test(e.message)) throw error;
+    }
+  }
   let db: Database | undefined;
+  const persistence=pool?'opfs':'memory';
   try {
-    db = new pool.OpfsSAHPoolDb('/replica.sqlite');
-    // Capability discovery may prepare a statement and read the schema. Set
-    // single-owner WAL locking before constructing that bridge as well.
+    db = pool ? new pool.OpfsSAHPoolDb('/replica.sqlite') : new sqlite3.oo1.DB(':memory:');
     db.exec('PRAGMA locking_mode=EXCLUSIVE');
     const host = officialSQLiteDatabase(sqlite3, db);
-    // EXCLUSIVE must precede the very first database read for single-connection
-    // WAL without shared-memory methods. A mode mismatch is a startup failure.
     await host.database.execAsync(`PRAGMA locking_mode=EXCLUSIVE;
 PRAGMA page_size=4096; PRAGMA cache_size=-2048; PRAGMA mmap_size=0;
-PRAGMA temp_store=FILE; PRAGMA synchronous=FULL; PRAGMA journal_mode=WAL;
+PRAGMA temp_store=FILE; PRAGMA synchronous=FULL; PRAGMA journal_mode=${pool?'WAL':'MEMORY'};
 PRAGMA hard_heap_limit=33554432; PRAGMA wal_autocheckpoint=4096;
 PRAGMA recursive_triggers=ON; PRAGMA busy_timeout=3000;`);
-    for (const [pragma, expected] of [['locking_mode', 'exclusive'], ['journal_mode', 'wal'], ['synchronous', 2], ['page_size', 4096], ['cache_size', -2048], ['temp_store', 1], ['hard_heap_limit', 33554432], ['wal_autocheckpoint', 4096]] as const) {
+    for (const [pragma, expected] of [['locking_mode', 'exclusive'], ['journal_mode', pool?'wal':'memory'], ['synchronous', 2], ['page_size', 4096], ['cache_size', -2048], ['temp_store', 1], ['hard_heap_limit', 33554432], ['wal_autocheckpoint', 4096]] as const) {
       const row = await host.database.getFirstAsync<Record<string, unknown>>('PRAGMA ' + pragma);
       if (!row || Object.values(row)[0] !== expected) throw new Error('SQLite storage mode invariant failed: ' + pragma);
     }
-    return { ...host, close() { host.close(); pool.pauseVfs(); } };
-  } catch (error) { db?.close(); pool.pauseVfs(); throw error; }
+    return { ...host, persistence, close() { host.close(); pool?.pauseVfs(); } };
+  } catch (error) { db?.close(); pool?.pauseVfs(); throw error; }
 }
 
 /** Official oo1 bridge shared by the owner and real-WASM tests. Statements are

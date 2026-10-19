@@ -2,7 +2,6 @@ import {waitForSQLiteOwnerAdmission} from './sqlite-owner-transactions.js';
 import type {JsonValue} from '@gonvex/protocol';
 import type {SQLiteOwnerProgramContext} from './sqlite-owner-actor.js';
 import type {SQLiteReducerOwner} from './sqlite-reducer-owner.js';
-import type {SQLiteSafetyJournal} from './sqlite-safety-journal.js';
 import type {ReducerRejectionEvent} from './index.js';
 import type {ReducerOutboxEntry,OutboxErrorClass} from './outbox.js';
 import {outboxBackoffMs} from './outbox.js';
@@ -11,7 +10,7 @@ import {ByteLedger} from './byte-budget.js';
 import {fail,sqlitePayloadBytes} from './sqlite-admission.js';
 type Admission={scope:string;intentScope:string;generation:string;online:boolean};
 type Outcome={entry:ReducerOutboxEntry;accepted:true}|{entry:ReducerOutboxEntry;accepted:false;error:string;classification:OutboxErrorClass};
-type Options={owner:SQLiteOwnerProgramContext;reducer:SQLiteReducerOwner;safety:Pick<SQLiteSafetyJournal,'settle'>;
+type Options={owner:SQLiteOwnerProgramContext;reducer:SQLiteReducerOwner;
  admission():Admission|undefined;
  /** Resolves only after GClient's durable native terminal-watermark fence. */
  send(entry:ReducerOutboxEntry):Promise<JsonValue>;
@@ -19,12 +18,12 @@ type Options={owner:SQLiteOwnerProgramContext;reducer:SQLiteReducerOwner;safety:
  updateRequired?(message:string):void;
  now?():number;maxAttempts?:number;maxBackoffMs?:number;
 };
-const schema=`CREATE TABLE IF NOT EXISTS gv_reducer_delivery_settlements(scope TEXT NOT NULL,command TEXT NOT NULL,intent_id INTEGER NOT NULL,status TEXT NOT NULL,safety_settled INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(scope,command)) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS gv_reducer_delivery_safety ON gv_reducer_delivery_settlements(scope,safety_settled,command);`;
+const schema=`CREATE TABLE IF NOT EXISTS gv_reducer_delivery_settlements(scope TEXT NOT NULL,command TEXT NOT NULL,intent_id INTEGER NOT NULL,status TEXT NOT NULL,PRIMARY KEY(scope,command)) WITHOUT ROWID;
+`;
 /** Owner-only delivery of durable commands. At most eight bounded intents wait
  * on the network outside the SQL FIFO. Accepted/rejected settlement and derived
- * prediction rebase commit together; independent safety retirement follows that
- * commit and can resume after a crash or a failed IndexedDB transaction. */
+ * prediction rebase commit together in the replica database. Unknown network
+ * outcomes retry the same durable command after recovery. */
 export class SQLiteReducerDelivery {
  private readonly initialized:Promise<void>;private active?:Promise<{sent:number;nextDelay:number|null}>;
  private readonly ledger=new ByteLedger(327680);private readonly unregister:()=>void;
@@ -40,10 +39,6 @@ export class SQLiteReducerDelivery {
  private check(expected:Admission){const current=this.admission();if(!current||current.scope!==expected.scope||current.intentScope!==expected.intentScope||current.generation!==expected.generation)fail('FENCED','Intent delivery admission changed');}
  private now(){const now=(this.options.now??Date.now)();if(!Number.isSafeInteger(now)||now<0)throw new TypeError('Invalid intent delivery clock');return now;}
  private run<T>(expected:Admission,run:()=>Promise<T>){return waitForSQLiteOwnerAdmission(()=>this.options.owner.runOwner(262144,async()=>{await this.initialized;this.check(expected);return run();}),()=>this.check(expected));}
- private async flushSafety(expected:Admission){
-  const rows=await this.run(expected,()=>this.options.owner.database.getAllAsync<{command:string;status:'accepted'|'rejected';error:string|null}>("SELECT d.command,d.status,CASE WHEN d.status='rejected' THEN substr(json_extract(j.value,'$.lastError'),1,512) END error FROM gv_reducer_delivery_settlements d LEFT JOIN gv_reducer_journal j ON j.scope=d.scope AND j.id=d.intent_id WHERE d.scope=? AND d.safety_settled=0 ORDER BY d.command LIMIT 8",expected.intentScope));
-  for(const row of rows){this.check(expected);await this.options.safety.settle(expected.intentScope,row.command,{status:row.status,...(row.error?{error:row.error}:{})});await this.run(expected,()=>this.options.owner.database.runAsync('UPDATE gv_reducer_delivery_settlements SET safety_settled=1 WHERE scope=? AND command=?',expected.intentScope,row.command));}
- }
  drainOnce():Promise<{sent:number;nextDelay:number|null}>{
   if(this.active)return this.active;
   const operation=this.drain();this.active=operation;void operation.then(()=>{this.active=undefined;this.retainedBytes=0;this.entries=0;},()=>{this.active=undefined;this.recovered=undefined;this.retainedBytes=0;this.entries=0;});return operation;
@@ -52,7 +47,6 @@ export class SQLiteReducerDelivery {
   const expected=this.admission();if(!expected)return {sent:0,nextDelay:null};
   const recovery=JSON.stringify([expected.intentScope,expected.generation]);
   if(this.recovered!==recovery){await this.run(expected,()=>this.options.reducer.journal.recoverInflight(expected.intentScope));this.recovered=recovery;}
-  await this.flushSafety(expected);
   const entries=await this.run(expected,()=>this.options.reducer.journal.claim(expected.intentScope,this.now(),8));this.retainedBytes=sqlitePayloadBytes(entries,262144);this.entries=entries.length;
   const outcomes:Outcome[]=await Promise.all(entries.map(async entry=>{
    try{this.check(expected);const result=await this.options.send(entry);sqlitePayloadBytes(result,131072);return {entry,accepted:true as const};}
@@ -79,12 +73,10 @@ export class SQLiteReducerDelivery {
    await this.options.reducer.journal.acknowledge(expected.intentScope,accepted);this.check(expected);
   });
   for(const outcome of outcomes)if(!outcome.accepted&&outcome.classification==='rejected')try{this.options.rejected?.({reducerId:outcome.entry.idempotencyKey,path:outcome.entry.path,error:outcome.error,errorClass:'rejected'});}catch{/* Observers cannot roll back an authoritative settlement. */}
-  await this.flushSafety(expected);
   const update=outcomes.find(outcome=>!outcome.accepted&&outcome.classification==='update_required');
   if(update&&!update.accepted){this.updateBlocked=true;this.options.updateRequired?.(update.error);return {sent:entries.length,nextDelay:null};}
   const next=await this.run(expected,()=>this.options.owner.database.getFirstAsync<{next:number|null}>("SELECT min(next_attempt) next FROM gv_reducer_journal WHERE scope=? AND state='pending'",expected.intentScope));
-  const safety=await this.run(expected,()=>this.options.owner.database.getFirstAsync('SELECT 1 FROM gv_reducer_delivery_settlements WHERE scope=? AND safety_settled=0 LIMIT 1',expected.intentScope));
-  return {sent:entries.length,nextDelay:safety?0:next?.next==null?null:Math.max(0,next.next-this.now())};
+  return {sent:entries.length,nextDelay:next?.next==null?null:Math.max(0,next.next-this.now())};
  }
  stats(){return {entries:this.entries,maxEntries:8,bytes:this.retainedBytes+this.entries*2048+(this.recovered?.length??0)*2+1024,maxBytes:this.ledger.maxBytes,active:!!this.active};}
  close(){this.closed=true;this.unregister();}

@@ -1,13 +1,12 @@
 import type {LocalReplicaSession} from './local-replica.js';
 import type {SQLiteOwnerProgramContext} from './sqlite-owner-actor.js';
 import type {SQLiteIntentJournal} from './sqlite-intent-journal.js';
-import type {SQLiteSafetyJournal} from './sqlite-safety-journal.js';
 import {SQLiteIndexedDBMigrationSource} from './sqlite-idb-migration-source.js';
 import {SQLiteLegacyIntentMigration} from './sqlite-legacy-intent-migration.js';
 import {SQLiteLegacyRowMigration} from './sqlite-legacy-row-migration.js';
 import {decodedJSONBytes,fail} from './sqlite-admission.js';
 
-type Options={owner:SQLiteOwnerProgramContext;journal:SQLiteIntentJournal;safety:SQLiteSafetyJournal;artifactHash:string;replicaName:string;outboxName:string;factory?:IDBFactory;ranges?:typeof IDBKeyRange};
+type Options={owner:SQLiteOwnerProgramContext;journal:SQLiteIntentJournal;artifactHash:string;replicaName:string;outboxName:string;factory?:IDBFactory;ranges?:typeof IDBKeyRange};
 /** Owner-only legacy cutover. Finish prepare before admitting this identity's
  * native reads or writes. Replica copying runs one bounded step per background
  * turn, independently of the first visible page. Source databases stay intact. */
@@ -17,7 +16,7 @@ export class SQLiteLegacyBootstrap {
  private readonly rows:SQLiteLegacyRowMigration;
  private closed=false;
  constructor(private readonly options:Options){
-  this.intents=new SQLiteLegacyIntentMigration({database:options.owner.database,canonical:options.owner.canonical,journal:options.journal,safety:options.safety,runOwner:options.owner.runOwner,fence:()=>options.owner.engine.verifyOwner()});
+  this.intents=new SQLiteLegacyIntentMigration({database:options.owner.database,canonical:options.owner.canonical,journal:options.journal,runOwner:options.owner.runOwner,fence:()=>options.owner.engine.verifyOwner()});
   this.rows=new SQLiteLegacyRowMigration(options.owner,options.artifactHash);
  }
  private open(){
@@ -43,7 +42,6 @@ export class SQLiteLegacyBootstrap {
   if(this.closed)fail('FENCED','Legacy bootstrap is closed');
   if(source.outbox?.stores().includes('entries')){const input={source:source.outbox,store:'entries',identityScope,session:selected,current};if(!await this.intents.hasCutover(input))await this.intents.migrate(input);}
   else{
-   await this.options.safety.seedSession(identityScope,selected);
    await this.options.owner.runOwner(32768,()=>this.options.owner.database.withTransactionAsync(async()=>{
     await this.options.owner.engine.verifyOwner();check();const saved=await this.options.owner.canonical.loadSession(identityScope);
     if(saved&&JSON.stringify(saved)!==JSON.stringify(selected))fail('FENCED','A newer native admission won legacy migration');

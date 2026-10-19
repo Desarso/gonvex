@@ -1,5 +1,4 @@
 import {OriginStorageWorkerLease} from './origin-storage-worker-lease.js';
-import {IndexedDBIntentLedger} from './indexeddb-intent-ledger.js';
 import type {ByteBudgetSnapshot} from './byte-budget.js';
 import {SQLitePendingSnapshotReader} from './sqlite-pending-snapshot-reader.js';
 import {SQLiteOwnerTabs} from './sqlite-owner-tabs.js';
@@ -50,9 +49,8 @@ function sampleStartupMemory(stage:string){if(host&&startupMemory.length<3)start
 let canonical:SQLiteCanonicalDispatcher|undefined;
 let nativeReader:SQLiteNativeReplicaReader|undefined,pendingReader:SQLitePendingSnapshotReader|undefined;
 let snapshots:SQLiteSnapshotPages|undefined,activation:SQLiteSnapshotActivator|undefined;
-let originFenceMs=0,originFenceCalls=0;
 let lane = Promise.resolve(), operations = 0, bytes = 0,queuedOperations=0,queuedBytes=0,closed=false;
-let program:SQLiteOwnerProgram|undefined,ownerToken='';const workerLease=new OriginStorageWorkerLease();const originFence=binding.createProgram?new IndexedDBIntentLedger():undefined;let originEpoch:number|undefined;
+let program:SQLiteOwnerProgram|undefined,ownerToken='';const workerLease=new OriginStorageWorkerLease();let originEpoch:number|undefined;
 const wireGeneration=(generation:{epoch:number;sequence:number})=>({...generation,epoch:originEpoch??generation.epoch});
 const ports = new Map<string, { port: MessagePort; seen: number; token: string }>();
 const tabs=new SQLiteOwnerTabs((to,change)=>{
@@ -75,10 +73,9 @@ function schedule<T>(size:number,run:()=>Promise<T>):Promise<T>{
  if(closed)return Promise.reject(Object.assign(Error('Storage owner is closed'),{code:'FENCED'}));
  if(!Number.isSafeInteger(size)||size<0||size>2097152)return Promise.reject(Object.assign(Error('Storage owner operation exceeds queue budget'),{code:'BUSY'}));
  if(queuedOperations>=64||queuedBytes+size>2097152)return Promise.reject(new SQLiteOwnerQueueBusyError());
- // The worker lifetime lock prevents a different adapter from claiming while
- // SQL can still commit. Validate the durable epoch before each disk phase;
- // pumping an IDB write transaction through every SQL phase doubles import IO.
- queuedOperations++;queuedBytes+=size;const operation=lane.then(async()=>{if(closed)throw Object.assign(Error('Storage owner is closed'),{code:'FENCED'});if(ownerToken&&!workerLease.stats().held)throw Object.assign(Error('Storage worker lease was released'),{code:'FENCED'});if(originFence&&originEpoch!==undefined){const start=performance.now();await originFence.generation();originFenceMs+=performance.now()-start;originFenceCalls++;}return run();});
+ // The worker lifetime lock protects the connection through every disk phase.
+ // SQLite's durable owner epoch fences reads and writes without a second DB.
+ queuedOperations++;queuedBytes+=size;const operation=lane.then(async()=>{if(closed)throw Object.assign(Error('Storage owner is closed'),{code:'FENCED'});if(ownerToken&&!workerLease.stats().held)throw Object.assign(Error('Storage worker lease was released'),{code:'FENCED'});if(engine)await engine.verifyOwner();return run();});
  lane=operation.then(()=>undefined,()=>undefined);void operation.then(()=>{queuedOperations--;queuedBytes-=size;},()=>{queuedOperations--;queuedBytes-=size;});return operation;
 }
 async function execute(op: string, args: any, requestID:string) {
@@ -87,12 +84,12 @@ async function execute(op: string, args: any, requestID:string) {
     try {
       if(typeof args.owner!=='string'||!args.owner||args.owner.length>128)throw new TypeError('Invalid owner token');ownerToken=args.owner;
       if(args.schemaVersion!==undefined&&args.schemaVersion!==binding.schemaVersion)throw Object.assign(Error('Generated owner schema differs from browser binding'),{code:'SCHEMA_MISMATCH'});
-      await workerLease.acquire();globalThis.postMessage({type:'progress',stage:'claiming-origin',sentAt:Date.now()});if(originFence)originEpoch=(await originFence.claimAdapter(args.owner,'sqlite')).epoch;globalThis.postMessage({type:'progress',stage:'claimed-origin',sentAt:Date.now()});
+      await workerLease.acquire();globalThis.postMessage({type:'progress',stage:'claiming-origin',sentAt:Date.now()});globalThis.postMessage({type:'progress',stage:'claimed-origin',sentAt:Date.now()});
       const initialize=async()=>{
       globalThis.postMessage({type:'progress',stage:'opening-sqlite',sentAt:Date.now()});host = await openOfficialSQLiteHost();globalThis.postMessage({type:'progress',stage:'opened-sqlite',sentAt:Date.now()});sampleStartupMemory('host');
       const database=sqliteOwnerTransactions(host.database);
       engine = new SQLiteTypedReplicaEngine(database, binding.schema??args.schema as SQLiteTypedSchema, undefined, { onProgress: () => globalThis.postMessage({ type: 'progress', sentAt: Date.now() }) });
-      const epoch = await engine.open(args.owner);sampleStartupMemory('engine');globalThis.postMessage({type:'progress',stage:'opened-engine',sentAt:Date.now()});
+      const epoch = await engine.open(args.owner);originEpoch=epoch;sampleStartupMemory('engine');globalThis.postMessage({type:'progress',stage:'opened-engine',sentAt:Date.now()});
       const storage=sqliteTypedReplicaStorage(database,engine.schema);
       canonical=new SQLiteCanonicalDispatcher(database,storage,engine);
       snapshots=new SQLiteSnapshotPages(database,()=>engine!.verifyOwner(),engine.schema);
@@ -133,7 +130,7 @@ async function execute(op: string, args: any, requestID:string) {
     case 'canonicalRead': return canonical!.read(args);
     case 'canonicalGeneration': return canonical!.generation(scope(args.scope),args.expected);
     case 'ping': return { ready: true };
-    case 'stats': return { ...engine.stats(),originEpoch,originFenceMs,originFenceCalls,workerLease:workerLease.stats(),originFence:originFence?{bytes:1024,entries:1,maxBytes:1024,maxEntries:1}:null,startupMemory,...snapshots!.stats(),ingressNativeHash:Number(!!host.database.ingressNativeHash), wasmBytes: host.memoryBytes(), clients: ports.size,queuedOperations,queuedBytes,requests:operations,requestBytes:bytes,delivery:tabs.stats(),nativeProfile:host.takeProfile?.(),pendingPages:pendingReader?.budgets()??[],program:program?.budgets?.()??[],programDiagnostics:await program?.diagnostics?.() };
+    case 'stats': return { ...engine.stats(),originEpoch,persistence:host.persistence,workerLease:workerLease.stats(),startupMemory,...snapshots!.stats(),ingressNativeHash:Number(!!host.database.ingressNativeHash), wasmBytes: host.memoryBytes(), clients: ports.size,queuedOperations,queuedBytes,requests:operations,requestBytes:bytes,delivery:tabs.stats(),nativeProfile:host.takeProfile?.(),pendingPages:pendingReader?.budgets()??[],program:program?.budgets?.()??[],programDiagnostics:await program?.diagnostics?.() };
     case 'integrity': return engine.integrity();
     case 'page': return engine.page(scope(args.scope), args.plan as SQLitePagePlan);
     case 'viewPage': return engine.viewPage(scope(args.scope), args.signature, args.plan as SQLitePagePlan, args.offset);
@@ -206,7 +203,7 @@ function admit(data: any, peer?: { port: MessagePort; token: string }, tab?: str
       if(!program)throw Object.assign(Error('This owner has no generated client program'),{code:'UNSUPPORTED'});
       const caller=peer?tab:data.tabID;
       if(typeof caller!=='string'||!caller||caller.length>128)throw new TypeError('Invalid owner client tab');
-      await originFence?.generation();const value=await program.call(data.args,{tabID:caller,requestID:data.requestID??data.id,signal:tabs.register(caller)});await originFence?.generation();reply(data.id,value,undefined,peer,tab);
+      if(engine)await engine.verifyOwner();const value=await program.call(data.args,{tabID:caller,requestID:data.requestID??data.id,signal:tabs.register(caller)});if(engine)await engine.verifyOwner();reply(data.id,value,undefined,peer,tab);
     }).catch(error=>reportFailure(data.id,error,peer,tab))
     : schedule(size,run).catch(error=>reportFailure(data.id,error,peer,tab));
   void work.then(()=>{operations--;bytes-=size;},()=>{operations--;bytes-=size;});
@@ -242,7 +239,7 @@ let disposal:Promise<void>|undefined;
 return ()=>disposal??=(async()=>{
  closed=true;workerLease.cancelPending();clearInterval(timer);globalThis.onmessage=null;
  tabs.close();for(const peer of ports.values())peer.port.close();ports.clear();
- try{await program?.close?.();await lane;}finally{pendingReader?.close();host?.close();originFence?.close();await workerLease.close();installed=false;}
+ try{await program?.close?.();await lane;}finally{pendingReader?.close();host?.close();await workerLease.close();installed=false;}
 })();
 
 }

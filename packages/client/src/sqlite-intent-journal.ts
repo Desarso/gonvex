@@ -93,6 +93,12 @@ export class SQLiteIntentJournal {
   sqlitePayloadBytes(entries,262144);return entries;
  }
  private limits(limit:number){if(!Number.isSafeInteger(limit)||limit<1||limit>32)throw new RangeError('Intent page limit must be 1..32');}
+ /** Legacy cutover rows lack invocation receipts until an admitted owner can
+  * bind their original command to the current visibility scope. Metadata is
+  * selected before bounded bodies; native receipts skip this work on reload. */
+ async unrecovered(ownerScope:string):Promise<ReducerOutboxEntry[]>{
+  scope(ownerScope);await this.ready();return this.select(`SELECT j.id,length(CAST(j.value AS BLOB))*2+128 bytes FROM gv_reducer_journal j WHERE j.scope=? AND NOT EXISTS(SELECT 1 FROM gv_reducer_invocations i WHERE i.scope=j.scope AND i.command_id=j.intent_key) ORDER BY j.id LIMIT 8`,[ownerScope]);
+ }
  async page(ownerScope:string,after=0,limit=16):Promise<SQLiteIntentPage>{
   scope(ownerScope);this.limits(limit);if(!Number.isSafeInteger(after)||after<0)throw new TypeError('Invalid intent page cursor');await this.ready();let result!:SQLiteIntentPage;
   await this.db.withTransactionAsync(async()=>{await this.fence();const entries=await this.select('SELECT id,length(CAST(value AS BLOB))*2+128 bytes FROM gv_reducer_journal WHERE scope=? AND id>? ORDER BY id LIMIT ?',[ownerScope,after,limit]);

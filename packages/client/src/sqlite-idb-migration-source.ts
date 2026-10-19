@@ -12,7 +12,7 @@ export class SQLiteIndexedDBMigrationSource {
  private constructor(private readonly db:IDBDatabase,readonly sourceVersion:number,readonly fenceVersion:number,private readonly ranges:typeof IDBKeyRange){db.onversionchange=()=>this.close();}
  static async open(name:string,factory:IDBFactory=globalThis.indexedDB,ranges:typeof IDBKeyRange=globalThis.IDBKeyRange):Promise<SQLiteIndexedDBMigrationSource|undefined>{
   if(typeof name!=='string'||!name||name.length>256)throw new TypeError('Invalid migration source name');
-  if(!factory||!ranges)throw Object.assign(Error('IndexedDB migration source is unavailable'),{code:'UNSUPPORTED'});
+  if(!factory||!ranges)return undefined;
   const existing=await new Promise<IDBDatabase|undefined>((resolve,reject)=>{
    const opening=factory.open(name);let absent=false;
    opening.onupgradeneeded=event=>{if(event.oldVersion===0){absent=true;opening.transaction!.abort();}};
