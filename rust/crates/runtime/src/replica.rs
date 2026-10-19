@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use futures_util::{Stream, StreamExt};
 use gonvex_postgres::{TenantSession, TenantTransaction};
 use gonvex_protocol::replica_digest::ReplicaSetDigest;
 use gonvex_protocol::{
@@ -360,7 +361,8 @@ impl Runtime {
         } else {
             visibility::resolve(&mut transaction, session, plan, clock.revision).await?
         };
-        let rows = query_rows(&mut transaction, definition, plan, &resolved, args).await?;
+        let (rows, truncated) =
+            query_rows(&mut transaction, definition, plan, &resolved, args).await?;
         let resume_changes = if let Some(after) =
             after.filter(|after| *after >= clock.retained_revision && *after < clock.revision)
         {
@@ -371,7 +373,6 @@ impl Runtime {
             Vec::new()
         };
         transaction.commit().await?;
-        let (rows, truncated) = apply_budgets(rows, definition).await?;
         let mut by_key = BTreeMap::new();
         let mut hashes = BTreeMap::new();
         for (index, row) in rows.iter().enumerate() {
@@ -749,7 +750,7 @@ async fn query_rows(
     plan: &VisibilityPlan,
     resolved: &ResolvedVisibility,
     args: &Value,
-) -> Result<Vec<Value>, ReplicaError> {
+) -> Result<(Vec<Value>, bool), ReplicaError> {
     let args = args.as_object().ok_or(ReplicaError::InvalidArguments)?;
     let mut parameters = Vec::new();
     let visibility = visibility::compile_predicate(plan, resolved, "r", &mut parameters)?;
@@ -803,32 +804,30 @@ async fn query_rows(
     for parameter in &parameters {
         query = bind_value(query, parameter).map_err(ReplicaError::InvalidIdentifier)?;
     }
-    let rows = query.fetch_all(&mut **transaction.transaction()).await?;
-    let mut values = Vec::with_capacity(rows.len());
-    for (index, row) in rows.into_iter().enumerate() {
-        if index % 32 == 0 {
-            tokio::task::yield_now().await;
-        }
+    // Decode and admit one row at a time. SQL still uses maxRows + 1;
+    // a byte-limited source must not first allocate its entire SQL result.
+    let rows = query.fetch(&mut **transaction.transaction()).map(|row| {
+        let row = row?;
         let raw: String = row.get(0);
-        values.push(
-            serde_json::from_str(&raw)
-                .map_err(|error| ReplicaError::InvalidIdentifier(error.to_string()))?,
-        );
-    }
-    Ok(values)
+        serde_json::from_str(&raw)
+            .map_err(|error| ReplicaError::InvalidIdentifier(error.to_string()))
+    });
+    collect_snapshot_rows(rows, definition).await
 }
 
-async fn apply_budgets(
-    rows: Vec<Value>,
+async fn collect_snapshot_rows(
+    rows: impl Stream<Item = Result<Value, ReplicaError>>,
     definition: &ReplicaCollectionDefinition,
 ) -> Result<(Vec<Value>, bool), ReplicaError> {
+    futures_util::pin_mut!(rows);
     let mut kept = Vec::new();
     let mut bytes = 0i64;
     let mut seen = BTreeSet::new();
-    for (index, row) in rows.into_iter().enumerate() {
-        if index % 32 == 0 {
+    while let Some(row) = rows.next().await {
+        if kept.len() % 32 == 0 {
             tokio::task::yield_now().await;
         }
+        let row = row?;
         let key = row_key(&row, &definition.key)?;
         if !seen.insert(key.clone()) {
             return Err(ReplicaError::DuplicateKey(key));
@@ -1609,6 +1608,61 @@ fn hex_digest(value: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn snapshot_stream_stops_after_row_or_byte_budget_lookahead() {
+        let rows = vec![
+            serde_json::json!({"id":"a"}),
+            serde_json::json!({"id":"b"}),
+            serde_json::json!({"id":"c"}),
+        ];
+        for (max_rows, max_bytes) in [
+            (2, 0),
+            (0, serde_json::to_vec(&rows[0]).unwrap().len() as i64 * 2),
+        ] {
+            let definition: ReplicaCollectionDefinition = serde_json::from_value(serde_json::json!({
+                "table":"tasks", "key":"id", "columns":["id"], "maxRows":max_rows, "maxBytes":max_bytes
+            })).unwrap();
+            let source = futures_util::stream::iter(rows.clone().into_iter().map(Ok)).chain(
+                futures_util::stream::once(async { panic!("read beyond budget lookahead") }),
+            );
+            let (kept, truncated) = collect_snapshot_rows(source, &definition).await.unwrap();
+            assert_eq!(kept, rows[..2]);
+            assert!(truncated);
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_stream_distinguishes_exact_boundary_from_truncation_and_errors() {
+        let row = serde_json::json!({"id":"a", "text":"café 東京"});
+        let definition: ReplicaCollectionDefinition = serde_json::from_value(serde_json::json!({
+            "table":"tasks", "key":"id", "columns":["id","text"], "maxRows":1,
+            "maxBytes":serde_json::to_vec(&row).unwrap().len()
+        }))
+        .unwrap();
+        let (kept, truncated) =
+            collect_snapshot_rows(futures_util::stream::iter([Ok(row.clone())]), &definition)
+                .await
+                .unwrap();
+        assert_eq!(kept, vec![row.clone()]);
+        assert!(!truncated);
+        assert!(matches!(
+            collect_snapshot_rows(
+                futures_util::stream::iter([Ok(row.clone()), Ok(row)]),
+                &definition
+            )
+            .await,
+            Err(ReplicaError::DuplicateKey(_))
+        ));
+        assert!(matches!(
+            collect_snapshot_rows(
+                futures_util::stream::iter([Err(ReplicaError::InvalidArguments)]),
+                &definition
+            )
+            .await,
+            Err(ReplicaError::InvalidArguments)
+        ));
+    }
+
     fn paged_fixture(rows: Vec<Value>) -> ServerMessage {
         let hashes = rows
             .iter()
@@ -1847,7 +1901,9 @@ mod tests {
         }
         assert_eq!(rows, 20_000);
         assert!(maximum < before / 50);
-        println!("20k JSON wire: monolithic={before} bytes, max_page={maximum} bytes, total_pages={total} bytes, pages={count}; peak single encoded String capacity: before={before_buffer} bytes, after={maximum_buffer} bytes; resident/staged rows and transport queues excluded");
+        println!(
+            "20k JSON wire: monolithic={before} bytes, max_page={maximum} bytes, total_pages={total} bytes, pages={count}; peak single encoded String capacity: before={before_buffer} bytes, after={maximum_buffer} bytes; resident/staged rows and transport queues excluded"
+        );
     }
 
     #[test]
