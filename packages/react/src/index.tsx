@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { usePaintExternalStore as useSyncExternalStore } from "./paint-external-store.js";
 import { GonvexClient, GonvexClientError, control, entityStatusFromIntents, type ConnectionState, type EntityIntentStatus, type LocalExecutionFallbackEvent, type OutboxIntent, type ResetLocalReplicaOptions, type ResetLocalReplicaResult, type ControlImpersonation, type ControlInvitationAcceptance, type ControlInvitationListItem, type ControlTenant, type ControlToken, type FunctionReference, type GonvexExternalAuthAdapter, type LiveQueryResult, type ReplicaCollectionSubscriptionState, type ReplicaRow } from "@gonvex/client";
 import type { JsonValue } from "@gonvex/protocol";
+import { SQLiteBrowserClient } from "@gonvex/client/sqlite/browser";
 
 export { GonvexClientError, type ConnectionState, type EntityIntentStatus, type LocalExecutionFallbackEvent, type OutboxIntent, type ResetLocalReplicaOptions, type ResetLocalReplicaResult } from "@gonvex/client";
 export { createFirebaseAuthAdapter, type GonvexExternalAuthAdapter, type GonvexExternalIdentityHint, type GonvexFirebaseAuthAdapterOptions } from "@gonvex/client";
@@ -9,8 +10,8 @@ export { createFirebaseAuthAdapter, type GonvexExternalAuthAdapter, type GonvexE
 const GonvexContext = createContext<GonvexClient | null>(null);
 const GonvexAuthContext = createContext<AuthState>({ isLoading: false, isAuthenticated: true });
 
-export function GonvexProvider(props: { client: GonvexClient; children: ReactNode }) {
-  return <GonvexContext.Provider value={props.client}>{props.children}</GonvexContext.Provider>;
+export function GonvexProvider(props: { client: GonvexClient | SQLiteBrowserClient; children: ReactNode }) {
+  return <GonvexContext.Provider value={props.client as GonvexClient}>{props.children}</GonvexContext.Provider>;
 }
 
 export type AuthState = {
@@ -1959,6 +1960,7 @@ export function useLiveQueryState<T extends ReplicaRow = ReplicaRow>(
   args: JsonValue | "skip" = {},
 ): LiveQueryResult<T> {
   const client = useGonvexClient();
+  if (client instanceof SQLiteBrowserClient) return useNativeLiveQueryState<T>(client, ref, args);
   const argsKey = JSON.stringify(args);
   const signature = args === "skip" ? "" : client.replicaSignature(ref, args);
   useEffect(() => {
@@ -1999,6 +2001,17 @@ export function useLiveQueryState<T extends ReplicaRow = ReplicaRow>(
     getSnapshot,
     () => emptyLiveQuery as LiveQueryResult<T>,
   );
+}
+
+function useNativeLiveQueryState<T extends ReplicaRow>(client:SQLiteBrowserClient,ref:FunctionReference,args:JsonValue|"skip"):LiveQueryResult<T>{
+ const argsKey=JSON.stringify(args),watch=useMemo(()=>args==="skip"?undefined:client.watchLiveQuery<JsonValue>(ref,args,{deferStart:true}),[client,ref.kind,ref.path,argsKey]);
+ const value=useSyncExternalStore(useCallback(notify=>watch?.onUpdate(notify)??(()=>undefined),[watch]),useCallback(()=>watch?.localLiveQueryResult(),[watch]),()=>undefined);
+ if(value===undefined)return emptyLiveQuery as LiveQueryResult<T>;
+ let parent:JsonValue=value;const path=ref.live?.resultPath??[];for(const segment of path.slice(0,-1)){if(!parent||typeof parent!=="object"||Array.isArray(parent))return emptyLiveQuery as LiveQueryResult<T>;parent=parent[segment]!;}
+ const record=parent&&typeof parent==="object"&&!Array.isArray(parent)?parent as Record<string,JsonValue>:undefined,selected=path.length?record?.[path.at(-1)!]:value;
+ if(!Array.isArray(selected))return emptyLiveQuery as LiveQueryResult<T>;
+ const rows=selected as T[];
+ return {rows,ids:rows.map(row=>String(row.id??row._id??"")),...(typeof record?.total==="number"?{total:record.total}:{}),...(typeof record?.offset==="number"?{offset:record.offset}:{}),...(typeof record?.limit==="number"?{limit:record.limit}:{}),source:"server",completeness:"complete",freshness:client.connectionState().isWebSocketConnected?"current":"offline"};
 }
 
 /** Execute a read-only Query once. Queries never subscribe or rerun. */

@@ -101,6 +101,24 @@ it('creates inert bounded React watches and releases their page/source with the 
  const f=fixture(),args={workspace:'original'},watch=f.client.watchReplica({path:'tasks/all'},args,{deferStart:true});args.workspace='mutated';const empty=watch.snapshot();expect(watch.snapshot()).toBe(empty);expect(f.calls).toEqual([]);expect(f.client.budgets().find(value=>value.name==='browser-watch-metadata')?.entries).toBe(0);
  const stop=watch.subscribe(()=>{});await watch.page();expect(f.calls.find(call=>call.input.method==='watchReplica')?.input.args).toEqual({workspace:'original'});stop();expect(watch.snapshot()).toBe(empty);await vi.waitFor(()=>expect(f.calls.filter(call=>call.input.method==='unwatchReplica')).toHaveLength(1));expect(f.client.budgets().find(value=>value.name==='browser-row-pages')?.bytes).toBe(0);const again=watch.subscribe(()=>{});await watch.page();again();watch.close();
 });
+it('presents only a bounded compatibility collection page and marks larger sources incomplete',async()=>{
+ const f=fixture(),watch=f.client.watchReplica({path:'tasks/all'},{},{deferStart:true}),updates:unknown[]=[];
+ f.handler=async input=>input.method==='replicaPage'?{generation:{epoch:1,sequence:2},rows:[{id:'a',value:{id:'a'}}],nextOffset:1,window:{generation:'one',total:100000,header:{source:'server',completeness:'complete'}}}:undefined;
+ const stop=watch.onUpdate(()=>updates.push(watch.localReplicaState()));
+ await vi.waitFor(()=>expect(watch.localReplicaState()?.rows).toEqual([{id:'a'}]));
+ expect(watch.localReplicaState()).toMatchObject({total:100000,truncated:true,completeness:'partial',isUpToDate:false});
+ expect(f.calls.find(call=>call.input.method==='replicaPage')?.input.limit).toBe(128);
+ stop();watch.close();expect(updates.length).toBeGreaterThan(0);
+});
 it('routes separately leased live views through bounded canonical and pending window pages',async()=>{
  const f=fixture(),ref={kind:'query',path:'tasks/grid',delivery:'live' as const,live:{entity:'tasks',key:'id',plan:{} as any}};f.handler=async input=>{if(input.method==='watchLive')return {signature:'live'};if(input.method==='livePage')return {generation:{epoch:1,sequence:1},rows:[{id:'a',value:{id:'a'}}]};if(input.method==='livePendingPage')return {generation:'pending',complete:false,serverVerified:false,rows:[{id:'a',value:{id:'a'}}]};if(input.method==='unwatchLive')return null;};const one=f.client.watchLiveWindow(ref,{},{view:'grid'}),two=f.client.watchLiveWindow(ref,{},{view:'preview'});const pending=await one.pendingPage({limit:10});expect(pending?.complete).toBe(false);await two.page({limit:10});expect(one.snapshot().page).toBe(pending);expect(f.calls.filter(call=>call.input.method==='watchLive')).toHaveLength(2);expect(f.calls.some(call=>call.input.method==='watchReplica')).toBe(false);one.close();two.close();await vi.waitFor(()=>expect(f.calls.filter(call=>call.input.method==='unwatchLive')).toHaveLength(2));
+});
+it('rebuilds a structured live result from two fenced bounded pages',async()=>{
+ const f=fixture(),ref={kind:'query',path:'tasks/grid',delivery:'live' as const,live:{entity:'tasks',key:'id',resultPath:['page'],plan:{} as any}};
+ f.handler=async input=>{if(input.method==='watchLive')return {signature:'live'};if(input.method==='livePage')return {generation:{epoch:1,sequence:1},window:{generation:'window',total:129,header:{resultSkeleton:{page:[],total:100000,limit:250},resultPath:['page']}},offset:input.offset??0,nextOffset:input.offset?null:128,rows:input.offset?[{id:'tail',value:{id:'tail'}}]:Array.from({length:128},(_,i)=>({id:String(i),value:{id:String(i)}}))};if(input.method==='unwatchLive')return null;};
+ const watch=f.client.watchLiveQuery<{page:Array<{id:string}>;total:number}>(ref,{}, {deferStart:true});const stop=watch.onUpdate(()=>{});
+ await vi.waitFor(()=>expect(watch.localLiveQueryResult()?.page).toHaveLength(129));
+ expect(watch.localLiveQueryResult()?.total).toBe(100000);expect(watch.localLiveQueryResult()?.page[0]).toEqual({id:'0'});expect(watch.localLiveQueryResult()?.page.at(-1)).toEqual({id:'tail'});
+ expect(f.calls.filter(call=>call.input.method==='livePage').map(call=>call.input.limit)).toEqual([128,128]);
+ stop();watch.close();
 });
