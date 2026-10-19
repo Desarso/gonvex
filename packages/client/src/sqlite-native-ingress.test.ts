@@ -130,3 +130,25 @@ it('shares ingress admission across connections and releases reservations on can
   const third=new SQLiteNativeIngress({...test.options,reserve:bytes=>budget.reserve(bytes)});try{await expect(third.accept(wire(255))).rejects.toThrow('malformed frame');expect(budget.stats()).toMatchObject({bytes:0,entries:0});}finally{third.close();}
  }finally{first.close();second.close();test.sql.close();}
 });
+
+it('coalesces separately prepared sources after all their gates resolve, without returning credit before commit',async()=>{
+ const f=fixture(),ingress=new SQLiteNativeIngress(f.options);
+ try{
+  const work=Array.from({length:8},(_,n)=>ingress.accept(wire(n),Promise.resolve()));
+  await Promise.all(work);expect(f.commits).toBe(1);expect(f.acks).toHaveLength(8);
+  expect(f.sql.prepare('SELECT count(*) n FROM frames').get()).toEqual({n:8});
+ }finally{ingress.close();f.sql.close();}
+});
+
+it('keeps an unresolved or rejected later source gate behind already admitted durable frames',async()=>{
+ for(const rejected of [false,true]){
+  const f=fixture(),ingress=new SQLiteNativeIngress(f.options);let release!:()=>void;
+  const gate=new Promise<void>((yes,no)=>{release=()=>rejected?no(Error('later source refused')):yes();});
+  try{
+   const first=ingress.accept(wire(0),Promise.resolve()),later=ingress.accept(wire(1),gate),settled=Promise.allSettled([later]);
+   await first;expect(f.acks).toHaveLength(1);expect(f.sql.prepare('SELECT count(*) n FROM frames').get()).toEqual({n:1});
+   release();expect((await settled)[0].status).toBe(rejected?'rejected':'fulfilled');
+   expect(f.acks).toHaveLength(rejected?1:2);expect(f.sql.prepare('SELECT count(*) n FROM frames').get()).toEqual({n:rejected?1:2});
+  }finally{release();ingress.close();f.sql.close();}
+ }
+});

@@ -4,7 +4,7 @@ import {SQLiteTaskYield} from './sqlite-task-yield.js';
 import type {SQLiteReplicaDatabase} from './sqlite-replica-storage.js';
 import type {SQLiteSnapshotPages,SQLiteSnapshotReceipt} from './sqlite-snapshot-pages.js';
 
-type Pending={bytes:Uint8Array;releaseReservation?:()=>void;gate:Promise<void>;done:Promise<SQLiteSnapshotReceipt>;resolve(value:SQLiteSnapshotReceipt):void;reject(error:unknown):void};
+type Pending={bytes:Uint8Array;releaseReservation?:()=>void;gate:Promise<void>;gateReady:boolean;done:Promise<SQLiteSnapshotReceipt>;resolve(value:SQLiteSnapshotReceipt):void;reject(error:unknown):void};
 type Options={
  database:SQLiteReplicaDatabase;
  snapshots:Pick<SQLiteSnapshotPages,'appendEncodedReceipt'>&Partial<Pick<SQLiteSnapshotPages,'ready'>>;
@@ -60,14 +60,19 @@ export class SQLiteNativeIngress {
   try{releaseReservation=this.options.reserve?.(bytes.byteLength+metadataBytes);bytes=copyOwnedSQLiteBytes(buffer);}catch(error){releaseReservation?.();return Promise.reject(error);}
   this.entries++;this.wireBytes+=bytes.byteLength;
   let resolve!:(value:SQLiteSnapshotReceipt)=>void,reject!:(error:unknown)=>void;
-  const result=new Promise<SQLiteSnapshotReceipt>((yes,no)=>{resolve=yes;reject=no;});this.pending.push({bytes,releaseReservation,gate,done:result,resolve,reject});
+  const result=new Promise<SQLiteSnapshotReceipt>((yes,no)=>{resolve=yes;reject=no;});
+  const entry:Pending={bytes,releaseReservation,gate,gateReady:false,done:result,resolve,reject};
+  // Readiness is local to the existing bounded queue entry. A rejected gate
+  // is observed now and rejected through its frame when that entry is drained.
+  void gate.then(()=>{entry.gateReady=true;},()=>{});this.pending.push(entry);
   if(!this.draining){this.draining=true;void this.drain();}
   if(this.pending.length===maxFrames||this.wireBytes===maxWireBytes)this.releaseBatch?.();
   return result;
  }
  /** Capture exactly the binary events preceding a text control frame. Later
   * binary events receive that control's promise as their gate. Waiting happens
-  * outside the SQL FIFO, and distinct gates never share a transaction. */
+  * outside the SQL FIFO. Unresolved gates remain transaction barriers; independently
+  * prepared sources may share the same durable batch. */
  flush():Promise<void>{
   if(this.disposed)return Promise.reject(closed());this.releaseBatch?.();
   return Promise.all([...this.active,...this.pending].map(entry=>entry.done)).then(()=>{});
@@ -97,10 +102,14 @@ export class SQLiteNativeIngress {
      const finish=()=>{clearTimeout(timer);this.releaseBatch=undefined;resolve();};
      this.releaseBatch=finish;
     });
-    const gate=this.pending[0]?.gate;if(!gate)continue;let end=1;while(end<this.pending.length&&this.pending[end]!.gate===gate)end++;
-    const batch=this.pending.splice(0,end);this.active=batch;
+    const gate=this.pending[0]?.gate;if(!gate)continue;
+    const batch=this.pending.splice(0,1);this.active=batch;
     try{
      await this.waitGate(gate);
+     // A later Ready/delta/watermark gate cannot resolve before these frames
+     // commit. Only already prepared sources can join this bounded prefix.
+     let end=0;while(end<this.pending.length&&this.pending[end]!.gateReady)end++;
+     batch.push(...this.pending.splice(0,end));
      const receipts=await this.options.runOwner(async()=>{
       if(this.disposed)throw closed();
       await this.options.snapshots.ready?.();

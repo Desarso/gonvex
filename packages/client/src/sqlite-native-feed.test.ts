@@ -359,3 +359,22 @@ it('prepares a clean snapshot incarnation in one fenced owner transaction before
  expect((await f.canonical.loadEntityRows('visible','tasks',['a','b'])).map(entry=>entry.row)).toEqual(rows);
  expect(await f.engine.integrity()).toBe('ok');
 });
+
+it('prepares an independent source while earlier binary ingress waits outside SQL, then commits both before credit',async()=>{
+ const {SQLiteTaskYield}=await import('./sqlite-task-yield.js');
+ const f=await fixture();await f.start();await vi.waitFor(()=>expect(f.feed.pendingSource('source')).toBeDefined());
+ let release!:()=>void;const held=new Promise<void>(resolve=>{release=resolve;});
+ vi.spyOn(SQLiteTaskYield.prototype,'yield').mockImplementation(()=>held);
+ try{
+  await f.append(rows,0,true);
+  f.feed.register({id:'second',signature:'second-window',entity:'tasks',key:'id',path:'tasks/second'});
+  f.feed.frame({type:'replica.snapshotStart',id:'second',snapshotId:'second-base',scope:'tenant',visibilityScope:'visible',cursor:cursor(10),key:'id',digest:await digest(),path:'tasks/second'},1);
+  await vi.waitFor(()=>expect(f.feed.pendingSource('second')).toMatchObject({snapshot:'second-base'}));
+  expect(f.sends).toEqual([]);expect(await f.canonical.loadEntityRows('visible','tasks',['a','b'])).toEqual([]);
+  f.feed.binary(new TextEncoder().encode(JSON.stringify({type:'replica.snapshotEncodedPage',id:'second',snapshotId:'second-base',scope:'tenant',visibilityScope:'visible',cursor:cursor(10),key:'id',sequence:0,last:true,canonicalRows:rows.map(stable),digest:await digest(),path:'tasks/second'})).buffer,1);
+  release();await f.ready();f.feed.frame({type:'replica.ready',id:'second',cursor:cursor(10),digest:await digest()},1);f.feed.frame({type:'replica.watermark',revision:10},1);
+  await f.feed.assertReadable();expect(f.failures).toEqual([]);expect(f.sends).toHaveLength(2);
+  expect((await f.canonical.loadEntityRows('visible','tasks',['a','b'])).map(entry=>entry.row)).toEqual(rows);
+  expect(await f.engine.integrity()).toBe('ok');
+ }finally{release();}
+});
