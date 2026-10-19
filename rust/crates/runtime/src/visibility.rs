@@ -390,7 +390,14 @@ pub fn compile_predicate(
     row_alias: &str,
     parameters: &mut Vec<Value>,
 ) -> Result<String, VisibilityError> {
-    compile_expression(&plan.predicate, plan, resolved, row_alias, parameters)
+    compile_expression(
+        &plan.predicate,
+        plan,
+        resolved,
+        row_alias,
+        parameters,
+        &mut None,
+    )
 }
 
 pub fn row_matches(plan: &VisibilityPlan, resolved: &ResolvedVisibility, row: &Value) -> bool {
@@ -534,7 +541,15 @@ fn compile_expression(
     resolved: &ResolvedVisibility,
     row_alias: &str,
     parameters: &mut Vec<Value>,
+    account_parameter: &mut Option<usize>,
 ) -> Result<String, VisibilityError> {
+    let account_argument = |parameters: &mut Vec<Value>, slot: &mut Option<usize>| {
+        let index = *slot.get_or_insert_with(|| {
+            parameters.push(Value::String(resolved.direct["account.id"].clone()));
+            parameters.len()
+        });
+        format!("${index}")
+    };
     let argument = |parameters: &mut Vec<Value>, value: Value| {
         parameters.push(value);
         format!("${}", parameters.len())
@@ -542,10 +557,7 @@ fn compile_expression(
     Ok(match expression.operator.as_str() {
         "public" => "TRUE".to_owned(),
         "permission" => {
-            let account = argument(
-                parameters,
-                Value::String(resolved.direct["account.id"].clone()),
-            );
+            let account = account_argument(parameters, account_parameter);
             let permission = argument(
                 parameters,
                 Value::String(
@@ -562,10 +574,7 @@ fn compile_expression(
             )
         }
         "role" => {
-            let account = argument(
-                parameters,
-                Value::String(resolved.direct["account.id"].clone()),
-            );
+            let account = account_argument(parameters, account_parameter);
             let role = argument(
                 parameters,
                 Value::String(
@@ -608,7 +617,14 @@ fn compile_expression(
             for child in &expression.children {
                 children.push(format!(
                     "({})",
-                    compile_expression(child, plan, resolved, row_alias, parameters)?
+                    compile_expression(
+                        child,
+                        plan,
+                        resolved,
+                        row_alias,
+                        parameters,
+                        account_parameter
+                    )?
                 ));
             }
             let joined = children.join(if expression.operator == "and" {
@@ -625,7 +641,8 @@ fn compile_expression(
                 plan,
                 resolved,
                 row_alias,
-                parameters
+                parameters,
+                account_parameter
             )?
         ),
         _ => "FALSE".to_owned(),
@@ -1194,5 +1211,32 @@ mod tests {
             "update",
             &["displayName".to_owned()],
         ));
+    }
+    #[test]
+    fn nested_member_checks_share_only_the_account_context_binding() {
+        let plan = dependency_plan(serde_json::json!({"operator":"or","children":[
+            {"operator":"role","value":"admin"},
+            {"operator":"not","children":[{"operator":"role","value":"owner"}]},
+            {"operator":"and","children":[{"operator":"permission","value":"read"},{"operator":"permission","value":"write"}]}
+        ]}));
+        let mut member = dependency_member("admin");
+        member.direct.insert("account.id".into(), "admin".into());
+        let mut parameters = vec![serde_json::json!("prefix")];
+        let sql = compile_predicate(&plan, &member, "r", &mut parameters).unwrap();
+        assert_eq!(
+            parameters,
+            vec![
+                serde_json::json!("prefix"),
+                serde_json::json!("admin"),
+                serde_json::json!("admin"),
+                serde_json::json!("owner"),
+                serde_json::json!("read"),
+                serde_json::json!("write")
+            ]
+        );
+        assert_eq!(sql.matches("_gonvex_member.account_id = $2").count(), 4);
+        assert_eq!(sql.matches("_gonvex_member.status = 'active'").count(), 4);
+        assert!(sql.contains("_gonvex_member.role = $3"));
+        assert!(sql.contains("permissions ->> $5::text"));
     }
 }
