@@ -220,6 +220,61 @@ Raw data:
 
 Overall verdict: **not merge-ready**. Chromium passes. Firefox passes its gate but shows a cold-paint regression. WebKit is blocked and incomplete.
 
+## Startup fix and re-validation, 2026-10-19
+
+**Startup changes**
+
+The 2026-10-19 diagnosis found that worker `init` waited for `localSessionReady`, which hydrates the whole local scope, before the UI could register its visible watch. On Firefox at 50k rows that wait was 2.6–3.3 s. Two commits change the startup path:
+
+- `0a85044`:
+  - Init now answers immediately.
+  - Session transitions reach the UI through the existing `session` event.
+  - A failed restore sends `startupError`, which falls back to legacy.
+  - The UI keeps a session event that races ahead of the init reply.
+  - Host `close` now releases stores, receipts and ownership in `finally`.
+- `dc69e75`:
+  - The restore's first visibility-scope activation reached the UI after init and superseded RPCs already in flight. WebKit's parity fixture failed on this with "Account or visibility changed while awaiting engine RPC" when running `0a85044`.
+  - Only that restore-phase activation is now marked. The UI skips the invalidation for it when its command scope is unchanged.
+
+**Engine tests on `dc69e75`: 68/68 pass.** Each new test fails against the code it guards:
+- the race test without the session guard;
+- the early-init test with the original host;
+- the in-flight reducer test without the restore marker, which reproduces the exact WebKit error.
+
+Client and React typechecks, the client build, and the bundle guard (default asset byte-identical, SHA-256 `f31f43b0…`) pass.
+
+**Benchmark setup**
+
+The workload is unchanged: 50k rows, 5 warmup pairs and 20 measured pairs, sequential admission, `START_LOAD_LIMIT=.35`, `LOAD_LIMIT=.5`. Each browser runs alone in a capped scope (3 GB, 3 CPUs, nice, idle IO) on the shared second build slot. Ratios are worker ÷ legacy, paired, with 95% confidence intervals.
+
+**Round 4: `0a85044` (superseded by `dc69e75`, kept for the record)**
+
+| Browser | Pairs | Cold wall | 500-intent drain wall | Result |
+| --- | ---: | --- | --- | --- |
+| Chromium 149 | 20/20 | 1.070 [1.043, 1.079] | 0.819 [0.758, 0.929] | Gates pass |
+| Firefox 151 | 20/20 | 1.109 [1.051, 1.422] | 0.938 [0.912, 0.953] | Drain gate passes; cold paint still slower |
+| WebKit 26.5 | 0/20 | — | — | **FAIL**: the parity fixture hit "Account or visibility changed while awaiting engine RPC". This was the regression fixed in `dc69e75`. |
+
+**Round 5: `dc69e75` (current code)**
+
+| Browser | Pairs | Cold wall | 500-intent drain wall | Result |
+| --- | ---: | --- | --- | --- |
+| Chromium 149 | **2/20** | 1.049 (n=1) | 0.749 (n=1) | **INCOMPLETE** |
+| Firefox 151 | 20/20 | **1.237 [1.113, 1.758]**; p95 5,539 → 8,603 ms | 0.981 [0.953, **1.015**] | **Drain gate FAIL**; cold paint regression persists |
+| WebKit 26.5 | 0/20 | — | — | **BLOCKED**: `QuotaExceededError` at 50k rows (existing `*lookupKeys` storage layout); then `Fixture timed out` |
+
+Chromium aborted with `EngineRpcTimeout: listIntents` (20 s) during the pair-1 worker drain. The 1-minute load reached 10.36, above the cutoff of 8. The harness treats any workload error as fatal rather than a load exclusion, so no Chromium verdict exists for this head.
+
+Correctness fixtures pass wherever they ran: denial, crash/retry, the 32-command mid-batch crash, reconnect, and two-tab fallback (Firefox).
+
+**Verdict: not merge-ready.**
+
+- The startup change narrows the Firefox cold-paint gap in some runs (1.109 in round 4) but does not remove it (1.237 in round 5). Firefox's drain improvement is not significant on `dc69e75`.
+- WebKit cannot run the 50k fixture in either mode.
+- Chromium needs a complete 20-pair run on `dc69e75`.
+
+No workload, threshold or assertion was changed, and every failed run is kept: `round4-validation-*.json` and `round5-validation-*.json`.
+
 ## Files and follow-up
 
 - Client: package subpath exports; `auth-scope.ts`, `client-error.ts`; compile-time engine metadata in `index.ts`/`outbox.ts`; `engine/` proxy, host, worker, RPC, patches, receipts, connection/admission hooks, read/close helpers, and focused tests. The default `local-replica.ts` and `browser-upgrades.ts` runtime changes from Round 1 were removed.

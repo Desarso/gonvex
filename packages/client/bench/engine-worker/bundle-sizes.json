@@ -28,13 +28,13 @@
   "engine": [
     {
       "file": "engine.js",
-      "bytes": 16321,
-      "gzip": 5339
+      "bytes": 16367,
+      "gzip": 5352
     },
     {
       "file": "worker.js",
       "bytes": 2933,
-      "gzip": 1379
+      "gzip": 1380
     },
     {
       "file": "import-wrapper-RUY2XTU7.js",
@@ -42,14 +42,14 @@
       "gzip": 205
     },
     {
-      "file": "host-IPJJ32TQ.js",
+      "file": "host-KR4EAQVX.js",
       "bytes": 121,
       "gzip": 106
     },
     {
-      "file": "chunk-5OWLIMXU.js",
-      "bytes": 34206,
-      "gzip": 10857
+      "file": "chunk-NETGQP4Q.js",
+      "bytes": 34273,
+      "gzip": 10891
     },
     {
       "file": "chunk-3RLCFRCZ.js",
