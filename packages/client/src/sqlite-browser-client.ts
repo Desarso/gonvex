@@ -27,7 +27,7 @@ export type SQLiteCollectionPageResult=SQLiteTypedPage&{generation:string};
 export type SQLiteLocalQueryPage=(SQLiteTypedPage&{supported:true;complete:boolean;generation:string})|{supported:false;reason:string;generation:string;rows?:never};
 type Page=SQLiteLocalQueryPage|SQLitePendingLivePage|SQLiteNativeWindowResult|SQLitePendingSnapshotPage|SQLiteNativeEntityResult|SQLiteCollectionPageResult|null;
 type WatchSnapshot={page:Page|undefined;stale:boolean;version:number};
-type Watch={startupPublications?:number;bootPageKey?:string;kind:'replica'|'live';state:WatchSnapshot;retiring?:Promise<void>;key:string;remoteKey:string;lease:string;path:string;args:JsonValue;bytes:number;refs:number;source?:{id?:string;signature:string};bound:number;opening?:Promise<void>;listeners:Set<()=>void>;unpin?:()=>void;stale:boolean;version:number;invalidation:number;pendingDisplay?:boolean;compatibleFirstPage?:boolean};
+type Watch={previewID?:string;startupPublications?:number;bootPageKey?:string;kind:'replica'|'live';state:WatchSnapshot;retiring?:Promise<void>;key:string;remoteKey:string;lease:string;path:string;args:JsonValue;bytes:number;refs:number;source?:{id?:string;signature:string};bound:number;opening?:Promise<void>;listeners:Set<()=>void>;unpin?:()=>void;stale:boolean;version:number;invalidation:number;pendingDisplay?:boolean;compatibleFirstPage?:boolean};
 export type SQLiteBrowserOptions={broker:Broker;artifactHash?:string;onUpdateRequired?:GonvexClientOptions['onUpdateRequired'];onLocalExecutionFallback?:GonvexClientOptions['onLocalExecutionFallback'];errorReporting?:GonvexClientOptions['errorReporting'];role?:'control';public?:{tenant:string};auth?:Auth;fetchToken?:GonvexClientAuth['fetchToken']};
 export type SQLiteWatchOptions={view?:JsonValue;deferStart?:boolean};
 export type SQLiteReplicaPageOptions={offset?:number;limit?:number;generation?:string;expected?:SQLiteNativeWindowResult['generation']};
@@ -122,12 +122,17 @@ export class SQLiteBrowserClient {
   this.ledger.register('browser-auth',()=>({name:'browser-auth',bytes:sqlitePayloadBytes(this.auth,65536),entries:1,maxBytes:65536,maxEntries:1,evictions:0,refusals:0}));
   this.ledger.register('browser-controls',()=>({name:'browser-controls',bytes:this.controlsValue?sqlitePayloadBytes(this.controlsValue,65536):0,entries:Number(!!this.controlsValue),maxBytes:65536,maxEntries:1,evictions:0,refusals:0}));
   this.ledger.register('browser-token-requests',()=>({name:'browser-token-requests',bytes:this.tokenRequests.size*40960,entries:this.tokenRequests.size,maxBytes:327680,maxEntries:8,evictions:0,refusals:0}));
-  this.releaseChanges=options.broker.subscribeChanges((scope)=>{
+  this.releaseChanges=options.broker.subscribeChanges((scope,_sequence,_reset,preview)=>{
    const epoch=options.broker.stats().ownerEpoch;if(epoch!==undefined&&this.epoch!==undefined&&epoch!==this.epoch)this.invalidate(false);if(epoch!==undefined)this.epoch=epoch;
    if(scope==='@preview'){
-    // This is not a committed invalidation. Pending display consumers can poll
-    // their bounded memory slot without refreshing entities or auth controls.
-    for(const watch of this.watches.values())if(watch.pendingDisplay){watch.invalidation++;watch.stale=true;this.notify(watch);}
+    if(preview&&preview.admissionKey===this.admissionKey){
+     for(const watch of this.watches.values())if(watch.kind==='replica'&&watch.source?.signature===preview.signature){
+      if(preview.page){const retained=this.pages.get(watch.key);if(retained&&'window'in retained&&retained.window.header.completeness==='complete'&&!watch.previewID)continue;watch.previewID=preview.id;watch.pendingDisplay=true;this.store(watch,preview.page,false,true);}
+      else if(watch.previewID===preview.id){watch.previewID=undefined;watch.unpin?.();watch.unpin=undefined;this.pages.delete(watch.key);watch.stale=true;this.notify(watch);}
+     }
+    }else if(!preview){
+     for(const watch of this.watches.values())if(watch.pendingDisplay){watch.invalidation++;watch.stale=true;this.notify(watch);}
+    }
     return;
    }
    if(scope==='@pending'){
@@ -269,14 +274,15 @@ export class SQLiteBrowserClient {
  }
  private store(watch:Watch,value:Page,compatibleFirstPage=false,stale=false){
   if(!watch.refs)fail('FENCED','Native watch closed during read');
+  if(value&&'window'in value)watch.previewID=undefined;
   if(value&&'window'in value){const prior=this.pages.get(watch.key);if(prior&&'window'in prior&&prior.window.header.entity===value.window.header.entity&&prior.rows.length===value.rows.length){for(let index=0;index<value.rows.length;index++){const slot=value.rows[index],old=prior.rows[index];if(slot.id===old.id&&sameJSON(slot.value,old.value)){slot.id=old.id;slot.value=old.value;}}}}
   const bytes=sqlitePayloadBytes({key:watch.key,value},262144);watch.unpin?.();watch.unpin=undefined;
   try{this.pages.put(watch.key,value,bytes);}finally{watch.unpin=this.pages.pin(watch.key);}
   if(!this.lastVisible.restored(value))watch.bootPageKey=undefined;watch.compatibleFirstPage=compatibleFirstPage;watch.stale=stale;
-  // At most two first-publication marks per admitted watch, capped by the
+  // At most three first-publication marks per admitted watch, capped by the
   // 192-watch registry even across later watch recreation. No row values.
-  const boot=this.lastVisible.restored(value),publication=boot?1:2;
-  if(value&&!((watch.startupPublications??0)&publication)&&this.startupPublications<384){watch.startupPublications=(watch.startupPublications??0)|publication;this.startupPublications++;try{performance.measure('gonvex-startup:page-published',{start:performance.now(),end:performance.now(),detail:{path:watch.path,origin:boot?'sealed':'sqlite',rows:value.rows?.length}});}catch{/* Timing never affects publication. */}}
+  const boot=this.lastVisible.restored(value),precommit=!!watch.previewID&&!!value&&'source'in value&&value.source==='pending',publication=precommit?4:boot?1:2;
+  if(value&&!((watch.startupPublications??0)&publication)&&this.startupPublications<384){watch.startupPublications=(watch.startupPublications??0)|publication;this.startupPublications++;try{performance.measure('gonvex-startup:page-published',{start:performance.now(),end:performance.now(),detail:{path:watch.path,origin:precommit?'precommit':boot?'sealed':'sqlite',rows:value.rows?.length}});}catch{/* Timing never affects publication. */}}
   this.notify(watch);if(compatibleFirstPage&&!this.lastVisible.restored(value))this.scheduleDisplay();
  }
  private deferredBounded(ref:Pick<FunctionReference,'path'>,args:JsonValue,options:SQLiteWatchOptions,kind:'replica'|'live'){
@@ -332,11 +338,18 @@ export class SQLiteBrowserClient {
   const listeners=new Set<()=>void>();
   const publish=()=>{for(const listener of listeners)try{listener();}catch{/* Observer only. */}};
   const clear=()=>{if(state!==undefined){state=undefined;publishedPage=undefined;publish();}};
+  const publishPreview=()=>{
+   const page=base.snapshot().page;
+   if(!page||!('source'in page)||page.source!=='pending'||!('complete'in page)||page.complete!==false||!('receivedRows'in page))return;
+   const pending=page as SQLitePendingSnapshotPage;
+   state={rows:pending.rows.filter(slot=>slot.value!==null).map(slot=>slot.value as T & ReplicaRow),ids:pending.rows.map(slot=>slot.id),total:pending.receivedRows,source:'server',completeness:'partial',freshness:'verifying',truncated:true,isUpToDate:false,computedRevision:pending.generation.sequence};
+   publishedPage=undefined;publish();
+  };
   const refresh=async()=>{if(this.closed||closed||!listeners.size)return;if(loading){again=true;return;}loading=true;try{do{again=false;const retained=cached(),page=retained===undefined?await base.page({limit:128}):retained;if(closed||!listeners.size)return;
     if(page){publishedPage=page;const previous=state;let rowIndex=0,identical=!!previous;for(const slot of page.rows)if(slot.value!==null){if(!previous||previous.rows[rowIndex]!==slot.value)identical=false;rowIndex++;}if(previous&&rowIndex!==previous.rows.length)identical=false;const rows=identical?previous!.rows:page.rows.filter(slot=>slot.value!==null).map(slot=>slot.value as T & ReplicaRow),ids=previous&&previous.ids.length===page.rows.length&&page.rows.every((slot,index)=>slot.id===previous.ids[index])?previous.ids:page.rows.map(slot=>slot.id),header=page.window.header,truncated=Boolean(header.truncated||page.nextOffset!==null),complete=header.completeness==='complete'&&!truncated;
      state={rows,ids,total:page.window.total,source:header.source,completeness:complete?'complete':'partial',freshness:this.lastVisible.restored(page)?(this.connectionState().isWebSocketConnected?'verifying':'offline'):this.connectionState().isWebSocketConnected?'current':'offline',truncated,isUpToDate:complete&&!this.lastVisible.restored(page),computedRevision:page.generation.sequence};publish();}
    }while(again&&!closed);}catch(error){const code=(error as {code?:string})?.code,page=base.snapshot().page;const certified=page&&'window'in page&&page.window.header.completeness==='complete'&&!page.window.header.truncated&&page.nextOffset===null;if(code!=='PAGE_CHANGED'&&(code!=='FENCED'||!certified))clear();}finally{loading=false;if(again&&!this.closed&&!closed&&listeners.size)setTimeout(()=>{void refresh();},25);}};
-  return {...base,onUpdate:(listener:()=>void)=>{if(closed)fail('FENCED','Native watch is closed');listeners.add(listener);if(!stop){stop=base.subscribe(()=>{const snapshot=base.snapshot();if(!snapshot.page)clear();if(snapshot.stale||snapshot.page!==publishedPage)void refresh();});void refresh();}return ()=>{listeners.delete(listener);if(!listeners.size){stop?.();stop=undefined;state=undefined;publishedPage=undefined;}};},localReplicaResult:()=>state?.rows,localReplicaState:()=>state,close:()=>{if(closed)return;closed=true;stop?.();stop=undefined;listeners.clear();state=undefined;publishedPage=undefined;base.close();}};
+  return {...base,onUpdate:(listener:()=>void)=>{if(closed)fail('FENCED','Native watch is closed');listeners.add(listener);if(!stop){stop=base.subscribe(()=>{const snapshot=base.snapshot();if(!snapshot.page)clear();else publishPreview();if(snapshot.stale||snapshot.page!==publishedPage)void refresh();});void refresh();}return ()=>{listeners.delete(listener);if(!listeners.size){stop?.();stop=undefined;state=undefined;publishedPage=undefined;}};},localReplicaResult:()=>state?.rows,localReplicaState:()=>state,close:()=>{if(closed)return;closed=true;stop?.();stop=undefined;listeners.clear();state=undefined;publishedPage=undefined;base.close();}};
  }
  private watchBounded(ref:Pick<FunctionReference,'path'>,args:JsonValue,options:{view?:JsonValue},kind:'replica'|'live'){
   sqlitePayloadBytes({path:ref.path,args,view:options.view??null},32768);const key=stable({kind,path:ref.path,args,view:options.view??null}),remoteKey=stable({kind,path:ref.path,args});let watch=this.watches.get(key);

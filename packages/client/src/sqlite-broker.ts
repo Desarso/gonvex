@@ -1,3 +1,4 @@
+import {validSQLitePrecommitDisplay,type SQLitePrecommitDisplay} from './sqlite-precommit-display.js';
 import {preloadSQLiteWasm} from './sqlite-wasm-preload.js';
 import {sqliteRequestBytes,sqliteTransferRequest} from './sqlite-request-frame.js';
 import { sqliteWorkerOperations as publicOperations,sqliteWorkerProtocol,sqliteOwnerRequestCapacity } from './sqlite-worker-protocol.js';
@@ -41,8 +42,8 @@ export class SQLiteReplicaBroker {
   readonly protocolVersion=protocol;
   private readonly control = new BroadcastChannel(controlName);
   private readonly replies = new BroadcastChannel(controlName + ':reply:' + this.tabID);
-  private readonly changeListeners=new Set<(scope:string,sequence:number,reset?:boolean)=>void>();
-  subscribeChanges(listener:(scope:string,sequence:number,reset?:boolean)=>void):()=>void{if(this.changeListeners.size>=64)throw error('BUDGET','Storage change listener budget exceeded');this.changeListeners.add(listener);return ()=>{this.changeListeners.delete(listener);};}
+  private readonly changeListeners=new Set<(scope:string,sequence:number,reset?:boolean,preview?:SQLitePrecommitDisplay)=>void>();
+  subscribeChanges(listener:(scope:string,sequence:number,reset?:boolean,preview?:SQLitePrecommitDisplay)=>void):()=>void{if(this.changeListeners.size>=64)throw error('BUDGET','Storage change listener budget exceeded');this.changeListeners.add(listener);return ()=>{this.changeListeners.delete(listener);};}
   private readonly lastChanges=new Map<string,{epoch:number;sequence:number;bytes:number;notification?:number}>();
   private lastChangeBytes=0;
   private heartbeatToken?:string;
@@ -141,9 +142,10 @@ export class SQLiteReplicaBroker {
         while(this.lastChanges.size>=128||this.lastChangeBytes+bytes>262144){const key=this.lastChanges.keys().next().value!;this.lastChangeBytes-=this.lastChanges.get(key)!.bytes;this.lastChanges.delete(key);}
         this.lastChanges.set(changeKey,{epoch:m.epoch,sequence:m.sequence,bytes,...(Number.isSafeInteger(m.notification)?{notification:m.notification}:{})});this.lastChangeBytes+=bytes;
       }
+      const preview=m.scope==='@preview'&&m.token===this.owner?.token&&validSQLitePrecommitDisplay(m.preview)?m.preview:undefined;
       this.wakeBlocked();
       try { this.options.onChange?.(m.scope, m.sequence,m.reset===true); } catch { /* Observer only. */ }
-      for(const listener of this.changeListeners)try{listener(m.scope,m.sequence,m.reset===true);}catch{/* Observer only. */}
+      for(const listener of this.changeListeners)try{listener(m.scope,m.sequence,m.reset===true,preview);}catch{/* Observer only. */}
       }finally{this.acknowledgeChange(m);}
     }
   }

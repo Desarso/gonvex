@@ -393,3 +393,19 @@ it('retires a quiet network lease without discarding its published snapshot or w
  expect(await f.owner.runOwner(0,()=>f.db.getFirstAsync('SELECT count(*) n FROM gv_deferred_replica_canceled'))).toEqual({n:0});
  expect(await f.engine.integrity()).toBe('ok');
 });
+
+it('pushes an admission-fenced bounded first page before FULL commit and revokes it after commit',async()=>{
+ const f=await fixture(),{socket,open}=await f.authenticate(true),source:any=await f.call({method:'watchReplica',path:'__local.tasks',args:{}});
+ const connection=[...(f.program as any).connections.values()][0],selected=connection.sources.get(source.signature);selected.previewInterest=true;
+ const previews:any[]=[];f.owner.publishPreviewTab=(_tab,value)=>{previews.push(structuredClone(value));return true;};
+ const tx=f.db.withTransactionAsync.bind(f.db);let release!:()=>void,entered!:()=>void,block=true;
+ const gate=new Promise<void>(resolve=>{release=resolve;}),staged=new Promise<void>(resolve=>{entered=resolve;});
+ f.db.withTransactionAsync=run=>tx(async()=>{await run();if(block&&f.db.ownerTransactionDepth===1&&(await f.db.getFirstAsync<{next_page:number}>('SELECT next_page FROM gv_snapshot_stages'))?.next_page===2){block=false;entered();await gate;}});
+ try{
+  const digest=await rowDigest({id:'a',n:1});socket.receive(new TextEncoder().encode(JSON.stringify({type:'replica.snapshotEncodedPage',id:open.id,snapshotId:'base',scope:'tenant',visibilityScope:'visible',cursor:{epoch:'e',revision:1},key:'id',sequence:1,last:true,canonicalRows:[],digest,path:'__local.tasks'})).buffer);
+  await staged;expect(previews).toHaveLength(1);expect(previews[0]).toMatchObject({signature:source.signature,admissionKey:expect.any(String),page:{complete:false,serverVerified:false,rows:[{id:'a',value:{id:'a',n:1}}]}});
+  expect(socket.sent.filter(message=>message.type==='replica.snapshotAck')).toHaveLength(1);
+  release();await vi.waitFor(()=>expect(socket.sent.filter(message=>message.type==='replica.snapshotAck')).toHaveLength(2));
+  expect(previews[1]).toMatchObject({id:previews[0].id,page:null});
+ }finally{release();}
+});

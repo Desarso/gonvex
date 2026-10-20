@@ -1,3 +1,4 @@
+import type {SQLitePrecommitDisplay} from './sqlite-precommit-display.js';
 import {OriginStorageWorkerLease} from './origin-storage-worker-lease.js';
 import type {ByteBudgetSnapshot} from './byte-budget.js';
 import {SQLitePendingSnapshotReader} from './sqlite-pending-snapshot-reader.js';
@@ -33,6 +34,7 @@ export type SQLiteOwnerProgramContext={
  notifyTab(tabID:string):Promise<void>;
  /** No SQL queue or new committed generation. Only SDK-owned stale display. */
  notifyPreviewTab?(tabID:string):void;
+ publishPreviewTab?(tabID:string,value:SQLitePrecommitDisplay):boolean;
 };
 export type SQLiteOwnerBinding={schema?:SQLiteTypedSchema;schemaVersion?:string;createProgram?(context:SQLiteOwnerProgramContext):SQLiteOwnerProgram};
 let installed=false;
@@ -99,7 +101,7 @@ async function execute(op: string, args: any, requestID:string) {
       await snapshots.ready();await activation.ready();sampleStartupMemory('canonical');globalThis.postMessage({type:'progress',stage:'opened-canonical',sentAt:Date.now()});
       nativeReader=new SQLiteNativeReplicaReader(database,storage,engine);await nativeReader.ready();tabs.setGeneration(wireGeneration(await engine.verifyOwner()));
       pendingReader=new SQLitePendingSnapshotReader({database,canonical:storage,snapshots,schema:engine.schema,fence:()=>engine!.verifyOwner()});await pendingReader.ready();
-      program=binding.createProgram?.({database,engine,notifyPreviewTab:tabID=>tabs.hintPending(tabID),notifyTab:tabID=>schedule(0,async()=>{if(typeof tabID!=='string'||!tabID||tabID.length>128)throw new TypeError('Invalid control recipient');tabs.notify(tabID,wireGeneration(await engine!.verifyOwner()));}),reader:nativeReader,pendingReader,canonical:storage,snapshots,activation,
+      program=binding.createProgram?.({database,engine,notifyPreviewTab:tabID=>tabs.hintPending(tabID),publishPreviewTab:(tabID,value)=>tabs.preview(tabID,value),notifyTab:tabID=>schedule(0,async()=>{if(typeof tabID!=='string'||!tabID||tabID.length>128)throw new TypeError('Invalid control recipient');tabs.notify(tabID,wireGeneration(await engine!.verifyOwner()));}),reader:nativeReader,pendingReader,canonical:storage,snapshots,activation,
        runOwner:async(size,run,scopes=[])=>{
         if(!Array.isArray(scopes)||scopes.length>8||scopes.some(value=>typeof value!=='string'||!value||value.length>512))throw new TypeError('Invalid owner publication scope');
         return waitForSQLiteOwnerAdmission(()=>schedule(size,async()=>{const before=await engine!.verifyOwner();const value=await run();const after=await engine!.verifyOwner();if(after.sequence!==before.sequence)for(const selected of scopes)publish(selected,after);return value;}),()=>{if(closed)throw Object.assign(Error('Storage owner is closed'),{code:'FENCED'});});

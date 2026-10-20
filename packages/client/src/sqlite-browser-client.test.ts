@@ -19,7 +19,7 @@ function fixture(fetchToken?:()=>Promise<string|null>){
   throw Error('Unexpected mock RPC '+input.method);
  },subscribeChanges(listener:(...args:any[])=>void){changes.add(listener);return ()=>{changes.delete(listener);};},stats(){return {ownerEpoch:epoch} as ReturnType<SQLiteReplicaBroker['stats']>;},close(){closed=true;}};
  const client=new SQLiteBrowserClient('ws://private-synthetic.test/ws',{broker,auth:{project:'project',tenant:'tenant',identity:{sub:'a'}},fetchToken});cleanup.push(()=>client.close());
- return {client,calls,responses,get closed(){return closed;},set handler(next:typeof handler){handler=next;},admit(key:string|null){admissionKey=key;for(const notify of changes)notify('*',1,true);},control(){for(const notify of changes)notify('@control',1);},change(scope='scope'){for(const notify of changes)notify(scope,1);},replaceOwner(){epoch++;connection='';tokenPending=false;for(const notify of changes)notify('*',1,true);}};
+ return {client,calls,responses,get closed(){return closed;},set handler(next:typeof handler){handler=next;},admit(key:string|null){admissionKey=key;for(const notify of changes)notify('*',1,true);},preview(value:any){for(const notify of changes)notify('@preview',1,false,value);},control(){for(const notify of changes)notify('@control',1);},change(scope='scope'){for(const notify of changes)notify(scope,1);},replaceOwner(){epoch++;connection='';tokenPending=false;for(const notify of changes)notify('*',1,true);}};
 }
 it('services a single selected-tab token request, shares a watch, retains a bounded stable page snapshot and restores after owner change',async()=>{
  const fetchToken=vi.fn(async()=> 'opaque'),f=fixture(fetchToken),one=f.client.watchReplica({path:'tasks/all'}),two=f.client.watchReplica({path:'tasks/all'});cleanup.push(()=>{one.close();two.close();});
@@ -442,4 +442,21 @@ it('refreshes only pending display interests on a preview hint and retains commi
  f.change('@preview');
  expect(pendingHints).toBe(1);expect(committedHints).toBe(0);expect(committed.snapshot().page).toBe(page);expect(committed.snapshot().stale).toBe(false);
  expect(f.calls.filter(call=>call.input.method==='controls')).toHaveLength(controls);
+});
+
+it('publishes a fenced partial page while the canonical RPC is blocked and revokes it without accepting coverage',async()=>{
+ const f=fixture(async()=> 'opaque');f.admit('admitted');
+ let release!:(value:unknown)=>void;const blocked=new Promise(resolve=>{release=resolve;});
+ f.handler=input=>input.method==='replicaPage'?blocked:undefined;
+ const watch=f.client.watchReplica({path:'tasks/all'});cleanup.push(()=>watch.close());const stop=watch.onUpdate(()=>{});cleanup.push(stop);
+ await vi.waitFor(()=>expect(f.calls.some(c=>c.input.method==='replicaPage')).toBe(true));await f.client.pollControls();
+ const page={source:'pending' as const,complete:false as const,serverVerified:false,generation:{epoch:1,sequence:0,predictionSequence:0,snapshot:'s',receivedPages:1},receivedRows:1,nextPosition:null,rows:[{id:'a',position:0,value:{id:'a',name:'Before FULL commit'}}]};
+ const preview={id:'preview',signature:'a:tasks/all',admissionKey:'foreign',page};
+ f.preview(preview);expect(watch.localReplicaState()).toBeUndefined();
+ f.preview({...preview,admissionKey:'admitted'});
+ expect(watch.localReplicaState()).toMatchObject({rows:[{name:'Before FULL commit'}],completeness:'partial',truncated:true,isUpToDate:false,freshness:'verifying'});
+ f.preview({...preview,admissionKey:'admitted',id:'old',page:null});expect(watch.localReplicaState()?.rows).toHaveLength(1);
+ f.preview({...preview,admissionKey:'admitted',page:null});expect(watch.localReplicaState()).toBeUndefined();
+ release({generation:{epoch:1,sequence:2},rows:[{id:'a',value:{id:'a',name:'Committed'}}],nextOffset:null,window:{total:1,generation:'g',header:{source:'server',completeness:'complete',truncated:false}}});
+ await vi.waitFor(()=>expect(watch.localReplicaState()).toMatchObject({rows:[{name:'Committed'}],completeness:'complete',isUpToDate:true}));
 });

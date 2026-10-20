@@ -1,7 +1,9 @@
+import {sqlitePayloadBytes} from './sqlite-admission.js';
+import {validSQLitePrecommitDisplay,type SQLitePrecommitDisplay} from './sqlite-precommit-display.js';
 import {ByteLedger} from './byte-budget.js';
 import {fail} from './sqlite-admission.js';
 type Generation={epoch:number;sequence:number};
-export type SQLiteOwnerChange=Generation&{scope:string;reset?:true;notification:number};
+export type SQLiteOwnerChange=Generation&{scope:string;reset?:true;notification:number;preview?:SQLitePrecommitDisplay};
 type Tab={seen:number;sentAt?:number;controller:AbortController;inFlight?:SQLiteOwnerChange;pending?:Omit<SQLiteOwnerChange,'notification'>;acked?:Generation};
 const compare=(a:Generation,b:Generation)=>a.epoch-b.epoch||a.sequence-b.sequence;
 /** One unacknowledged message and one coalesced descriptor per tab. A frozen
@@ -18,7 +20,7 @@ export class SQLiteOwnerTabs {
  private refusals=0;
  private closed=false;
  constructor(private readonly send:(tab:string,change:SQLiteOwnerChange)=>void,private readonly detached:(tab:string)=>void=()=>{}){this.unregister=this.ledger.register('owner-change-delivery',()=>this.stats());}
- stats(){let bytes=0,inFlight=0,pending=0;for(const [id,tab]of this.tabs){bytes+=384+id.length*2;for(const value of [tab.inFlight,tab.pending])if(value)bytes+=256+value.scope.length*2;inFlight+=Number(!!tab.inFlight);pending+=Number(!!tab.pending);}return {name:'owner-change-delivery',bytes,maxBytes:262144,entries:this.tabs.size,maxEntries:64,evictions:0,refusals:this.refusals,inFlight,pending,sent:this.sent};}
+ stats(){let bytes=0,inFlight=0,pending=0;for(const [id,tab]of this.tabs){bytes+=384+id.length*2;for(const value of [tab.inFlight,tab.pending])if(value)bytes+=256+value.scope.length*2+(value.preview?sqlitePayloadBytes(value.preview,65536)*2+1024:0);inFlight+=Number(!!tab.inFlight);pending+=Number(!!tab.pending);}return {name:'owner-change-delivery',bytes,maxBytes:262144,entries:this.tabs.size,maxEntries:64,evictions:0,refusals:this.refusals,inFlight,pending,sent:this.sent};}
  setGeneration(generation:Generation){if(!this.latest||compare(generation,this.latest)>=0)this.latest={...generation};}
  register(id:string,now=Date.now()):AbortSignal{
   if(this.closed)fail('FENCED','Owner tab registry is closed');if(typeof id!=='string'||!id||id.length>128)throw new TypeError('Invalid owner tab');
@@ -30,6 +32,17 @@ export class SQLiteOwnerTabs {
  private deliver(id:string,tab:Tab,value:Omit<SQLiteOwnerChange,'notification'>){
   if(this.serial>=Number.MAX_SAFE_INTEGER)fail('FENCED','Owner notification sequence exhausted');
   tab.inFlight={...value,notification:++this.serial};tab.sentAt=Date.now();this.sent++;this.send(id,tab.inFlight);
+ }
+ /** Payload shares the same per-tab credit and global metadata allowance.
+  * Its generation always remains the last committed owner generation. */
+ preview(id:string,value:SQLitePrecommitDisplay):boolean{
+  const tab=this.tabs.get(id);if(!tab||!this.latest||!validSQLitePrecommitDisplay(value))return false;
+  if(tab.pending?.reset)return false;
+  const bytes=sqlitePayloadBytes(value,65536)*2+1024;
+  if(this.stats().bytes+bytes+512>262144)return false;
+  const change={...this.latest,scope:'@preview',preview:structuredClone(value)};
+  if(tab.inFlight)tab.pending=change;else this.deliver(id,tab,change);
+  return true;
  }
  /** A precommit display hint reuses only the last committed generation.
   * It must never fence out a later rollback/retry by advancing that cursor. */

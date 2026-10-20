@@ -19,6 +19,7 @@ type State={stream:string;generation:number;scope:string;epoch:string;cursorEpoc
 type Options={owner:SQLiteOwnerProgramContext;sessions:SQLiteWorkerSessions;connection:string;artifactHash:string;
  reserve?(bytes:number):()=>void;
  sourceReady?(id:string):void;
+ previewStaging?(source:SQLiteFeedSource,snapshot:string):Promise<(()=>void)|undefined>;
  freshSnapshot?(id:string):Promise<void>;
  windowsPending?(scope:string,epoch:string,revision:number):Promise<boolean>;
  publishWindows?(scope:string,epoch:string,revision:number):Promise<void>;
@@ -96,6 +97,11 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
     // A failed append/rebase rolls back its binding. Retry with the same page.
     for(const {source,start} of prepared)if(this.sources.get(source.id)===source&&source.start===start)source.preparedStart=start;
     return result;
+   },
+   previewStaging:async receipt=>{
+    this.check(state);const source=this.source(receipt.ack.id);
+    if(source.start?.snapshotId!==receipt.ack.snapshotId)fail('FENCED','Preview snapshot admission changed');
+    return this.options.previewStaging?.(source,receipt.ack.snapshotId);
    },
    commitProgress:async()=>{await markSQLiteStagingCommit(owner.database,()=>owner.engine.verifyOwner());},
    sendAck:ack=>{this.check(state);this.options.send(ack);},

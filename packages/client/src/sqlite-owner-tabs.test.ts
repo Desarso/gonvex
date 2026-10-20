@@ -49,3 +49,13 @@ it('credits precommit display hints without advancing the committed generation a
  tabs.hintPending('reader');expect(sent.at(-1)).toMatchObject({tab:'reader',change:{scope:'@preview',sequence:8}});
  tabs.drop('reader');expect(()=>tabs.hintPending('reader')).toThrow('detached');tabs.close();
 });
+
+it('bounds row-bearing previews under the existing tab ledger and preserves rollback revocation credit',()=>{
+ const sent:Array<{tab:string;change:SQLiteOwnerChange}>=[],tabs=new SQLiteOwnerTabs((tab,change)=>sent.push({tab,change}));tabs.setGeneration({epoch:1,sequence:4});tabs.register('one');const initial=sent[0];tabs.acknowledge('one',initial.change.notification,initial.change);
+ const page={source:'pending' as const,complete:false as const,serverVerified:false,generation:{epoch:1,sequence:0,predictionSequence:0,snapshot:'s',receivedPages:1},receivedRows:1,nextPosition:null,rows:[{id:'a',position:0,value:{id:'a',name:'x'.repeat(30000)}}]};
+ const preview={id:'p',signature:'sig',admissionKey:'fence',page};
+ expect(tabs.preview('one',preview)).toBe(true);preview.page.rows[0].value.name='caller changed';expect(sent.at(-1)?.change.preview?.page?.rows[0].value?.name).toHaveLength(30000);
+ for(let n=0;n<10000;n++)tabs.preview('one',{...preview,id:String(n)});
+ expect(tabs.stats().bytes).toBeLessThanOrEqual(tabs.stats().maxBytes);expect(tabs.stats()).toMatchObject({inFlight:1,pending:1});
+ expect(tabs.preview('one',{...preview,page:null})).toBe(true);const first=sent.at(-1)!;tabs.acknowledge('one',first.change.notification,first.change);expect(sent.at(-1)?.change.preview?.page).toBeNull();expect(sent.at(-1)?.change.sequence).toBe(4);tabs.close();
+});
