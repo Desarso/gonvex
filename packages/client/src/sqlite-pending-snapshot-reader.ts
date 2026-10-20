@@ -34,6 +34,10 @@ export class SQLitePendingSnapshotReader {
   if(!table||!input.scope||input.scope.length>512||input.scope.includes('\u0000')||!input.subscription||input.subscription.length>256||!input.snapshot||input.snapshot.length>128||!Number.isSafeInteger(after)||after< -1||!Number.isSafeInteger(limit)||limit<1||limit>100||after>=0&&!input.expected)throw new TypeError('Invalid pending snapshot page');
   const owned=JSON.parse(JSON.stringify(input)) as SQLitePendingSnapshotRead;await this.ready();let output!:SQLitePendingSnapshotPage;
   const {database:db}=this.options;
+  // Nested readers can see ingest rows which have not survived FULL commit.
+  // Their display lifetime belongs to that transaction, never this durable-
+  // prefix cache. Even a later page rollback can reuse the same generation.
+  const cacheable=!db.ownerTransactionDepth;
   await db.withTransactionAsync(async()=>{
    const owner=await this.options.fence();if(this.closed||!isCurrent())fail('FENCED','Pending page admission changed');
    const stage=await db.getFirstAsync<{metadata:string;rows:number;next_page:number;complete:number;discarded:number}>('SELECT metadata,rows,next_page,complete,discarded FROM gv_snapshot_stages WHERE scope=? AND subscription=? AND snapshot=?',owned.scope,owned.subscription,owned.snapshot);
@@ -47,7 +51,7 @@ export class SQLitePendingSnapshotReader {
    const expected=owned.expected;
    if(expected&&(!Number.isSafeInteger(expected.receivedPages)||expected.receivedPages<0||expected.epoch!==owner.epoch||expected.sequence!==canonicalSequence||expected.predictionSequence!==predictionSequence||expected.snapshot!==owned.snapshot))fail('PAGE_CHANGED','Pending page authority changed');
    const cacheKey=JSON.stringify([owned.scope,owned.entity,owned.subscription,owned.snapshot,after,limit,owner.epoch,canonicalSequence,predictionSequence,metadata.cursor.epoch]);
-   const cached=this.cache.get(cacheKey);
+   const cached=cacheable?this.cache.get(cacheKey):undefined;
    if(cached&&(cached.rows.length===limit||cached.fixedByBudget||cached.receivedRows===stage.rows)){
     if(expected&&stage.next_page<expected.receivedPages)fail('PAGE_CHANGED','Pending page generation was replaced');
     const last=cached.rows.at(-1)?.position??after;
@@ -66,7 +70,7 @@ export class SQLitePendingSnapshotReader {
     const merged=page.rows.map(row=>({id:row.id,row:mergeReplicaRecord({row:byID.get(row.id)??null,authority:versions.get('row:'+JSON.stringify([owned.entity,row.id]))??{epoch:metadata.cursor.epoch,base:byVersion.get(row.id)??0,fields:{}}},row.row,metadata.cursor).row}));
     const predicted=this.predictions?await this.predictions.overlayRows(owned.scope,owned.entity,merged):merged,values=new Map(predicted.map(row=>[row.id,row.row]));
     output={source:'pending',complete:false,serverVerified:page.complete,generation:{epoch:owner.epoch,sequence:canonicalSequence,predictionSequence,snapshot:owned.snapshot,receivedPages:page.nextPage},receivedRows:page.receivedRows,nextPosition:page.nextPosition,rows:page.rows.map(row=>({id:row.id,position:row.position,value:values.get(row.id)??null}))};sqlitePayloadBytes(output,131072);if(this.closed||!isCurrent())fail('FENCED','Pending page admission changed');await this.options.fence();
-    const cachedRows=structuredClone(output.rows),cacheBytes=sqlitePayloadBytes({key:cacheKey,rows:cachedRows},262144);this.cache.put(cacheKey,{rows:cachedRows,receivedRows:page.receivedRows,fixedByBudget:take<limit||page.rows.length<take&&page.nextPosition!==null},cacheBytes+128);break;
+    if(cacheable){const cachedRows=structuredClone(output.rows),cacheBytes=sqlitePayloadBytes({key:cacheKey,rows:cachedRows},262144);this.cache.put(cacheKey,{rows:cachedRows,receivedRows:page.receivedRows,fixedByBudget:take<limit||page.rows.length<take&&page.nextPosition!==null},cacheBytes+128);}break;
    }catch(error){if(take===1||!pageBudgetError(error))throw error;take=Math.max(1,Math.min(Math.floor(take/2),Math.floor(readRows/2)));}}
   });return output;
  }

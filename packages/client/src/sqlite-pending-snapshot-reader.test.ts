@@ -48,3 +48,16 @@ it('reuses a bounded immutable-prefix display page across staging commits but in
  await f.write(20,[{entity:'tasks',id:'first',operation:'insert',newValue:{id:'first',name:'Changed canonical',n:20}}]);expect((await f.reader.page({...f.input,limit:1})).rows[0].value?.name).toBe('Changed canonical');expect(read).toHaveBeenCalledTimes(1);
  await f.predictions.apply('s',1,[{entity:'tasks',rowId:'first',op:'patch',fields:{n:99}}]);expect((await f.reader.page({...f.input,limit:1})).rows[0].value?.n).toBe(99);expect(read).toHaveBeenCalledTimes(2);for(const budget of f.reader.budgets()){expect(budget.bytes).toBeLessThanOrEqual(budget.maxBytes);expect(budget.entries).toBeLessThanOrEqual(2);}f.reader.clear();expect(f.reader.budgets()[0].bytes).toBe(0);f.reader.close();await expect(f.reader.page(f.input)).rejects.toMatchObject({code:'FENCED'});
 });
+
+it('does not retain a precommit display page after its enclosing ingest transaction rolls back',async()=>{
+ const f=await fixture();
+ await expect(f.db.withTransactionAsync(async()=>{
+  await f.append(f.rows.slice(2),1,true);
+  const preview=await f.reader.page({...f.input,limit:3});
+  expect(preview.rows).toHaveLength(3);expect(preview.serverVerified).toBe(true);expect(preview.complete).toBe(false);
+  throw Error('FULL sync failed');
+ })).rejects.toThrow('FULL sync failed');
+ const committed=await f.reader.page({...f.input,limit:3});
+ expect(committed.rows.map(row=>row.id)).toEqual(['first','deleted']);
+ expect(committed.serverVerified).toBe(false);expect(committed.receivedRows).toBe(2);
+});
