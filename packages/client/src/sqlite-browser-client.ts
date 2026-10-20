@@ -27,7 +27,7 @@ export type SQLiteCollectionPageResult=SQLiteTypedPage&{generation:string};
 export type SQLiteLocalQueryPage=(SQLiteTypedPage&{supported:true;complete:boolean;generation:string})|{supported:false;reason:string;generation:string;rows?:never};
 type Page=SQLiteLocalQueryPage|SQLitePendingLivePage|SQLiteNativeWindowResult|SQLitePendingSnapshotPage|SQLiteNativeEntityResult|SQLiteCollectionPageResult|null;
 type WatchSnapshot={page:Page|undefined;stale:boolean;version:number};
-type Watch={bootPageKey?:string;kind:'replica'|'live';state:WatchSnapshot;retiring?:Promise<void>;key:string;lease:string;path:string;args:JsonValue;bytes:number;refs:number;source?:{id?:string;signature:string};bound:number;opening?:Promise<void>;listeners:Set<()=>void>;unpin?:()=>void;stale:boolean;version:number;invalidation:number;pendingDisplay?:boolean;compatibleFirstPage?:boolean};
+type Watch={startupPublications?:number;bootPageKey?:string;kind:'replica'|'live';state:WatchSnapshot;retiring?:Promise<void>;key:string;lease:string;path:string;args:JsonValue;bytes:number;refs:number;source?:{id?:string;signature:string};bound:number;opening?:Promise<void>;listeners:Set<()=>void>;unpin?:()=>void;stale:boolean;version:number;invalidation:number;pendingDisplay?:boolean;compatibleFirstPage?:boolean};
 export type SQLiteBrowserOptions={broker:Broker;artifactHash?:string;onUpdateRequired?:GonvexClientOptions['onUpdateRequired'];onLocalExecutionFallback?:GonvexClientOptions['onLocalExecutionFallback'];errorReporting?:GonvexClientOptions['errorReporting'];role?:'control';public?:{tenant:string};auth?:Auth;fetchToken?:GonvexClientAuth['fetchToken']};
 export type SQLiteWatchOptions={view?:JsonValue;deferStart?:boolean};
 export type SQLiteReplicaPageOptions={offset?:number;limit?:number;generation?:string;expected?:SQLiteNativeWindowResult['generation']};
@@ -63,9 +63,9 @@ function sameJSON(left:unknown,right:unknown):boolean{
  return count===0;
 }
 export class SQLiteBrowserClient {
- private readonly lastVisible=new SQLiteLastVisiblePages((()=>{try{return globalThis.sessionStorage;}catch{return undefined;}})(),524288);
+ private readonly lastVisible:SQLiteLastVisiblePages;
  private closedBudgets?:ReturnType<ByteLedger['snapshot']>;
- private bootRestored=false;private displayTimer?:ReturnType<typeof setTimeout>;
+ private startupPublications=0;private bootRestored=false;private displayTimer?:ReturnType<typeof setTimeout>;
  private readonly displayHide=()=>{void this.persistDisplay().catch(()=>{});};
  private readonly displayVisibility=()=>{if(typeof document!=='undefined'&&document.visibilityState==='hidden')this.displayHide();};
  private async displayFence(){
@@ -94,7 +94,11 @@ export class SQLiteBrowserClient {
  private readonly releaseChanges:()=>void;private controlsValue?:Pick<Controls,'status'|'session'|'failure'|'authentication'|'serverInfo'>;
  constructor(readonly url:string,private readonly options:SQLiteBrowserOptions){
   const parsed=new URL(url);if(!['ws:','wss:'].includes(parsed.protocol)||parsed.username||parsed.password||parsed.hash)throw new TypeError('Invalid native browser URL');
-  sqlitePayloadBytes(options.auth??{},65536);this.auth=structuredClone(options.auth??{});if(options.public){if(options.role==='control'||!options.public.tenant.trim()||!this.auth.project?.trim()||this.auth.token||this.auth.identity||this.auth.tenant||options.fetchToken)throw new TypeError('Public clients require fixed project/tenant routing without account credentials');this.publicTenant=options.public.tenant.trim();this.auth.tenant=this.publicTenant;parsed.searchParams.set('public','1');this.url=parsed.href;}this.fetchToken=options.fetchToken;if(options.onLocalExecutionFallback)this.fallbackListeners.add(options.onLocalExecutionFallback);this.controlQueries=new SQLiteBrowserControls(input=>this.rpc(input),this.ledger);this.entityView=new SQLiteBrowserEntities((entity,ids,expected)=>this.entities(entity,ids,expected),this.ledger,error=>{if(this.closed||['PAGE_CHANGED','FENCED'].includes(String((error as any)?.code)))return;this.controlsValue={...this.controlsValue,status:this.controlsValue?.status,session:this.controlsValue?.session??(this.bootRestored?'restored':'unavailable'),failure:{code:String((error as any)?.code??'SQLITE'),message:String((error as any)?.message??error).slice(0,512)}};for(const listener of this.controlListeners)try{listener();}catch{/* Observer only. */}});
+  sqlitePayloadBytes(options.auth??{},65536);
+  // Control/public clients have no tenant display context and must never read
+  // or revoke another clients sealed tenant page.
+  this.lastVisible=new SQLiteLastVisiblePages(options.role==='control'||options.public?undefined:(()=>{try{return globalThis.sessionStorage;}catch{return undefined;}})(),524288);
+  this.auth=structuredClone(options.auth??{});if(options.public){if(options.role==='control'||!options.public.tenant.trim()||!this.auth.project?.trim()||this.auth.token||this.auth.identity||this.auth.tenant||options.fetchToken)throw new TypeError('Public clients require fixed project/tenant routing without account credentials');this.publicTenant=options.public.tenant.trim();this.auth.tenant=this.publicTenant;parsed.searchParams.set('public','1');this.url=parsed.href;}this.fetchToken=options.fetchToken;if(options.onLocalExecutionFallback)this.fallbackListeners.add(options.onLocalExecutionFallback);this.controlQueries=new SQLiteBrowserControls(input=>this.rpc(input),this.ledger);this.entityView=new SQLiteBrowserEntities((entity,ids,expected)=>this.entities(entity,ids,expected),this.ledger,error=>{if(this.closed||['PAGE_CHANGED','FENCED'].includes(String((error as any)?.code)))return;this.controlsValue={...this.controlsValue,status:this.controlsValue?.status,session:this.controlsValue?.session??(this.bootRestored?'restored':'unavailable'),failure:{code:String((error as any)?.code??'SQLITE'),message:String((error as any)?.message??error).slice(0,512)}};for(const listener of this.controlListeners)try{listener();}catch{/* Observer only. */}});
   globalThis.addEventListener?.('pagehide',this.displayHide);if(typeof document!=='undefined')document.addEventListener('visibilitychange',this.displayVisibility);
   this.ledger.register('browser-last-visible-pages',()=>this.lastVisible.stats());
   this.ledger.register('browser-live-memberships',()=>this.memberships.stats());
@@ -237,7 +241,12 @@ export class SQLiteBrowserClient {
   if(value&&'window'in value){const prior=this.pages.get(watch.key);if(prior&&'window'in prior&&prior.window.header.entity===value.window.header.entity&&prior.rows.length===value.rows.length){for(let index=0;index<value.rows.length;index++){const slot=value.rows[index],old=prior.rows[index];if(slot.id===old.id&&sameJSON(slot.value,old.value)){slot.id=old.id;slot.value=old.value;}}}}
   const bytes=sqlitePayloadBytes({key:watch.key,value},262144);watch.unpin?.();watch.unpin=undefined;
   try{this.pages.put(watch.key,value,bytes);}finally{watch.unpin=this.pages.pin(watch.key);}
-  if(!this.lastVisible.restored(value))watch.bootPageKey=undefined;watch.compatibleFirstPage=compatibleFirstPage;watch.stale=stale;this.notify(watch);if(compatibleFirstPage&&!this.lastVisible.restored(value))this.scheduleDisplay();
+  if(!this.lastVisible.restored(value))watch.bootPageKey=undefined;watch.compatibleFirstPage=compatibleFirstPage;watch.stale=stale;
+  // At most two first-publication marks per admitted watch, capped by the
+  // 192-watch registry even across later watch recreation. No row values.
+  const boot=this.lastVisible.restored(value),publication=boot?1:2;
+  if(value&&!((watch.startupPublications??0)&publication)&&this.startupPublications<384){watch.startupPublications=(watch.startupPublications??0)|publication;this.startupPublications++;try{performance.measure('gonvex-startup:page-published',{start:performance.now(),end:performance.now(),detail:{path:watch.path,origin:boot?'sealed':'sqlite',rows:value.rows?.length}});}catch{/* Timing never affects publication. */}}
+  this.notify(watch);if(compatibleFirstPage&&!this.lastVisible.restored(value))this.scheduleDisplay();
  }
  private deferredBounded(ref:Pick<FunctionReference,'path'>,args:JsonValue,options:SQLiteWatchOptions,kind:'replica'|'live'){
   sqlitePayloadBytes({path:ref.path,args,view:options.view??null},32768);const path=ref.path,owned=structuredClone(args),view=structuredClone(options.view);let selected:ReturnType<SQLiteBrowserClient['watchBounded']>|undefined,closed=false,refs=0,held=false;const empty:WatchSnapshot={page:undefined,stale:true,version:0};
@@ -285,33 +294,37 @@ export class SQLiteBrowserClient {
  // Explicit page calls still consult the owner, and invalidation fences the cache.
  private cachedReplicaPage(ref:Pick<FunctionReference,'path'>,args:JsonValue,options:SQLiteWatchOptions){
   const key=stable({kind:'replica',path:ref.path,args,view:options.view??null});
-  return ()=>{const watch=this.watches.get(key);return watch?.compatibleFirstPage&&(!watch.stale||!this.handle&&this.lastVisible.restored(this.pages.get(key)))?this.pages.get(key) as SQLiteNativeWindowResult|null|undefined:undefined;};
+  return ()=>{const watch=this.watches.get(key);return watch?.compatibleFirstPage&&(!watch.stale||this.bootRestored&&this.lastVisible.restored(this.pages.get(key)))?this.pages.get(key) as SQLiteNativeWindowResult|null|undefined:undefined;};
  }
  private compatibleReplica<T extends JsonValue>(base:Pick<SQLiteReplicaWatch,'page'|'queryPage'|'localQueryPage'|'pendingPage'|'snapshot'|'subscribe'|'close'>,cached:()=>SQLiteNativeWindowResult|null|undefined):SQLiteReplicaWatch<T>{
-  let state:ReplicaCollectionSubscriptionState<T & ReplicaRow>|undefined,loading=false,again=false,closed=false,stop:(()=>void)|undefined;
+  let state:ReplicaCollectionSubscriptionState<T & ReplicaRow>|undefined,publishedPage:SQLiteNativeWindowResult|null|undefined,loading=false,again=false,closed=false,stop:(()=>void)|undefined;
   const listeners=new Set<()=>void>();
   const publish=()=>{for(const listener of listeners)try{listener();}catch{/* Observer only. */}};
-  const clear=()=>{if(state!==undefined){state=undefined;publish();}};
+  const clear=()=>{if(state!==undefined){state=undefined;publishedPage=undefined;publish();}};
   const refresh=async()=>{if(this.closed||closed||!listeners.size)return;if(loading){again=true;return;}loading=true;try{do{again=false;const retained=cached(),page=retained===undefined?await base.page({limit:128}):retained;if(closed||!listeners.size)return;
-    if(page){const previous=state;let rowIndex=0,identical=!!previous;for(const slot of page.rows)if(slot.value!==null){if(!previous||previous.rows[rowIndex]!==slot.value)identical=false;rowIndex++;}if(previous&&rowIndex!==previous.rows.length)identical=false;const rows=identical?previous!.rows:page.rows.filter(slot=>slot.value!==null).map(slot=>slot.value as T & ReplicaRow),ids=previous&&previous.ids.length===page.rows.length&&page.rows.every((slot,index)=>slot.id===previous.ids[index])?previous.ids:page.rows.map(slot=>slot.id),header=page.window.header,truncated=Boolean(header.truncated||page.nextOffset!==null),complete=header.completeness==='complete'&&!truncated;
+    if(page){publishedPage=page;const previous=state;let rowIndex=0,identical=!!previous;for(const slot of page.rows)if(slot.value!==null){if(!previous||previous.rows[rowIndex]!==slot.value)identical=false;rowIndex++;}if(previous&&rowIndex!==previous.rows.length)identical=false;const rows=identical?previous!.rows:page.rows.filter(slot=>slot.value!==null).map(slot=>slot.value as T & ReplicaRow),ids=previous&&previous.ids.length===page.rows.length&&page.rows.every((slot,index)=>slot.id===previous.ids[index])?previous.ids:page.rows.map(slot=>slot.id),header=page.window.header,truncated=Boolean(header.truncated||page.nextOffset!==null),complete=header.completeness==='complete'&&!truncated;
      state={rows,ids,total:page.window.total,source:header.source,completeness:complete?'complete':'partial',freshness:this.lastVisible.restored(page)?(this.connectionState().isWebSocketConnected?'verifying':'offline'):this.connectionState().isWebSocketConnected?'current':'offline',truncated,isUpToDate:complete&&!this.lastVisible.restored(page),computedRevision:page.generation.sequence};publish();}
    }while(again&&!closed);}catch(error){const code=(error as {code?:string})?.code,page=base.snapshot().page;const certified=page&&'window'in page&&page.window.header.completeness==='complete'&&!page.window.header.truncated&&page.nextOffset===null;if(code!=='PAGE_CHANGED'&&(code!=='FENCED'||!certified))clear();}finally{loading=false;if(again&&!this.closed&&!closed&&listeners.size)setTimeout(()=>{void refresh();},25);}};
-  return {...base,onUpdate:(listener:()=>void)=>{if(closed)fail('FENCED','Native watch is closed');listeners.add(listener);if(!stop){stop=base.subscribe(()=>{const snapshot=base.snapshot();if(!snapshot.page)clear();if(snapshot.stale)void refresh();});void refresh();}return ()=>{listeners.delete(listener);if(!listeners.size){stop?.();stop=undefined;state=undefined;}};},localReplicaResult:()=>state?.rows,localReplicaState:()=>state,close:()=>{if(closed)return;closed=true;stop?.();stop=undefined;listeners.clear();state=undefined;base.close();}};
+  return {...base,onUpdate:(listener:()=>void)=>{if(closed)fail('FENCED','Native watch is closed');listeners.add(listener);if(!stop){stop=base.subscribe(()=>{const snapshot=base.snapshot();if(!snapshot.page)clear();if(snapshot.stale||snapshot.page!==publishedPage)void refresh();});void refresh();}return ()=>{listeners.delete(listener);if(!listeners.size){stop?.();stop=undefined;state=undefined;publishedPage=undefined;}};},localReplicaResult:()=>state?.rows,localReplicaState:()=>state,close:()=>{if(closed)return;closed=true;stop?.();stop=undefined;listeners.clear();state=undefined;publishedPage=undefined;base.close();}};
  }
  private watchBounded(ref:Pick<FunctionReference,'path'>,args:JsonValue,options:{view?:JsonValue},kind:'replica'|'live'){
   sqlitePayloadBytes({path:ref.path,args,view:options.view??null},32768);const key=stable({kind,path:ref.path,args,view:options.view??null});let watch=this.watches.get(key);
   if(!watch){const bytes=sqlitePayloadBytes({key,args,path:ref.path},65536)+2048;if(this.watches.size>=192||this.watchBytes+bytes>524288)fail('BUDGET','Native browser watch budget exhausted');watch={kind,state:{page:undefined,stale:true,version:0},key,lease:crypto.randomUUID(),path:ref.path,args:JSON.parse(stable(args)),bytes,refs:0,bound:-1,listeners:new Set(),stale:true,version:0,invalidation:0};this.watches.set(key,watch);this.watchBytes+=bytes;}
   const selected=watch;if(selected.refs>=64)fail('BUDGET','Native watch lease budget exhausted');selected.refs++;let closed=false;const listeners=new Set<()=>void>();void this.open(selected).catch(()=>{});
-  const read=async<T extends Page>(method:string,options:unknown):Promise<T>=>{
+  const read=async<T extends Page>(method:string,options:unknown,display=true):Promise<T>=>{
    const revision=this.revision,dataRevision=this.dataRevision;if(closed)fail('FENCED','Native watch is closed');
    const displayKey=method==='replicaPage'?selected.key:stable({watch:selected.key,method,options:options as JsonValue});
-   if(['replicaPage','localLivePage'].includes(method)&&!this.handle&&this.bootRestored){
+   if(display&&['replicaPage','localLivePage'].includes(method)&&this.bootRestored){
     const opts=options as SQLiteReplicaPageOptions;
     if((method==='localLivePage'||(opts.limit??128)===128&&(opts.offset??0)===0)&&opts.expected===undefined&&opts.generation===undefined){
      const shared=this.pages.get(selected.key);
      if(shared&&selected.bootPageKey===displayKey&&this.lastVisible.restored(shared))return shared as T;
      const saved=this.lastVisible.read<T>(displayKey);
-     if(saved!==undefined){selected.bootPageKey=displayKey;this.store(selected,saved,method==='replicaPage',true);return saved;}
+     if(saved!==undefined){selected.bootPageKey=displayKey;this.store(selected,saved,method==='replicaPage',true);
+      // A connected owner is not yet a published SQLite page. Keep stale
+      // display available while the ordinary fenced read reconciles it.
+      void read<T>(method,options,false).catch(()=>{/* Owner/control failures remain authoritative; source changes retry reads. */});
+      return saved;}
     }
    }
    if(method==='replicaPendingPage'||method==='livePendingPage')selected.pendingDisplay=true;
