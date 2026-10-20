@@ -22,6 +22,21 @@ it('runs generated-program network waits outside the fenced SQL queue and preser
   expect(sql.prepare('SELECT count(*) n FROM gv_intent_receipts').get()).toEqual({n:3});expect(changes.filter(change=>change.to==='write-tab'&&!change.reset).map(change=>change.sequence)).toEqual([1,2,3]);
   expect((await request('clientCall',{method:'increment',id:'a'},'write-tab','write-a')).value).toEqual(writes[0].value);expect(changes.filter(change=>change.to==='write-tab'&&!change.reset)).toHaveLength(3);
   expect((await request('clientCall',{method:'void'})).value).toBeNull();release({network:'finished'});expect((await pending).value).toEqual({network:'finished'});
+  // The real actor adapter must put waiting collection reads in two outer
+  // snapshots, not ten independent BEGIN/COMMIT pairs. Each caller still has
+  // its own nested savepoint and sees the same committed receipt count.
+  const transactions=vi.spyOn(raw,'withTransactionAsync'),readOrder:string[]=[];
+  const queuedAck=context.runOwner(0,async()=>{readOrder.push('ack');});
+  const sharedReads=Array.from({length:10},(_,index)=>context.runRead!(131072,async()=>{
+   let count=0;await context.database.withTransactionAsync(async()=>{
+    const receipt=await context.database.getFirstAsync<{n:number}>('SELECT count(*) n FROM gv_intent_receipts');
+    count=receipt!.n;readOrder.push('read'+index);
+   });return count;
+  }));
+  expect(await Promise.all(sharedReads)).toEqual(Array(10).fill(3));await queuedAck;
+  expect(transactions).toHaveBeenCalledTimes(2);
+  expect(readOrder).toEqual([...Array.from({length:8},(_,i)=>'read'+i),'ack','read8','read9']);
+  transactions.mockRestore();
   await expect(context.runOwner(2097153,async()=>null)).rejects.toMatchObject({code:'BUSY'});
   sql.exec('UPDATE gv_storage_meta SET epoch=epoch+1');const forbidden=vi.fn(async()=>{throw Error('Old SQL callback must not run');});await expect(context.runOwner(0,forbidden)).rejects.toMatchObject({code:'FENCED'});expect(forbidden).not.toHaveBeenCalled();
   await dispose();await dispose();expect(close).toHaveBeenCalledOnce();await expect(context.runOwner(0,async()=>null)).rejects.toMatchObject({code:'FENCED'});

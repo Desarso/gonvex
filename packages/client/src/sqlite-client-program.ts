@@ -125,10 +125,12 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
  }
  private checkCachedCaller(caller:SQLiteOwnerCaller,connection:Connection,generation:string){const current=this.checkCaller(caller,connection);if(current.readGeneration!==generation)fail('FENCED','Cached read admission changed');return current;}
  private async readCommitted<T>(connection:Connection,admitted:ReturnType<SQLiteWorkerSessions['resolveTab']>,caller:SQLiteOwnerCaller,read:()=>Promise<T>){
-  connection.feed.flushControls();
+  // The pending feed timer owns its batch. Cached reads must not force an
+  // acknowledgment write ahead of the page they are trying to display.
   await this.recover(connection);
   let reconciliationRequired=false;
-  const attempt=()=>this.owner.runOwner(131072,async()=>{
+  const runRead=<R>(bytes:number,run:()=>Promise<R>):Promise<R>=>this.owner.runRead?this.owner.runRead(bytes,run):this.owner.runOwner(bytes,run);
+  const attempt=()=>runRead(131072,async()=>{
    let result!:T;await this.owner.database.withTransactionAsync(async()=>{
     this.checkCachedCaller(caller,connection,admitted.readGeneration);const saved=await this.owner.canonical.loadSession(admitted.intentScope);
     if(!saved||saved.directive.visibilityScope!==admitted.scope)fail('FENCED','Cached read session changed');
