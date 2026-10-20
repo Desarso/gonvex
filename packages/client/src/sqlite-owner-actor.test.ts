@@ -35,7 +35,7 @@ it('runs generated-program network waits outside the fenced SQL queue and preser
   }));
   expect(await Promise.all(sharedReads)).toEqual(Array(10).fill(3));await queuedAck;
   expect(transactions).toHaveBeenCalledTimes(2);
-  expect(readOrder).toEqual([...Array.from({length:8},(_,i)=>'read'+i),'ack','read8','read9']);
+  expect(readOrder).toEqual(['ack',...Array.from({length:8},(_,i)=>'read'+i),'read8','read9']);
   transactions.mockRestore();
   await expect(context.runOwner(2097153,async()=>null)).rejects.toMatchObject({code:'BUSY'});
   sql.exec('UPDATE gv_storage_meta SET epoch=epoch+1');const forbidden=vi.fn(async()=>{throw Error('Old SQL callback must not run');});await expect(context.runOwner(0,forbidden)).rejects.toMatchObject({code:'FENCED'});expect(forbidden).not.toHaveBeenCalled();
