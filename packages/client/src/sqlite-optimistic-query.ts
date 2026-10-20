@@ -10,7 +10,7 @@ import {assertSQLiteMembership} from './sqlite-membership-plan.js';
 export async function readSQLiteOptimisticPage(db:SQLiteReplicaDatabase,schema:SQLiteTypedSchema,scope:string,physical:string,plan:SQLitePagePlan,sequence:number,predictionSequence:number,overlay?:SQLiteQueryOverlay,sources?:Readonly<Record<string,string>>):Promise<SQLiteTypedPage>{
  if(plan.after&&(plan.after.sequence!==sequence||plan.after.predictionSequence!==predictionSequence))fail('PAGE_CHANGED','Optimistic keyset generation changed');
  const membershipSource=await assertSQLiteMembership(db,schema,scope,plan);const table=schema[plan.table];if(!table)throw new TypeError('Unknown optimistic query table');
- const access=await sqliteSearchAccess(db,schema,plan);
+ const access=await sqliteSearchAccess(db,schema,plan,physical);
  const fields=plan.select?[...new Set([table.key,...plan.select])]:undefined;let take=plan.limit,records:Record<string,unknown>[],bytes:number;
  for(;;){
   try{

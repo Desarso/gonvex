@@ -635,3 +635,19 @@ it('compares JSON structures by paths and keeps array scalar types distinct',asy
  expect(await read({op:'jsonEq',field:'data',value:{a:1,b:2}})).toEqual(['object']);
  expect(await read({op:'jsonEq',field:'data',value:{b:2,a:1}})).toEqual(['object']);
 });
+
+it('searches committed rows exactly while their physical FTS partition is deferred',async()=>{
+ const {db,engine,host}=fixture();await engine.open('owner');
+ await host.runAsync('INSERT INTO gv_fts_deferred VALUES(?,?)','s','tasks');
+ await engine.apply('s',[{table:'tasks',id:'later',version:1,row:{_id:'later',name:'Deferred 東京 exact',due:1,workspace:'w'}}]);
+ const searchPlan={...plan,search:'東京 exact'};
+ expect((await engine.page('s',searchPlan)).rows.map(row=>row._id)).toEqual(['later']);
+ const {readSQLiteOptimisticPage}=await import('./sqlite-optimistic-query.js');
+ expect((await readSQLiteOptimisticPage(host,schema,'s','s',searchPlan,1,0)).rows.map(row=>row._id)).toEqual(['later']);
+ // A different, unpublished partition must not disable the ready partition's
+ // selective FTS path. Its marker has no authority over this scope.
+ await host.runAsync('DELETE FROM gv_fts_deferred WHERE scope=?','s');
+ await host.runAsync('INSERT INTO gv_fts_deferred VALUES(?,?)','other-private-stage','tasks');
+ const {sqliteSearchAccess}=await import('./sqlite-search-access.js');
+ expect(await sqliteSearchAccess(host,schema,searchPlan,'s')).toBe('trigram');
+});

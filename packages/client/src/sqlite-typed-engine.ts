@@ -630,7 +630,7 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
         if (admitted.after && admitted.after.sequence !== sequence) fail('PAGE_CHANGED', 'SQLite keyset belongs to an older replica snapshot');
         const membershipSource=await assertSQLiteMembership(this.db,this.schema,scope,admitted);
         const resolved=await sqliteQueryEntityScopes(this.db,scope,admitted),physical=resolved.physical;
-        const access=await this.indexesDeferred()?'ordered':await sqliteSearchAccess(this.db,this.schema,admitted);
+        const access=await this.indexesDeferred()?'ordered':await sqliteSearchAccess(this.db,this.schema,admitted,physical);
         let selectedStatement=compileSQLiteTypedPage(this.schema,physical,admitted,access,false,scope,undefined,resolved.sources,membershipSource);
         // The host must enforce a column byte limit before decoding as well.
         const fields = admitted.select ? [...new Set([this.schema[admitted.table]!.key, ...admitted.select])] : undefined;

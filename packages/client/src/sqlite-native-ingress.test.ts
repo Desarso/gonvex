@@ -152,3 +152,19 @@ it('keeps an unresolved or rejected later source gate behind already admitted du
   }finally{release();ingress.close();f.sql.close();}
  }
 });
+
+it('keeps precommit staging separate from durable acceptance while FULL commit is blocked or fails',async()=>{
+ for(const failCommit of [false,true]){
+  const f=fixture(),transaction=f.options.database.withTransactionAsync.bind(f.options.database);
+  let release!:()=>void,entered!:()=>void;const commitGate=new Promise<void>(resolve=>{release=resolve;}),staged=new Promise<void>(resolve=>{entered=resolve;});
+  f.options.database.withTransactionAsync=run=>transaction(async()=>{await run();entered();await commitGate;if(failCommit)throw Error('FULL sync failed');});
+  const ingress=new SQLiteNativeIngress(f.options);let accepted=false;
+  try{
+   const result=ingress.accept(wire(0)).then(()=>{accepted=true;return 'committed';},()=> 'rejected');
+   await staged;expect(f.sql.prepare('SELECT count(*) n FROM frames').get()).toEqual({n:1});
+   expect(accepted).toBe(false);expect(f.acks).toEqual([]);expect(f.commits).toBe(0);
+   release();expect(await result).toBe(failCommit?'rejected':'committed');
+   expect(f.acks).toHaveLength(failCommit?0:1);expect(f.sql.prepare('SELECT count(*) n FROM frames').get()).toEqual({n:failCommit?0:1});
+  }finally{release();ingress.close();f.sql.close();}
+ }
+});
