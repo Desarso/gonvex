@@ -327,15 +327,11 @@ impl Runtime {
         if path == "control.developer.enter" {
             let object = exact_object(args, &["tenantId"])?;
             let tenant_id = required_string(object, "tenantId")?;
-            let identity = account(connection)?;
+            // Project-developer authorization above grants support access, not
+            // a tenant membership. Validate the destination without provisioning.
             control
-                .admit_member(&connection.project_id, tenant_id, &identity.account.id)
-                .await
-                .map_err(|_| {
-                    ControlError::InvalidArguments(
-                        "provision developer access before entering the tenant".to_owned(),
-                    )
-                })?;
+                .resolve_public_tenant(&connection.project_id, tenant_id)
+                .await?;
         }
         let subject = control_subject(connection, definition.authorization);
         let mut transaction = control.begin_control_transaction(false).await?;
@@ -3304,12 +3300,22 @@ async fn list_account_tenants(
     transaction.commit().await?;
     let mut items = Vec::new();
     for (id, name, domain, timezone, description, profile) in candidates {
-        let Ok((_, member, _)) = control
-            .admit_member(&connection.project_id, &id, &identity.account.id)
-            .await
-        else {
-            continue;
-        };
+        // A redeemed self developer grant exposes its selected support tenant
+        // only on this connection; the actor's membership directory is unchanged.
+        let member =
+            if let Some(session) = connection.tenant.as_ref().filter(|session| {
+                session.developer_session.is_some() && session.route.tenant_id == id
+            }) {
+                session.member.clone()
+            } else {
+                let Ok((_, member, _)) = control
+                    .admit_member(&connection.project_id, &id, &identity.account.id)
+                    .await
+                else {
+                    continue;
+                };
+                member
+            };
         if ids_only {
             items.push(Value::String(id));
         } else {
