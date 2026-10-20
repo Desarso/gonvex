@@ -353,3 +353,23 @@ it.each(['reset','artifact','projection'] as const)('refuses a cached resume off
  }));
  f.program.detachTab('one');const {open}=await f.authenticate();expect(open.cursor).toBeUndefined();expect(open.digest).toBe('sum128-v1:00000000000000000000000000000000');
 });
+
+it('opens a source added during session activation once, across the session source loop',async()=>{
+ const lateRef={kind:'query' as const,path:'__local.lateTasks',delivery:'replica' as const,replica:{table:'tasks',key:'id',columns:['id','n'],maxRows:1000,maxBytes:1000000}};
+ const f=await fixture(false,false,[lateRef]);let authenticated=false,armed=true,release!:()=>void,entered!:()=>void;
+ const barrier=new Promise<void>(resolve=>{release=resolve;}),waiting=new Promise<void>(resolve=>{entered=resolve;});
+ const receive=Socket.prototype.receive;vi.spyOn(Socket.prototype,'receive').mockImplementation(function(this:Socket,message:any){if(message?.type==='auth.result')authenticated=true;return receive.call(this,message);});
+ const load=f.owner.canonical.loadSession.bind(f.owner.canonical);vi.spyOn(f.owner.canonical,'loadSession').mockImplementation(async(...args)=>{const saved=await load(...args);if(authenticated&&armed){armed=false;entered();await barrier;}return saved;});
+ const auth=f.authenticate();await waiting;const late=f.call({method:'watchReplica',path:lateRef.path,args:{}});
+ await vi.waitFor(()=>expect(f.program.budgets().find(row=>row.name==='native-source-descriptors')?.entries).toBe(2));
+ release();const {socket}=await auth;await late;
+ await vi.waitFor(()=>expect(socket.sent.filter(frame=>frame.type==='replica.open'&&frame.path===lateRef.path).length).toBeGreaterThan(0));
+ expect(socket.sent.filter(frame=>frame.type==='replica.open'&&frame.path===lateRef.path)).toHaveLength(1);
+});
+
+it('accepts a Ready-only verified resume at a newer cursor without another row body',async()=>{
+ const f=await fixture();await f.authenticate();const watched:any=await f.call({method:'watchReplica',path:'__local.tasks',args:{}});await f.call({method:'replicaPage',signature:watched.signature});
+ const socket=Socket.instances.at(-1)!;socket.receive({type:'replica.ready',id:socket.sent.find(frame=>frame.type==='replica.open').id,cursor:{epoch:'e',revision:2},digest:await rowDigest({id:'a',n:1})});socket.receive({type:'replica.watermark',revision:2});
+ await vi.waitFor(async()=>expect(await f.call({method:'replicaPage',signature:watched.signature})).toMatchObject({rows:[{id:'a',value:{id:'a',n:1}}],window:{header:{cursor:{epoch:'e',revision:2}}}}));
+ expect(await f.engine.integrity()).toBe('ok');
+});
