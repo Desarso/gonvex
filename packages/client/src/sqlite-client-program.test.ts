@@ -332,3 +332,24 @@ it('rejects a cached read crossing refresh when the member is definitively revok
  const pending=f.call({method:'replicaPage',signature:source.signature,limit:10}),fenced=expect(pending).rejects.toMatchObject({code:'FENCED'});
  await f.call({method:'auth',auth:{token:'refreshed-same-account'}});socket.receive({type:'auth.error',id:'membership-changed',error:'Member removed',code:'member_removed'});release();await fenced;
 });
+
+it('keeps verified per-source resume cursors while a durable global cohort is unfinished',async()=>{
+ const f=await fixture();await f.authenticate();const watched:any=await f.call({method:'watchReplica',path:'__local.tasks',args:{}});
+ await f.call({method:'replicaPage',signature:watched.signature});
+ await f.owner.runOwner(0,()=>f.db.withTransactionAsync(()=>f.db.runAsync('UPDATE gv_native_feed_progress SET unclosed=applied+1')));
+ // Resume negotiation is not read authority. The unfinished cohort still blocks UI reads.
+ await expect(f.call({method:'replicaPage',signature:watched.signature})).rejects.toMatchObject({code:'PAGE_CHANGED'});
+ f.program.detachTab('one');const {open}=await f.authenticate();
+ expect(open.cursor).toEqual({epoch:'e',revision:1});expect(open.digest).toBe(await rowDigest({id:'a',n:1}));
+ expect(open.keys).toBeUndefined();expect(open.hashes).toBeUndefined();
+});
+
+it.each(['reset','artifact','projection'] as const)('refuses a cached resume offer after %s invalidates its source contract',async(reason)=>{
+ const f=await fixture();await f.authenticate();const watched:any=await f.call({method:'watchReplica',path:'__local.tasks',args:{}});await f.call({method:'replicaPage',signature:watched.signature});
+ await f.owner.runOwner(0,()=>f.db.withTransactionAsync(async()=>{
+  if(reason==='reset')await f.db.runAsync('INSERT INTO gv_native_feed_resets VALUES(?)','visible');
+  if(reason==='artifact')await f.db.runAsync("UPDATE gv_window_generations SET header=json_set(header,'$.artifactHash','obsolete')");
+  if(reason==='projection')await f.db.runAsync("UPDATE gv_window_generations SET header=json_set(header,'$.columns',json(?))",JSON.stringify(['id']));
+ }));
+ f.program.detachTab('one');const {open}=await f.authenticate();expect(open.cursor).toBeUndefined();expect(open.digest).toBe('sum128-v1:00000000000000000000000000000000');
+});

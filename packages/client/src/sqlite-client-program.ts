@@ -227,9 +227,15 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
   let cached:{cursor:import('@gonvex/protocol').ReplicaCursor;digest:string}|undefined;
   if(admitted&&!source.forceSnapshot&&capabilities.replicaResume===1)await this.owner.runOwner(0,()=>this.owner.database.withTransactionAsync(async()=>{
    const saved=await this.owner.canonical.loadSession(admitted.intentScope);if(!saved||saved.directive.visibilityScope!==admitted.scope)return;
-   try{await connection.feed.assertCommittedReadable({scope:admitted.scope,epoch:saved.directive.epoch});}catch(error){if((error as {code?:string})?.code==='PAGE_CHANGED')return;throw error;}
+   // This is a resume offer, not a read certificate. An unfinished global
+   // cohort must not erase another source's durably verified cursor. The
+   // server still validates its epoch, retained history and aggregate digest.
+   // Explicit cache resets and generated-contract changes require a snapshot.
+   if(await this.owner.database.getFirstAsync('SELECT 1 FROM gv_native_feed_resets WHERE scope=?',admitted.scope))return;
    const window=await this.windows.header(admitted.scope,source.signature),header=window?.header;
-   if(header?.kind!=='replica'||header.source!=='server'||header.entity!==source.ref.replica!.table||header.key!==source.ref.replica!.key||!header.cursor||!header.aggregateDigest?.startsWith(sum?'sum128-v1:':'xor1:'))return;
+   if(header?.kind!=='replica'||header.source!=='server'||header.entity!==source.ref.replica!.table||header.key!==source.ref.replica!.key||header.artifactHash!==this.binding.artifactHash||!header.cursor||!header.aggregateDigest?.startsWith(sum?'sum128-v1:':'xor1:'))return;
+   const columns=source.ref.replica!.columns??Object.keys(this.owner.engine.schema[source.ref.replica!.table]!.fields);
+   if(header.columns?.length!==columns.length||!header.columns.every((column,index)=>column===columns[index]))return;
    cached={cursor:header.cursor,digest:header.aggregateDigest};
   }));
   if(connection.authVersion!==version||connection.sources.get(source.signature)!==source||source.closing||admitted&&this.admission(connection)?.generation!==admitted.generation)return;
