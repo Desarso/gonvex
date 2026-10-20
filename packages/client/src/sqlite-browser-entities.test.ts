@@ -42,3 +42,14 @@ it('does not lose a mounted read when an empty refresh has settled before its cl
  expect(f.view.entity('tasks','a')).toEqual({id:'a',n:1});
  expect(f.calls).toHaveLength(1);expect(f.errors).toEqual([]);release();f.view.close();
 });
+
+it('retains one decoded row without a second JSON string and shares unchanged row identities',async()=>{
+ const f=fixture(),payload={id:'large',text:'x'.repeat(16384),nested:{x:[1,true,null]}};
+ f.handler=async()=>({generation:{epoch:1,sequence:1},rows:[{id:'large',value:structuredClone(payload)}]});
+ const release=f.view.retain('tasks',['large']);await vi.waitFor(()=>expect(f.view.entity('tasks','large')).toEqual(payload));
+ const row=f.view.entity('tasks','large'),before=f.ledger.bytes;
+ expect(before).toBeLessThan(40000); // 32 KiB JSON/row estimate plus entry metadata, not a second 32 KiB string.
+ f.view.refresh();await vi.waitFor(()=>expect(f.calls).toHaveLength(2));await new Promise<void>(resolve=>queueMicrotask(resolve));
+ expect(f.view.entity('tasks','large')).toBe(row);await vi.waitFor(()=>expect(f.ledger.bytes).toBe(before));
+ release();f.view.close();expect(f.ledger.bytes).toBe(0);
+});
