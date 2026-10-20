@@ -193,9 +193,9 @@ type ReducerOutboxDatabase = DexieDatabase & {
  * barrier until it is acknowledged, and `loadAll` recovers abandoned inflight
  * work after a crash by returning it to pending.
  *
- * IndexedDB is an optimization for durability, not a prerequisite for the
- * optimistic reducer path. Disabled or failed storage permanently degrades
- * this instance to the same queue semantics in memory for the current session.
+ * Accepted intents must be durable. Storage failure rejects enqueue so callers
+ * cannot mistake a session-only write for a queued offline edit. Explicitly
+ * disabled persistence retains the documented session-only queue semantics.
  */
 export class DexieReducerOutbox implements ReducerOutbox {
   private readonly databaseName: string;
@@ -207,8 +207,10 @@ export class DexieReducerOutbox implements ReducerOutbox {
   private databasePromise?: Promise<ReducerOutboxDatabase>;
   private memoryOnly: boolean;
   private nextMemoryId = 1;
+  private readonly persistenceRequired: boolean;
 
   constructor(options: ReducerOutboxOptions = {}) {
+    this.persistenceRequired = options.enabled !== false;
     this.databaseName = options.databaseName ?? "gonvex-outbox";
     this.indexedDB = options.indexedDB;
     this.keyRange = options.IDBKeyRange;
@@ -237,7 +239,7 @@ export class DexieReducerOutbox implements ReducerOutbox {
     };
 
     if (this.memoryOnly) {
-      if (reducer.localExecution) throw new Error("Durable storage is required for local reducer execution");
+      if (this.persistenceRequired || reducer.localExecution) throw new Error("Durable storage is required to queue a reducer; no intent was accepted");
       return this.enqueueInMemory(entry);
     }
     try {
@@ -254,8 +256,7 @@ export class DexieReducerOutbox implements ReducerOutbox {
       return cloneEntry(stored);
     } catch (error) {
       if (reducer.localExecution) throw new Error("Could not persist local reducer; no changes were staged", { cause: error });
-      this.degradeToMemory();
-      return this.enqueueInMemory(entry);
+      throw new Error("Could not persist queued reducer; no intent was accepted", { cause: error });
     }
   }
 

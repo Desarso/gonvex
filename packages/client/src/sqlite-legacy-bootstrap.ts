@@ -53,10 +53,13 @@ export class SQLiteLegacyBootstrap {
  }
  async step(identityScope:string,session:LocalReplicaSession,current:()=>boolean=()=>true){
   const source=await this.open();
+  // An old tab may create its first queue only after native admission. An
+  // absent database is not proof that every deployed legacy writer retired.
+  if(!source.outbox)source.outbox=await SQLiteIndexedDBMigrationSource.open(this.options.outboxName,this.options.factory,this.options.ranges);
   const imported=source.outbox?.stores().includes('entries')?await this.intents.migrate({source:source.outbox,store:'entries',identityScope,session,current:()=>!this.closed&&current(),onePage:true,after:this.intentCursor?.scope===identityScope?this.intentCursor.after:undefined}):undefined;
   this.intentCursor=imported?.nextKey!=null?{scope:identityScope,after:imported.nextKey}:undefined;
   const rows=source.replica?.stores().includes('entities')?await this.rows.step({source:source.replica,identityScope,session}):{verified:true};
-  return {...rows,imported:imported?.copied??0,watching:!!source.outbox,moreIntents:imported?.nextKey!=null};
+  return {...rows,imported:imported?.copied??0,watching:!!(this.options.factory??globalThis.indexedDB),moreIntents:imported?.nextKey!=null};
  }
  close(){if(this.closed)return;this.closed=true;void this.sources?.then(source=>{source.replica?.close();source.outbox?.close();},()=>{});}
 }

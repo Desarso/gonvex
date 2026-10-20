@@ -116,3 +116,17 @@ it('background bootstrap imports a public old-tab enqueue after cutover and pres
   expect(await lateTab.count(identityScope)).toBe(2);
  }finally{bootstrap.close();f.sql.close();}
 });
+
+it('discovers a legacy outbox first created after native admission',async()=>{
+ const factory=new IDBFactory(),f=await sqlite();
+ const owner={database:f.db,engine:f.engine,canonical:f.canonical,runOwner:<T>(_bytes:number,run:()=>Promise<T>)=>run()} as SQLiteOwnerProgramContext;
+ const bootstrap=new SQLiteLegacyBootstrap({owner,journal:f.journal,artifactHash:'artifact',replicaName:'absent-replica',outboxName:'initially-absent-outbox',factory,ranges:IDBKeyRange});
+ try{
+  await bootstrap.prepare(identityScope,session);
+  expect(await bootstrap.step(identityScope,session)).toMatchObject({imported:0,watching:true});
+  const writer=createReducerOutbox({databaseName:'initially-absent-outbox',indexedDB:factory,IDBKeyRange});
+  await writer.enqueue({scope:identityScope,path:'tasks/create',args:{title:'First late edit'},idempotencyKey:'created-late'});
+  expect(await bootstrap.step(identityScope,session)).toMatchObject({imported:1,watching:true});
+  expect(await f.journal.find(identityScope,'created-late')).toMatchObject({args:{title:'First late edit'}});
+ }finally{bootstrap.close();f.sql.close();}
+});

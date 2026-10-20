@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { IDBKeyRange, indexedDB } from "fake-indexeddb";
+import { IDBFactory, IDBObjectStore, IDBKeyRange, indexedDB } from "fake-indexeddb";
 import { DexieReducerOutbox, createReducerOutbox, type OutboxStore } from "./outbox";
 import { createKvOutboxStore, createMemoryGonvexKv } from "./kv-stores";
 
@@ -358,4 +358,27 @@ describe.each([
     expect((await outbox.listScopes()).map(({ scope: owner }) => owner)).toEqual([scope]);
     expect(await outbox.list(scope)).toHaveLength(1);
   });
+});
+
+describe('durable legacy cutover writes',()=>{
+ it('rejects a queued-only write on quota failure and durably accepts a later retry',async()=>{
+  const factory=new IDBFactory(),databaseName='quota-cutover-'+crypto.randomUUID();
+  const options={databaseName,indexedDB:factory,IDBKeyRange};
+  const writer=createReducerOutbox(options);
+  const first=await writer.enqueue({scope,path:'tasks.update',args:{name:'Before'},idempotencyKey:'before'});
+  const original=IDBObjectStore.prototype.add;
+  const failure=vi.spyOn(IDBObjectStore.prototype,'add').mockImplementation(function(this:IDBObjectStore,...args:Parameters<typeof original>){if(this.name==='entries')throw new DOMException('Disk full','QuotaExceededError');return original.apply(this,args);});
+  try{await expect(writer.enqueue({scope,path:'tasks.update',args:{name:'Offline'},idempotencyKey:'retry'})).rejects.toThrow('no intent was accepted');}
+  finally{failure.mockRestore();}
+  expect(await writer.count(scope)).toBe(1);
+  await writer.enqueue({scope,path:'tasks.update',args:{name:'Offline'},idempotencyKey:'retry'});
+  expect(await createReducerOutbox(options).list(scope)).toMatchObject([{id:first.id,idempotencyKey:'before'},{idempotencyKey:'retry'}]);
+ });
+ it('never reports success through memory when a retired or incompatible store rejects a write',async()=>{
+  const factory=new IDBFactory(),databaseName='retired-cutover-'+crypto.randomUUID();
+  const db=await new Promise<IDBDatabase>((resolve,reject)=>{const opening=factory.open(databaseName,21);opening.onupgradeneeded=()=>{opening.result.createObjectStore('entries',{keyPath:'__retired_write_fence'}).createIndex('scope','scope');opening.result.createObjectStore('__gonvex_sqlite_source_fence',{keyPath:'key'}).put({key:'owner',protocol:'sqlite-bounded-v1',sourceVersion:20,fenceVersion:21});};opening.onsuccess=()=>resolve(opening.result);opening.onerror=()=>reject(opening.error);});
+  db.close();const writer=createReducerOutbox({databaseName,indexedDB:factory,IDBKeyRange});
+  for(let n=0;n<2;n++)await expect(writer.enqueue({scope,path:'tasks.update',args:{name:'Must remain unsaved'},idempotencyKey:'blocked-'+n})).rejects.toThrow();
+  expect(await writer.count(scope)).toBe(0);
+ });
 });
