@@ -1,4 +1,4 @@
-import {probeSQLiteWasmBytes,readSQLiteWasmSeed} from './sqlite-wasm-byte-cache.js';
+import {probeSQLiteWasmBytes,readSQLiteWasmSeed} from './sqlite-wasm-bytes.js';
 import type { BindableValue, Database, PreparedStatement, Sqlite3Static } from '@sqlite.org/sqlite-wasm';
 import type { SQLiteReplicaDatabase } from './sqlite-replica-storage.js';
 import { SQLiteBridgeBudgetError } from './wasm-sqlite-database.js';
@@ -61,7 +61,9 @@ export async function openInitializedOfficialSQLiteHost(sqlite3: Sqlite3Static):
   let pool: Awaited<ReturnType<Sqlite3Static['installOpfsSAHPoolVfs']>> | undefined;
   if (typeof navigator !== 'undefined' && typeof navigator.storage?.getDirectory === 'function') {
     try {
-      pool = await sqlite3.installOpfsSAHPoolVfs({ directory: '.gonvex-sqlite-v1', initialCapacity: 6, preserveOnInitFailure: true } as Parameters<typeof sqlite3.installOpfsSAHPoolVfs>[0]);
+      // One database connection uses the database/WAL and temporary files.
+      // Existing pools keep their handles; never shrink or clear durable files.
+      pool = await sqlite3.installOpfsSAHPoolVfs({ directory: '.gonvex-sqlite-v1', initialCapacity: 4, preserveOnInitFailure: true } as Parameters<typeof sqlite3.installOpfsSAHPoolVfs>[0]);
     } catch (error) {
       const e=error as Error;
       if (!['SecurityError','NotSupportedError','NotAllowedError'].includes(e.name) && !/OPFS.*(?:unavailable|not supported)|(?:unavailable|not supported).*OPFS/i.test(e.message)) throw error;

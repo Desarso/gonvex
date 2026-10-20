@@ -1,6 +1,6 @@
 import {readFile} from 'node:fs/promises';
 import {afterEach,expect,it,vi} from 'vitest';
-import {installSQLiteWasmByteCache,probeSQLiteWasmBytes,readSQLiteWasmSeed,verifiedSQLiteWasmBytes} from './sqlite-wasm-byte-cache.js';
+import {installSQLiteWasmByteCache,probeSQLiteWasmBytes,readSQLiteWasmSeed,verifiedSQLiteWasmBytes} from './sqlite-wasm-bytes.js';
 import {sqliteWasmLength,sqliteWasmSHA256} from './sqlite-wasm-manifest.js';
 const engine=new Uint8Array(await readFile(new URL('../sqlite-native/sqlite3.wasm',import.meta.url)));
 const binary=new TextEncoder().encode('small immutable engine fixture'),asset={length:binary.byteLength,sha256:Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',binary)),byte=>byte.toString(16).padStart(2,'0')).join('')};

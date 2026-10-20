@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {IDBFactory,IDBKeyRange} from "fake-indexeddb";
 import { GonvexClient, GonvexClientError, MemoryLocalReplicaStorage, control, type FunctionReference } from "./index";
 import { replicaHashesDigest, replicaRowsHashes } from "./replica-integrity";
 
@@ -509,31 +510,39 @@ describe("GonvexClient", () => {
 	});
 
 	it("sends the outbox idempotency key on replayable reducers and omits it on one-shots", async () => {
-		const client = new GonvexClient("ws://runtime.test/ws");
-		client.connect();
-		const socket = latestSocket();
-		socket.open();
-		socket.receive({ type: "session.ready", capabilities: {}, replica: testReplicaDirective });
-		await flushMicrotasks();
-
-		const optimistic = client.reducer(
-			{ kind: "reducer", path: "tasks.update" },
-			{ id: "a", title: "T" },
-			{ optimistic: [{ collection: "tasks.list", rowId: "a", op: "patch", fields: { title: "T" } }] },
-		);
-		await vi.advanceTimersByTimeAsync(0);
-		const [replayable] = sentMessages(socket).filter((frame) => frame.type === "reducer.call");
-		expect(replayable.idempotencyKey).toBe(replayable.id);
-		socket.receive({ type: "reducer.result", id: replayable.id, path: replayable.path, result: null });
-		await optimistic;
-
-		const oneShot = client.reducer({ kind: "reducer", path: "tasks.create" }, { title: "x" });
-		await vi.advanceTimersByTimeAsync(0);
-		const oneShotCall = sentMessages(socket).filter((frame) => frame.type === "reducer.call").at(-1);
-		expect(oneShotCall.idempotencyKey).toBeUndefined();
-		socket.receive({ type: "reducer.result", id: oneShotCall.id, path: oneShotCall.path, result: "id-x" });
-		await expect(oneShot).resolves.toBe("id-x");
-	});
+        // Real IDB transactions need their real event loop. Advancing the mock
+        // transport clock must not race storage initialization or close its DB.
+        vi.useRealTimers();
+        vi.stubGlobal("indexedDB",new IDBFactory());
+        vi.stubGlobal("IDBKeyRange",IDBKeyRange);
+        const client = new GonvexClient("ws://runtime.test/ws",{outbox:{databaseName:"replay-durable-"+crypto.randomUUID()}});
+        try {
+            client.connect();
+            const socket=latestSocket();socket.open();
+            socket.receive({type:"session.ready",capabilities:{},replica:testReplicaDirective});
+            await flushMicrotasks();
+            let enqueueError:unknown;
+            const optimistic=client.reducer(
+                {kind:"reducer",path:"tasks.update"},
+                {id:"a",title:"T"},
+                {optimistic:[{collection:"tasks.list",rowId:"a",op:"patch",fields:{title:"T"}}]},
+            ).catch(error=>{enqueueError=error;});
+            await vi.waitFor(()=>{
+                if(enqueueError)throw enqueueError;
+                expect(sentMessages(socket).some(frame=>frame.type==="reducer.call")).toBe(true);
+            });
+            const [replayable]=sentMessages(socket).filter(frame=>frame.type==="reducer.call");
+            expect(replayable.idempotencyKey).toBe(replayable.id);
+            socket.receive({type:"reducer.result",id:replayable.id,path:replayable.path,result:null});
+            await optimistic;if(enqueueError)throw enqueueError;
+            const oneShot=client.reducer({kind:"reducer",path:"tasks.create"},{title:"x"});
+            await vi.waitFor(()=>expect(sentMessages(socket).filter(frame=>frame.type==="reducer.call")).toHaveLength(2));
+            const oneShotCall=sentMessages(socket).filter(frame=>frame.type==="reducer.call").at(-1)!;
+            expect(oneShotCall.idempotencyKey).toBeUndefined();
+            socket.receive({type:"reducer.result",id:oneShotCall.id,path:oneShotCall.path,result:"id-x"});
+            await expect(oneShot).resolves.toBe("id-x");
+        } finally { client.close(); }
+    });
 
 	it("does not replay a new optimistic reducer while its Replica scope is restoring", async () => {
 		const client = new GonvexClient("ws://runtime.test/ws", {

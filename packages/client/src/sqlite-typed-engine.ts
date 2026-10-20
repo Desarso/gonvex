@@ -132,6 +132,7 @@ ${sqliteEntityAliasSchema}
 CREATE TABLE IF NOT EXISTS gv_bootstrap(scope TEXT PRIMARY KEY,token TEXT UNIQUE NOT NULL,physical TEXT NOT NULL,next_page INTEGER NOT NULL,rows INTEGER NOT NULL,root TEXT NOT NULL,base_sequence INTEGER NOT NULL,complete INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS gv_bootstrap_pages(token TEXT NOT NULL,page INTEGER NOT NULL,hash TEXT NOT NULL,PRIMARY KEY(token,page)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT NULL) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS gv_typed_schema_validation(id INTEGER PRIMARY KEY CHECK(id=1),value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS gv_owner_receipts(scope TEXT NOT NULL,id TEXT NOT NULL,hash TEXT NOT NULL,result TEXT NOT NULL,PRIMARY KEY(scope,id)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),value BLOB NOT NULL);`);
         // Newer hosts can keep frame children binary instead of serializing
@@ -158,7 +159,20 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
           }
           if (!compatible) fail('SCHEMA_MISMATCH', 'SQLite layout requires an explicit migration');
         }
-        await installSQLiteTypedSchema(this.db,this.schema,!await this.indexesDeferred());
+        // Exact generated layout, validator revision and SQLite's own DDL
+        // cookie must all match. A changed/dropped index, migration or legacy
+        // layout takes the normal installer; row writes do not invalidate it.
+        const indexes=!await this.indexesDeferred();
+        const schemaHash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(signature))),byte=>byte.toString(16).padStart(2,'0')).join('');
+        const cookie=await this.db.getFirstAsync<{schema_version:number}>('PRAGMA schema_version');
+        const validation=await this.db.getFirstAsync<{value:string}>("SELECT value FROM gv_typed_schema_validation WHERE id=1");
+        const validated=(version:number)=>schemaHash+':'+version+':'+Number(indexes);
+        if(!old?.matches||!cookie||validation?.value!==validated(cookie.schema_version)){
+          await installSQLiteTypedSchema(this.db,this.schema,indexes);
+          const installed=await this.db.getFirstAsync<{schema_version:number}>('PRAGMA schema_version');
+          if(!installed)fail('SCHEMA_MISMATCH','SQLite schema cookie is unavailable');
+          await this.db.runAsync("INSERT INTO gv_typed_schema_validation(id,value) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value",validated(installed.schema_version));
+        }
         this.epoch = (old?.epoch ?? 0) + 1;
         if (!Number.isSafeInteger(this.epoch)) fail('FENCED', 'SQLite epoch exhausted');
         await this.db.runAsync('INSERT INTO gv_storage_meta VALUES(1,?,?,?,0) ON CONFLICT(id) DO UPDATE SET schema=excluded.schema,epoch=excluded.epoch,owner=excluded.owner', signature, this.epoch, owner);

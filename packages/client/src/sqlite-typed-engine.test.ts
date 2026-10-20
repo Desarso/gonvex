@@ -24,6 +24,36 @@ function fixture() {
   return { db, host, engine: new SQLiteTypedReplicaEngine(host, schema) };
 }
 const plan: SQLitePagePlan = { table: 'tasks', order: [{ field: 'due', direction: 'asc' }], limit: 2 };
+
+it('skips typed DDL on an unchanged warm open while retaining rows and fencing the old owner',async()=>{
+ const {db,host,engine}=fixture();await engine.open('first');
+ await engine.apply('s',[{table:'tasks',id:'cached',version:1,row:{_id:'cached',due:1,name:'Cached row',workspace:'w',done:false}}]);
+ const exec=vi.spyOn(host,'execAsync'),next=new SQLiteTypedReplicaEngine(host,schema);
+ await next.open('second');
+ expect(exec.mock.calls.filter(([sql])=>sql.includes('CREATE TABLE IF NOT EXISTS "gv_t_'))).toHaveLength(0);
+ expect((await next.page('s',plan)).rows[0]).toMatchObject({name:'Cached row'});
+ await expect(engine.verifyOwner()).rejects.toMatchObject({code:'FENCED'});
+ expect(db.prepare("SELECT value FROM gv_typed_schema_validation WHERE id=1").get()).toBeDefined();
+});
+
+it('invalidates the warm shortcut after external DDL and recreates a missing generated index',async()=>{
+ const {db,host,engine}=fixture();await engine.open('first');
+ const index=db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL LIMIT 1").get(sqliteTableName('tasks'))!.name as string;
+ db.exec('DROP INDEX '+sqliteIdentifier(index));
+ const exec=vi.spyOn(host,'execAsync');await new SQLiteTypedReplicaEngine(host,schema).open('second');
+ expect(exec.mock.calls.some(([sql])=>sql.includes('CREATE TABLE IF NOT EXISTS "gv_t_'))).toBe(true);
+ expect(db.prepare('SELECT 1 FROM sqlite_master WHERE name=?').get(index)).toBeDefined();
+});
+
+it('rolls back owner admission and schema certificates when validation cannot commit',async()=>{
+ const {db,host,engine}=fixture();await engine.open('first');
+ const before=db.prepare("SELECT value FROM gv_typed_schema_validation WHERE id=1").get()!.value;
+ db.exec("CREATE TRIGGER reject_validation BEFORE UPDATE ON gv_typed_schema_validation BEGIN SELECT RAISE(ABORT,'validation quota surrogate'); END");
+ await expect(new SQLiteTypedReplicaEngine(host,schema).open('second')).rejects.toThrow('validation quota surrogate');
+ expect(await engine.verifyOwner()).toMatchObject({epoch:1});
+ expect(db.prepare("SELECT value FROM gv_typed_schema_validation WHERE id=1").get()!.value).toBe(before);
+ db.exec('DROP TRIGGER reject_validation');await new SQLiteTypedReplicaEngine(host,schema).open('retry');
+});
 const write = (id: string, due: number | null, name = id, workspace = 'w') => ({ table: 'tasks', id, version: 1, row: { _id: id, due, name, workspace, done: false } });
 
 it('uses real typed columns and covering keyset indexes with no temporary sort', async () => {

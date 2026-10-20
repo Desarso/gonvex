@@ -1,4 +1,4 @@
-import {installSQLiteWasmByteCache} from './sqlite-wasm-byte-cache.js';
+import {installSQLiteWasmByteCache} from './sqlite-wasm-bytes.js';
 import {sqliteWorkerProtocol as protocol} from './sqlite-worker-protocol.js';
 import {sqliteRequestBytes} from './sqlite-request-frame.js';
 // Optional SharedWorker entry. This router holds only bounded ports and
