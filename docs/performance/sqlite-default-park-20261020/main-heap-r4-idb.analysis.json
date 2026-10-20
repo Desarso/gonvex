@@ -1,0 +1,4619 @@
+{
+  "nodes": 776025,
+  "reachable": 775948,
+  "edges": 3606404,
+  "dominatorRounds": 14,
+  "reachableSelfBytes": 54132379,
+  "constructors": [
+    {
+      "type": "native",
+      "name": "system / ExternalStringData",
+      "count": 3221,
+      "selfBytes": 14122911
+    },
+    {
+      "type": "code",
+      "name": "system / InstructionStream",
+      "count": 4511,
+      "selfBytes": 7799552
+    },
+    {
+      "type": "string",
+      "name": "(string)",
+      "count": 114095,
+      "selfBytes": 2636708
+    },
+    {
+      "type": "code",
+      "name": "system / BytecodeArray",
+      "count": 7838,
+      "selfBytes": 2299612
+    },
+    {
+      "type": "object",
+      "name": "Object",
+      "count": 73609,
+      "selfBytes": 2019448
+    },
+    {
+      "type": "code",
+      "name": "system / TrustedByteArray",
+      "count": 17848,
+      "selfBytes": 1871500
+    },
+    {
+      "type": "array",
+      "name": "(object properties)",
+      "count": 1497,
+      "selfBytes": 1652628
+    },
+    {
+      "type": "object shape",
+      "name": "system / Map",
+      "count": 27750,
+      "selfBytes": 1114400
+    },
+    {
+      "type": "native",
+      "name": "(redacted name)",
+      "count": 5395,
+      "selfBytes": 937664
+    },
+    {
+      "type": "code",
+      "name": "system / ObjectBoilerplateDescription",
+      "count": 16788,
+      "selfBytes": 825824
+    },
+    {
+      "type": "array",
+      "name": "",
+      "count": 8835,
+      "selfBytes": 761400
+    },
+    {
+      "type": "code",
+      "name": "system / FeedbackVector",
+      "count": 3961,
+      "selfBytes": 753560
+    },
+    {
+      "type": "object shape",
+      "name": "system / DescriptorArray",
+      "count": 6044,
+      "selfBytes": 681768
+    },
+    {
+      "type": "native",
+      "name": "blink::ScriptResource",
+      "count": 219,
+      "selfBytes": 653496
+    },
+    {
+      "type": "closure",
+      "name": "",
+      "count": 22729,
+      "selfBytes": 643160
+    },
+    {
+      "type": "array",
+      "name": "(object elements)",
+      "count": 22733,
+      "selfBytes": 617000
+    },
+    {
+      "type": "object",
+      "name": "(redacted name)",
+      "count": 16909,
+      "selfBytes": 573892
+    },
+    {
+      "type": "code",
+      "name": "system / ScopeInfo",
+      "count": 8313,
+      "selfBytes": 554432
+    },
+    {
+      "type": "native",
+      "name": "blink::StyleRule",
+      "count": 9071,
+      "selfBytes": 544192
+    },
+    {
+      "type": "code",
+      "name": "(constant pool)",
+      "count": 7397,
+      "selfBytes": 488348
+    },
+    {
+      "type": "object",
+      "name": "Array",
+      "count": 28409,
+      "selfBytes": 454756
+    },
+    {
+      "type": "code",
+      "name": "system / FeedbackCell",
+      "count": 25083,
+      "selfBytes": 401312
+    },
+    {
+      "type": "concatenated string",
+      "name": "(concatenated string)",
+      "count": 19146,
+      "selfBytes": 382920
+    },
+    {
+      "type": "native",
+      "name": "system / FunctionTemplateInfo",
+      "count": 5641,
+      "selfBytes": 360896
+    },
+    {
+      "type": "code",
+      "name": "system / UncompiledDataWithoutPreparseData",
+      "count": 16773,
+      "selfBytes": 335460
+    },
+    {
+      "type": "code",
+      "name": "system / FeedbackMetadata",
+      "count": 6914,
+      "selfBytes": 326136
+    },
+    {
+      "type": "code",
+      "name": "system / Code",
+      "count": 4511,
+      "selfBytes": 324792
+    },
+    {
+      "type": "native",
+      "name": "system / PropertyArray",
+      "count": 8122,
+      "selfBytes": 287108
+    },
+    {
+      "type": "native",
+      "name": "blink::CSSSelector::RareData",
+      "count": 3938,
+      "selfBytes": 283536
+    },
+    {
+      "type": "code",
+      "name": "system / SharedFunctionInfo",
+      "count": 5513,
+      "selfBytes": 262752
+    },
+    {
+      "type": "object",
+      "name": "gi",
+      "count": 2294,
+      "selfBytes": 238576
+    },
+    {
+      "type": "native",
+      "name": "blink::HashTrieNode<blink::CSSVariableData>",
+      "count": 866,
+      "selfBytes": 235552
+    },
+    {
+      "type": "code",
+      "name": "(constant elements)",
+      "count": 9159,
+      "selfBytes": 214824
+    },
+    {
+      "type": "code",
+      "name": "system / WeakFixedArray",
+      "count": 2205,
+      "selfBytes": 212396
+    },
+    {
+      "type": "closure",
+      "name": "native_bind",
+      "count": 8172,
+      "selfBytes": 196128
+    },
+    {
+      "type": "code",
+      "name": "(context local names)",
+      "count": 47,
+      "selfBytes": 195500
+    },
+    {
+      "type": "native",
+      "name": "blink::NetworkResourcesData::ResourceData",
+      "count": 660,
+      "selfBytes": 190080
+    },
+    {
+      "type": "native",
+      "name": "system / AccessorPair",
+      "count": 11455,
+      "selfBytes": 137460
+    },
+    {
+      "type": "native",
+      "name": "system / SourceTextModuleInfoEntry",
+      "count": 4216,
+      "selfBytes": 134912
+    },
+    {
+      "type": "native",
+      "name": "JSModuleScript",
+      "count": 312,
+      "selfBytes": 129792
+    },
+    {
+      "type": "native",
+      "name": "blink::CSSLazyPropertyParser",
+      "count": 8007,
+      "selfBytes": 128112
+    },
+    {
+      "type": "code",
+      "name": "system / ArrayBoilerplateDescription",
+      "count": 10226,
+      "selfBytes": 122700
+    },
+    {
+      "type": "native",
+      "name": "blink::ImmutableCSSPropertyValueSet",
+      "count": 1691,
+      "selfBytes": 122016
+    },
+    {
+      "type": "native",
+      "name": "blink::ComputedStyleBase::StyleSurroundData",
+      "count": 387,
+      "selfBytes": 120744
+    },
+    {
+      "type": "code",
+      "name": "system / ClosureFeedbackCellArray",
+      "count": 2549,
+      "selfBytes": 117108
+    },
+    {
+      "type": "code",
+      "name": "system / ProtectedFixedArray",
+      "count": 455,
+      "selfBytes": 111832
+    },
+    {
+      "type": "array",
+      "name": "(bound arguments)",
+      "count": 8114,
+      "selfBytes": 111556
+    },
+    {
+      "type": "native",
+      "name": "blink::CSSVariableData",
+      "count": 2211,
+      "selfBytes": 110256
+    },
+    {
+      "type": "code",
+      "name": "system / AllocationSite",
+      "count": 3662,
+      "selfBytes": 102432
+    },
+    {
+      "type": "native",
+      "name": "blink::FontResource",
+      "count": 34,
+      "selfBytes": 101728
+    }
+  ],
+  "taggedOwners": [
+    {
+      "node": 89359,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 78376,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 296579,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 78228,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 539937,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 61268,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 263477,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 61200,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 343483,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 47208,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 94707,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 28716,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 242552,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 25340,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 471837,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 25340,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 93411,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 17212,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 439875,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 17212,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 342017,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 14972,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 411265,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 14972,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 415190,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 10696,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 415193,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 10696,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 78107,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 9684,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 78111,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 9684,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 78115,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 9684,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 78119,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 9684,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 78123,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 9684,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 78127,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 9684,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 316532,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 9408,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 560768,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 9352,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 96211,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 8824,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 234961,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 8816,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 407246,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 8736,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 412134,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 8736,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 516710,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 8736,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 516722,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 8736,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 516735,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 8736,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 516760,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 8736,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 415936,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 8664,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 630547,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 8508,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 455366,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 8488,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 88496,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 8328,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 237528,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 7708,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 557789,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 7424,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 389265,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 7156,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 88766,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 7044,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 387233,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 6760,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 88675,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 6672,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 298399,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 6328,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 298437,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 6328,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 298426,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 6264,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 516680,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 6264,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 390283,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 5280,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 88643,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 5256,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 415527,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 5188,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 94797,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 5064,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 416107,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 4948,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 416226,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 4836,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 416242,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 4836,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 416250,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 4836,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 416359,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 4836,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 416141,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 4812,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 416231,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 4812,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 415914,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 4660,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 415653,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 4228,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 415638,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 4156,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 385837,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 3488,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 455302,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 3488,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 510749,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 3488,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 510763,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 3488,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 510976,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 3488,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 455427,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 3440,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 510733,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 3440,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 510742,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 3440,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 510756,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 3440,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 660826,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 3440,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 510802,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 3420,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 278247,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 3372,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 278262,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 3372,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 278271,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 3372,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 510775,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 3372,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 247411,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 3368,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 416160,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 3348,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 95945,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 3332,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 96635,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 3332,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 96656,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 3332,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 151878,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 3332,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    },
+    {
+      "node": 236684,
+      "category": "React Fiber",
+      "constructor": "gi",
+      "selfBytes": 104,
+      "retainedBytes": 3332,
+      "properties": [
+        "tag",
+        "key",
+        "elementType",
+        "type",
+        "stateNode",
+        "return",
+        "child",
+        "sibling",
+        "index",
+        "ref",
+        "refCleanup",
+        "pendingProps",
+        "memoizedProps",
+        "updateQueue",
+        "memoizedState",
+        "dependencies",
+        "mode",
+        "flags",
+        "subtreeFlags",
+        "deletions",
+        "lanes",
+        "childLanes",
+        "alternate",
+        "__proto__"
+      ]
+    }
+  ],
+  "dataExclusiveRetainedBytes": 0,
+  "dataPayloadReachabilityUpperBoundBytes": 0,
+  "topRetainers": [
+    {
+      "node": 711784,
+      "type": "native",
+      "constructor": "Modulator",
+      "selfBytes": 112,
+      "retainedBytes": 2083245,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "native",
+          "name": "Modulator",
+          "retainedBytes": 2083245
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 262501,
+      "type": "native",
+      "constructor": "system / ExternalStringData",
+      "selfBytes": 1272296,
+      "retainedBytes": 1272296,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "native",
+          "name": "system / ExternalStringData",
+          "retainedBytes": 1272296
+        },
+        {
+          "type": "string",
+          "name": "(string)",
+          "retainedBytes": 1272496
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 324760,
+      "type": "native",
+      "constructor": "system / ExternalStringData",
+      "selfBytes": 1127550,
+      "retainedBytes": 1127550,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "native",
+          "name": "system / ExternalStringData",
+          "retainedBytes": 1127550
+        },
+        {
+          "type": "string",
+          "name": "(string)",
+          "retainedBytes": 1127750
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 173137,
+      "type": "native",
+      "constructor": "system / ExternalStringData",
+      "selfBytes": 770914,
+      "retainedBytes": 770914,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "native",
+          "name": "system / ExternalStringData",
+          "retainedBytes": 770914
+        },
+        {
+          "type": "string",
+          "name": "(string)",
+          "retainedBytes": 771114
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 710489,
+      "type": "native",
+      "constructor": "blink::MemoryCache",
+      "selfBytes": 392,
+      "retainedBytes": 767568,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "native",
+          "name": "blink::MemoryCache",
+          "retainedBytes": 767568
+        },
+        {
+          "type": "synthetic",
+          "name": "(redacted name)",
+          "retainedBytes": 1639356
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 533254,
+      "type": "native",
+      "constructor": "system / ExternalStringData",
+      "selfBytes": 735152,
+      "retainedBytes": 735152,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "native",
+          "name": "system / ExternalStringData",
+          "retainedBytes": 735152
+        },
+        {
+          "type": "string",
+          "name": "(string)",
+          "retainedBytes": 735352
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 502578,
+      "type": "native",
+      "constructor": "system / ExternalStringData",
+      "selfBytes": 718920,
+      "retainedBytes": 718920,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "native",
+          "name": "system / ExternalStringData",
+          "retainedBytes": 718920
+        },
+        {
+          "type": "string",
+          "name": "(string)",
+          "retainedBytes": 719120
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 535617,
+      "type": "native",
+      "constructor": "system / ExternalStringData",
+      "selfBytes": 631902,
+      "retainedBytes": 631902,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "native",
+          "name": "system / ExternalStringData",
+          "retainedBytes": 631902
+        },
+        {
+          "type": "string",
+          "name": "(string)",
+          "retainedBytes": 632102
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 262441,
+      "type": "native",
+      "constructor": "system / ExternalStringData",
+      "selfBytes": 567156,
+      "retainedBytes": 567156,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "native",
+          "name": "system / ExternalStringData",
+          "retainedBytes": 567156
+        },
+        {
+          "type": "string",
+          "name": "(string)",
+          "retainedBytes": 567356
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 262375,
+      "type": "native",
+      "constructor": "system / ExternalStringData",
+      "selfBytes": 554138,
+      "retainedBytes": 554138,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "native",
+          "name": "system / ExternalStringData",
+          "retainedBytes": 554138
+        },
+        {
+          "type": "string",
+          "name": "(string)",
+          "retainedBytes": 554338
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 80327,
+      "type": "object",
+      "constructor": "(redacted name)",
+      "selfBytes": 2940,
+      "retainedBytes": 435228,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "object",
+          "name": "(redacted name)",
+          "retainedBytes": 435228
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 533286,
+      "type": "native",
+      "constructor": "system / ExternalStringData",
+      "selfBytes": 395557,
+      "retainedBytes": 395557,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "native",
+          "name": "system / ExternalStringData",
+          "retainedBytes": 395557
+        },
+        {
+          "type": "string",
+          "name": "(string)",
+          "retainedBytes": 395757
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 173122,
+      "type": "native",
+      "constructor": "system / ExternalStringData",
+      "selfBytes": 389890,
+      "retainedBytes": 389890,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "native",
+          "name": "system / ExternalStringData",
+          "retainedBytes": 389890
+        },
+        {
+          "type": "string",
+          "name": "(string)",
+          "retainedBytes": 390090
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 83854,
+      "type": "object",
+      "constructor": "(redacted name)",
+      "selfBytes": 3388,
+      "retainedBytes": 324168,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "object",
+          "name": "(redacted name)",
+          "retainedBytes": 324168
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 110360,
+      "type": "object",
+      "constructor": "Object",
+      "selfBytes": 12,
+      "retainedBytes": 324008,
+      "properties": [
+        "taskNumberCounters",
+        "clockInSessions",
+        "taskVoiceMemoListens",
+        "taskShares",
+        "bugReports",
+        "gamificationUserBadges",
+        "breakRoomPresence",
+        "phoneScripts",
+        "trainingQuizAttempts",
+        "trainingModules",
+        "costCategories",
+        "inventoryItems",
+        "fcmTokens",
+        "customPowerups",
+        "permissions",
+        "userPresence",
+        "gamificationPointTransactions",
+        "deepResearchAssignments",
+        "purchasingDocumentCounters",
+        "documentAcknowledgments",
+        "tasks",
+        "deepResearchFindings",
+        "webhooks",
+        "researchSettings",
+        "taskGridRows",
+        "crmDeals",
+        "taskFindings",
+        "agentRuns"
+      ],
+      "dominatorChain": [
+        {
+          "type": "object",
+          "name": "Object",
+          "retainedBytes": 324008
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 458426,
+      "type": "object",
+      "constructor": "Array",
+      "selfBytes": 16,
+      "retainedBytes": 322877,
+      "properties": [
+        "__proto__"
+      ],
+      "dominatorChain": [
+        {
+          "type": "object",
+          "name": "Array",
+          "retainedBytes": 322877
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 173181,
+      "type": "native",
+      "constructor": "system / ExternalStringData",
+      "selfBytes": 321168,
+      "retainedBytes": 321168,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "native",
+          "name": "system / ExternalStringData",
+          "retainedBytes": 321168
+        },
+        {
+          "type": "string",
+          "name": "(string)",
+          "retainedBytes": 321368
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 150908,
+      "type": "native",
+      "constructor": "system / SourceTextModule",
+      "selfBytes": 76,
+      "retainedBytes": 317126,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "native",
+          "name": "system / SourceTextModule",
+          "retainedBytes": 317126
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 173149,
+      "type": "native",
+      "constructor": "system / ExternalStringData",
+      "selfBytes": 316992,
+      "retainedBytes": 316992,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "native",
+          "name": "system / ExternalStringData",
+          "retainedBytes": 316992
+        },
+        {
+          "type": "string",
+          "name": "(string)",
+          "retainedBytes": 317192
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 150912,
+      "type": "object",
+      "constructor": "Generator",
+      "selfBytes": 84,
+      "retainedBytes": 315334,
+      "properties": [
+        "__proto__"
+      ],
+      "dominatorChain": [
+        {
+          "type": "object",
+          "name": "Generator",
+          "retainedBytes": 315334
+        },
+        {
+          "type": "native",
+          "name": "system / SourceTextModule",
+          "retainedBytes": 317126
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 231066,
+      "type": "closure",
+      "constructor": "",
+      "selfBytes": 32,
+      "retainedBytes": 314994,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "closure",
+          "name": "",
+          "retainedBytes": 314994
+        },
+        {
+          "type": "object",
+          "name": "Generator",
+          "retainedBytes": 315334
+        },
+        {
+          "type": "native",
+          "name": "system / SourceTextModule",
+          "retainedBytes": 317126
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 231069,
+      "type": "code",
+      "constructor": "system / SharedFunctionInfo",
+      "selfBytes": 48,
+      "retainedBytes": 309518,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "code",
+          "name": "system / SharedFunctionInfo",
+          "retainedBytes": 309518
+        },
+        {
+          "type": "closure",
+          "name": "",
+          "retainedBytes": 314994
+        },
+        {
+          "type": "object",
+          "name": "Generator",
+          "retainedBytes": 315334
+        },
+        {
+          "type": "native",
+          "name": "system / SourceTextModule",
+          "retainedBytes": 317126
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 173145,
+      "type": "native",
+      "constructor": "system / ExternalStringData",
+      "selfBytes": 308134,
+      "retainedBytes": 308134,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "native",
+          "name": "system / ExternalStringData",
+          "retainedBytes": 308134
+        },
+        {
+          "type": "string",
+          "name": "(string)",
+          "retainedBytes": 308334
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 70196,
+      "type": "code",
+      "constructor": "system / BytecodeArray",
+      "selfBytes": 15052,
+      "retainedBytes": 306398,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "code",
+          "name": "system / BytecodeArray",
+          "retainedBytes": 306398
+        },
+        {
+          "type": "code",
+          "name": "system / SharedFunctionInfo",
+          "retainedBytes": 309518
+        },
+        {
+          "type": "closure",
+          "name": "",
+          "retainedBytes": 314994
+        },
+        {
+          "type": "object",
+          "name": "Generator",
+          "retainedBytes": 315334
+        },
+        {
+          "type": "native",
+          "name": "system / SourceTextModule",
+          "retainedBytes": 317126
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 688302,
+      "type": "code",
+      "constructor": "(constant pool)",
+      "selfBytes": 6948,
+      "retainedBytes": 288250,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "code",
+          "name": "(constant pool)",
+          "retainedBytes": 288250
+        },
+        {
+          "type": "code",
+          "name": "system / BytecodeArray",
+          "retainedBytes": 306398
+        },
+        {
+          "type": "code",
+          "name": "system / SharedFunctionInfo",
+          "retainedBytes": 309518
+        },
+        {
+          "type": "closure",
+          "name": "",
+          "retainedBytes": 314994
+        },
+        {
+          "type": "object",
+          "name": "Generator",
+          "retainedBytes": 315334
+        },
+        {
+          "type": "native",
+          "name": "system / SourceTextModule",
+          "retainedBytes": 317126
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 455243,
+      "type": "code",
+      "constructor": "system / Code",
+      "selfBytes": 72,
+      "retainedBytes": 283056,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "code",
+          "name": "system / Code",
+          "retainedBytes": 283056
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 215038,
+      "type": "native",
+      "constructor": "system / ExternalStringData",
+      "selfBytes": 269198,
+      "retainedBytes": 269198,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "native",
+          "name": "system / ExternalStringData",
+          "retainedBytes": 269198
+        },
+        {
+          "type": "string",
+          "name": "(string)",
+          "retainedBytes": 269398
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 648934,
+      "type": "native",
+      "constructor": "system / ExternalStringData",
+      "selfBytes": 259182,
+      "retainedBytes": 259182,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "native",
+          "name": "system / ExternalStringData",
+          "retainedBytes": 259182
+        },
+        {
+          "type": "string",
+          "name": "(string)",
+          "retainedBytes": 259382
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 648884,
+      "type": "native",
+      "constructor": "system / ExternalStringData",
+      "selfBytes": 256640,
+      "retainedBytes": 256640,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "native",
+          "name": "system / ExternalStringData",
+          "retainedBytes": 256640
+        },
+        {
+          "type": "string",
+          "name": "(string)",
+          "retainedBytes": 256840
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 449722,
+      "type": "native",
+      "constructor": "system / ExternalStringData",
+      "selfBytes": 252168,
+      "retainedBytes": 252168,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "native",
+          "name": "system / ExternalStringData",
+          "retainedBytes": 252168
+        },
+        {
+          "type": "string",
+          "name": "(string)",
+          "retainedBytes": 252368
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 432831,
+      "type": "native",
+      "constructor": "system / ExternalStringData",
+      "selfBytes": 247702,
+      "retainedBytes": 247702,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "native",
+          "name": "system / ExternalStringData",
+          "retainedBytes": 247702
+        },
+        {
+          "type": "string",
+          "name": "(string)",
+          "retainedBytes": 247902
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 96137,
+      "type": "native",
+      "constructor": "HTMLDocument",
+      "selfBytes": 3368,
+      "retainedBytes": 225365,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "native",
+          "name": "HTMLDocument",
+          "retainedBytes": 225365
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 273849,
+      "type": "native",
+      "constructor": "system / Cell",
+      "selfBytes": 8,
+      "retainedBytes": 208412,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "native",
+          "name": "system / Cell",
+          "retainedBytes": 208412
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 104405,
+      "type": "closure",
+      "constructor": "",
+      "selfBytes": 28,
+      "retainedBytes": 208404,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "closure",
+          "name": "",
+          "retainedBytes": 208404
+        },
+        {
+          "type": "native",
+          "name": "system / Cell",
+          "retainedBytes": 208412
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 677015,
+      "type": "native",
+      "constructor": "system / ExternalStringData",
+      "selfBytes": 208151,
+      "retainedBytes": 208151,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "native",
+          "name": "system / ExternalStringData",
+          "retainedBytes": 208151
+        },
+        {
+          "type": "string",
+          "name": "(string)",
+          "retainedBytes": 208351
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 104408,
+      "type": "object",
+      "constructor": "(redacted name)",
+      "selfBytes": 36,
+      "retainedBytes": 207760,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "object",
+          "name": "(redacted name)",
+          "retainedBytes": 207760
+        },
+        {
+          "type": "closure",
+          "name": "",
+          "retainedBytes": 208404
+        },
+        {
+          "type": "native",
+          "name": "system / Cell",
+          "retainedBytes": 208412
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 210301,
+      "type": "native",
+      "constructor": "system / ExternalStringData",
+      "selfBytes": 203522,
+      "retainedBytes": 203522,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "native",
+          "name": "system / ExternalStringData",
+          "retainedBytes": 203522
+        },
+        {
+          "type": "string",
+          "name": "(string)",
+          "retainedBytes": 203722
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 216812,
+      "type": "object",
+      "constructor": "Object",
+      "selfBytes": 28,
+      "retainedBytes": 202888,
+      "properties": [
+        "cache",
+        "parseClassName",
+        "sortModifiers",
+        "getClassGroupId",
+        "getConflictingClassGroupIds",
+        "__proto__"
+      ],
+      "dominatorChain": [
+        {
+          "type": "object",
+          "name": "Object",
+          "retainedBytes": 202888
+        },
+        {
+          "type": "object",
+          "name": "(redacted name)",
+          "retainedBytes": 207760
+        },
+        {
+          "type": "closure",
+          "name": "",
+          "retainedBytes": 208404
+        },
+        {
+          "type": "native",
+          "name": "system / Cell",
+          "retainedBytes": 208412
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 603751,
+      "type": "object",
+      "constructor": "(redacted name)",
+      "selfBytes": 52,
+      "retainedBytes": 196704,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "object",
+          "name": "(redacted name)",
+          "retainedBytes": 196704
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 231081,
+      "type": "object",
+      "constructor": "Object",
+      "selfBytes": 12,
+      "retainedBytes": 196652,
+      "properties": [
+        "__proto__"
+      ],
+      "dominatorChain": [
+        {
+          "type": "object",
+          "name": "Object",
+          "retainedBytes": 196652
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 603597,
+      "type": "object",
+      "constructor": "Object",
+      "selfBytes": 12,
+      "retainedBytes": 196652,
+      "properties": [
+        "__proto__"
+      ],
+      "dominatorChain": [
+        {
+          "type": "object",
+          "name": "Object",
+          "retainedBytes": 196652
+        },
+        {
+          "type": "object",
+          "name": "(redacted name)",
+          "retainedBytes": 196704
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 440307,
+      "type": "array",
+      "constructor": "(object properties)",
+      "selfBytes": 196640,
+      "retainedBytes": 196640,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "array",
+          "name": "(object properties)",
+          "retainedBytes": 196640
+        },
+        {
+          "type": "object",
+          "name": "Object",
+          "retainedBytes": 196652
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 603598,
+      "type": "array",
+      "constructor": "(object properties)",
+      "selfBytes": 196640,
+      "retainedBytes": 196640,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "array",
+          "name": "(object properties)",
+          "retainedBytes": 196640
+        },
+        {
+          "type": "object",
+          "name": "Object",
+          "retainedBytes": 196652
+        },
+        {
+          "type": "object",
+          "name": "(redacted name)",
+          "retainedBytes": 196704
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 281937,
+      "type": "object",
+      "constructor": "(redacted name)",
+      "selfBytes": 28,
+      "retainedBytes": 193336,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "object",
+          "name": "(redacted name)",
+          "retainedBytes": 193336
+        },
+        {
+          "type": "object",
+          "name": "Object",
+          "retainedBytes": 202888
+        },
+        {
+          "type": "object",
+          "name": "(redacted name)",
+          "retainedBytes": 207760
+        },
+        {
+          "type": "closure",
+          "name": "",
+          "retainedBytes": 208404
+        },
+        {
+          "type": "native",
+          "name": "system / Cell",
+          "retainedBytes": 208412
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 385284,
+      "type": "object",
+      "constructor": "Object",
+      "selfBytes": 24,
+      "retainedBytes": 189688,
+      "properties": [
+        "nextPart",
+        "validators",
+        "classGroupId",
+        "__proto__"
+      ],
+      "dominatorChain": [
+        {
+          "type": "object",
+          "name": "Object",
+          "retainedBytes": 189688
+        },
+        {
+          "type": "object",
+          "name": "(redacted name)",
+          "retainedBytes": 193336
+        },
+        {
+          "type": "object",
+          "name": "Object",
+          "retainedBytes": 202888
+        },
+        {
+          "type": "object",
+          "name": "(redacted name)",
+          "retainedBytes": 207760
+        },
+        {
+          "type": "closure",
+          "name": "",
+          "retainedBytes": 208404
+        },
+        {
+          "type": "native",
+          "name": "system / Cell",
+          "retainedBytes": 208412
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 430722,
+      "type": "object",
+      "constructor": "Map",
+      "selfBytes": 16,
+      "retainedBytes": 189664,
+      "properties": [
+        "__proto__"
+      ],
+      "dominatorChain": [
+        {
+          "type": "object",
+          "name": "Map",
+          "retainedBytes": 189664
+        },
+        {
+          "type": "object",
+          "name": "Object",
+          "retainedBytes": 189688
+        },
+        {
+          "type": "object",
+          "name": "(redacted name)",
+          "retainedBytes": 193336
+        },
+        {
+          "type": "object",
+          "name": "Object",
+          "retainedBytes": 202888
+        },
+        {
+          "type": "object",
+          "name": "(redacted name)",
+          "retainedBytes": 207760
+        },
+        {
+          "type": "closure",
+          "name": "",
+          "retainedBytes": 208404
+        },
+        {
+          "type": "native",
+          "name": "system / Cell",
+          "retainedBytes": 208412
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 430723,
+      "type": "array",
+      "constructor": "",
+      "selfBytes": 3604,
+      "retainedBytes": 189648,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "array",
+          "name": "",
+          "retainedBytes": 189648
+        },
+        {
+          "type": "object",
+          "name": "Map",
+          "retainedBytes": 189664
+        },
+        {
+          "type": "object",
+          "name": "Object",
+          "retainedBytes": 189688
+        },
+        {
+          "type": "object",
+          "name": "(redacted name)",
+          "retainedBytes": 193336
+        },
+        {
+          "type": "object",
+          "name": "Object",
+          "retainedBytes": 202888
+        },
+        {
+          "type": "object",
+          "name": "(redacted name)",
+          "retainedBytes": 207760
+        },
+        {
+          "type": "closure",
+          "name": "",
+          "retainedBytes": 208404
+        },
+        {
+          "type": "native",
+          "name": "system / Cell",
+          "retainedBytes": 208412
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 674919,
+      "type": "code",
+      "constructor": "system / ObjectBoilerplateDescription",
+      "selfBytes": 2768,
+      "retainedBytes": 186264,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "code",
+          "name": "system / ObjectBoilerplateDescription",
+          "retainedBytes": 186264
+        },
+        {
+          "type": "code",
+          "name": "(constant pool)",
+          "retainedBytes": 288250
+        },
+        {
+          "type": "code",
+          "name": "system / BytecodeArray",
+          "retainedBytes": 306398
+        },
+        {
+          "type": "code",
+          "name": "system / SharedFunctionInfo",
+          "retainedBytes": 309518
+        },
+        {
+          "type": "closure",
+          "name": "",
+          "retainedBytes": 314994
+        },
+        {
+          "type": "object",
+          "name": "Generator",
+          "retainedBytes": 315334
+        },
+        {
+          "type": "native",
+          "name": "system / SourceTextModule",
+          "retainedBytes": 317126
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 595990,
+      "type": "code",
+      "constructor": "system / InstructionStream",
+      "selfBytes": 175424,
+      "retainedBytes": 186188,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "code",
+          "name": "system / InstructionStream",
+          "retainedBytes": 186188
+        },
+        {
+          "type": "code",
+          "name": "system / Code",
+          "retainedBytes": 283056
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 279029,
+      "type": "code",
+      "constructor": "system / Code",
+      "selfBytes": 72,
+      "retainedBytes": 185236,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "code",
+          "name": "system / Code",
+          "retainedBytes": 185236
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 280671,
+      "type": "code",
+      "constructor": "system / Code",
+      "selfBytes": 72,
+      "retainedBytes": 184332,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "code",
+          "name": "system / Code",
+          "retainedBytes": 184332
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 82860,
+      "type": "native",
+      "constructor": "system / SourceTextModule",
+      "selfBytes": 76,
+      "retainedBytes": 182824,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "native",
+          "name": "system / SourceTextModule",
+          "retainedBytes": 182824
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 710529,
+      "type": "native",
+      "constructor": "blink::CSSDefaultStyleSheets",
+      "selfBytes": 144,
+      "retainedBytes": 180200,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "native",
+          "name": "blink::CSSDefaultStyleSheets",
+          "retainedBytes": 180200
+        },
+        {
+          "type": "synthetic",
+          "name": "(redacted name)",
+          "retainedBytes": 1639356
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 218497,
+      "type": "native",
+      "constructor": "system / ExternalStringData",
+      "selfBytes": 171803,
+      "retainedBytes": 171803,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "native",
+          "name": "system / ExternalStringData",
+          "retainedBytes": 171803
+        },
+        {
+          "type": "string",
+          "name": "(string)",
+          "retainedBytes": 172003
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 101645,
+      "type": "native",
+      "constructor": "system / SourceTextModule",
+      "selfBytes": 76,
+      "retainedBytes": 167000,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "native",
+          "name": "system / SourceTextModule",
+          "retainedBytes": 167000
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 533266,
+      "type": "native",
+      "constructor": "system / ExternalStringData",
+      "selfBytes": 163006,
+      "retainedBytes": 163006,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "native",
+          "name": "system / ExternalStringData",
+          "retainedBytes": 163006
+        },
+        {
+          "type": "string",
+          "name": "(string)",
+          "retainedBytes": 163206
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 206974,
+      "type": "object",
+      "constructor": "Generator",
+      "selfBytes": 84,
+      "retainedBytes": 150172,
+      "properties": [
+        "__proto__"
+      ],
+      "dominatorChain": [
+        {
+          "type": "object",
+          "name": "Generator",
+          "retainedBytes": 150172
+        },
+        {
+          "type": "native",
+          "name": "system / SourceTextModule",
+          "retainedBytes": 167000
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 140215,
+      "type": "closure",
+      "constructor": "",
+      "selfBytes": 32,
+      "retainedBytes": 149348,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "closure",
+          "name": "",
+          "retainedBytes": 149348
+        },
+        {
+          "type": "object",
+          "name": "Generator",
+          "retainedBytes": 150172
+        },
+        {
+          "type": "native",
+          "name": "system / SourceTextModule",
+          "retainedBytes": 167000
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 502600,
+      "type": "native",
+      "constructor": "system / ExternalStringData",
+      "selfBytes": 148874,
+      "retainedBytes": 148874,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "native",
+          "name": "system / ExternalStringData",
+          "retainedBytes": 148874
+        },
+        {
+          "type": "string",
+          "name": "(string)",
+          "retainedBytes": 149074
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    },
+    {
+      "node": 210559,
+      "type": "code",
+      "constructor": "system / Code",
+      "selfBytes": 72,
+      "retainedBytes": 145244,
+      "properties": [],
+      "dominatorChain": [
+        {
+          "type": "code",
+          "name": "system / Code",
+          "retainedBytes": 145244
+        },
+        {
+          "type": "synthetic",
+          "name": "(GC roots)",
+          "retainedBytes": 54132379
+        }
+      ]
+    }
+  ],
+  "method": "Strong-edge dominators exclude weak edges; constructor/property tags are heuristics, not allocation stacks. Reachability upper bound excludes code/prototypes/closure contexts. Raw user strings are never emitted."
+}
