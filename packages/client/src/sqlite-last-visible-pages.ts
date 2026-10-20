@@ -86,6 +86,14 @@ export class SQLiteLastVisiblePages{
   const rows=new Map(selected.rows.map((row:any)=>[row.id,row]));
   const value={generation:selected.generation,rows:ids.map(id=>rows.get(id))};this.restoredPages.add(value);return value;
  }
+ hasWatch(watch:string){
+  if(this.closed||!this.signing)return false;
+  for(const key of this.eligible){
+   if(key===watch)return true;
+   try{if(JSON.parse(key)?.watch===watch)return true;}catch{/* Only SDK keys. */}
+  }
+  return false;
+ }
  available(){return !this.closed&&this.eligible.size>0;}
  async persist(){
   if(this.closed||!this.signing||!this.admission)return;

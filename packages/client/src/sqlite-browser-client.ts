@@ -64,6 +64,19 @@ function sameJSON(left:unknown,right:unknown):boolean{
 }
 export class SQLiteBrowserClient {
  private readonly lastVisible:SQLiteLastVisiblePages;
+ private cachedPaint?:{promise:Promise<void>;release:()=>void};
+ /** The rendering caller owns this lifecycle hold. Only sealed watches wait;
+  * cache misses, auth, intent durability and the owner's SQL FIFO keep running. */
+ deferCachedDisplayUntilCommit(){
+  if(this.closed||this.cachedPaint)return;
+  let release!:()=>void;const promise=new Promise<void>(resolve=>{release=resolve;});
+  this.cachedPaint={promise,release};
+ }
+ commitCachedDisplay(){
+  const pending=this.cachedPaint;this.cachedPaint=undefined;
+  if(pending){try{performance.measure('gonvex-startup:cached-display-commit',{start:performance.now(),end:performance.now()});}catch{}pending.release();}
+ }
+
  private closedBudgets?:ReturnType<ByteLedger['snapshot']>;
  private startupPublications=0;private bootRestored=false;private displayTimer?:ReturnType<typeof setTimeout>;
  private readonly displayHide=()=>{void this.persistDisplay().catch(()=>{});};
@@ -126,7 +139,7 @@ export class SQLiteBrowserClient {
  }
  private current(revision:number){if(this.closed||revision!==this.revision)fail('FENCED','Native browser session changed');}
  private notify(watch:Watch){watch.version++;watch.state={page:this.pages.get(watch.key),stale:watch.stale,version:watch.version};for(const listener of watch.listeners)try{listener();}catch{/* Observer only. */}}
- private invalidate(identity:boolean,preserveDisplay=false){this.revision++;this.dataRevision++;this.lastRejection=0;this.lastSupport=0;if(identity){this.bootRestored=false;this.lastVisible.revoke({preserveStored:preserveDisplay});this.admissionKey=undefined;this.lastAuthError=undefined;this.lastCredential=undefined;}this.handle=undefined;this.controlsValue=undefined;this.controlQueries.invalidate(identity);this.memberships.invalidate();this.entityView.invalidate(identity);
+ private invalidate(identity:boolean,preserveDisplay=false){if(identity&&!preserveDisplay)this.commitCachedDisplay();this.revision++;this.dataRevision++;this.lastRejection=0;this.lastSupport=0;if(identity){this.bootRestored=false;this.lastVisible.revoke({preserveStored:preserveDisplay});this.admissionKey=undefined;this.lastAuthError=undefined;this.lastCredential=undefined;}this.handle=undefined;this.controlsValue=undefined;this.controlQueries.invalidate(identity);this.memberships.invalidate();this.entityView.invalidate(identity);
   for(const watch of this.watches.values()){watch.bound=-1;watch.source=undefined;watch.opening=undefined;watch.invalidation++;watch.stale=true;if(identity){watch.unpin?.();watch.unpin=undefined;this.pages.delete(watch.key);}this.notify(watch);}
  }
  private admit(key:string|null){
@@ -233,6 +246,10 @@ export class SQLiteBrowserClient {
  onSessionScopeChange(listener:()=>void){let key=this.admissionKey;return this.observe(this.controlListeners,()=>{if(key!==this.admissionKey){key=this.admissionKey;listener();}});}
 
  private async open(watch:Watch):Promise<void>{
+  if(this.cachedPaint){
+   await this.displayFence();
+   if(this.lastVisible.hasWatch(watch.key))await this.cachedPaint?.promise;
+  }
   if(!watch.refs)fail('FENCED','Native watch is closed');if(watch.retiring)await watch.retiring;await this.connect();if(!watch.refs)fail('FENCED','Native watch is closed');if(watch.bound===this.revision&&watch.source)return;if(watch.opening)return watch.opening;
   // Views retain independent pages, but their identical source owns one lease.
   // Wait for a previous final release before reusing that source.
@@ -354,7 +371,7 @@ export class SQLiteBrowserClient {
    const retirement=(async()=>{try{await selected.opening;if(selected.refs)return;const shared=[...this.watches.values()].some(other=>other!==selected&&other.refs&&other.remoteKey===selected.remoteKey&&other.lease===selected.lease);
     if(!shared){const first=[...this.watches.values()].find(other=>!other.refs&&other.remoteKey===selected.remoteKey&&other.lease===selected.lease&&other.retiring);if(first&&first!==selected){await first.retiring;return;}if(selected.source)await this.rpc({method:selected.kind==='live'?'unwatchLive':'unwatchReplica',signature:selected.source.signature,lease:selected.lease});selected.source=undefined;selected.bound=-1;}}finally{if(this.watches.get(selected.key)===selected&&!selected.refs){this.watches.delete(selected.key);this.watchBytes-=selected.bytes;}}})();selected.retiring=retirement;void retirement.then(()=>{if(selected.retiring===retirement)selected.retiring=undefined;},()=>{if(selected.retiring===retirement)selected.retiring=undefined;});}};
  }
- entities(entity:string,ids:readonly string[],expected?:SQLiteNativeEntityResult['generation']):Promise<SQLiteNativeEntityResult>{sqlitePayloadBytes({entity,ids},32768);if(ids.length>128)throw new RangeError('Native entity reads are bounded');if(!this.handle&&this.bootRestored){const cached=this.lastVisible.entities(entity,ids,expected);if(cached)return Promise.resolve(cached as SQLiteNativeEntityResult);}return this.rpc({method:'entities',entity,ids,...(expected?{expected}:{})});}
+ entities(entity:string,ids:readonly string[],expected?:SQLiteNativeEntityResult['generation']):Promise<SQLiteNativeEntityResult>{sqlitePayloadBytes({entity,ids},32768);if(ids.length>128)throw new RangeError('Native entity reads are bounded');if((!this.handle||this.cachedPaint)&&this.bootRestored){const cached=this.lastVisible.entities(entity,ids,expected);if(cached)return Promise.resolve(cached as SQLiteNativeEntityResult);}return this.rpc({method:'entities',entity,ids,...(expected?{expected}:{})});}
  invokeReducer(ref:Pick<FunctionReference,'path'>,args:JsonValue={},options:{now?:number;intentEntropy?:string;commandId?:string}={}):Promise<SQLiteReducerReceipt>{if(options.commandId&&options.now===undefined)throw new TypeError('Retryable reducers require their original invocation time');const id=options.commandId??crypto.randomUUID(),sent=Date.now();return this.rpc<SQLiteReducerReceipt>({method:'reducer',path:ref.path,args,now:options.now??sent,intentEntropy:options.intentEntropy},id).then(receipt=>{if(receipt.queuedOnly)for(const listener of this.fallbackListeners)try{listener({path:ref.path,intentId:id,phase:'call',reason:'incompleteReplica',error:'Local prediction awaits complete admitted data'});}catch{/* Observer only. */}const received=Date.now();for(const listener of this.telemetryListeners)try{listener({type:'reducer',id,path:ref.path,outcome:'ok',clientSentAtMs:sent,clientReceivedAtMs:received,clientDurationMs:received-sent});}catch{/* Observer only. */}return receipt;});}
  reducer<T extends JsonValue=JsonValue,Args extends JsonValue=JsonValue>(ref:FunctionReference<Args,T>,args:Args,options:CallOptions&{offline:'queue'}):Promise<T|QueuedReducerOutcome>;
  reducer<T extends JsonValue=JsonValue,Args extends JsonValue=JsonValue>(ref:FunctionReference<Args,T>,args?:Args,options?:CallOptions):Promise<T>;
@@ -374,5 +391,5 @@ export class SQLiteBrowserClient {
  query<T extends JsonValue=JsonValue,Args extends JsonValue=JsonValue>(ref:FunctionReference<Args,T>,args:Args={} as Args,_options:CallOptions={}):Promise<T>{return this.rpc({method:'query',path:ref.path,args});}
  action<T extends JsonValue=JsonValue,Args extends JsonValue=JsonValue>(ref:FunctionReference<Args,T>,args:Args={} as Args,_options:CallOptions={}):Promise<T>{return this.rpc({method:'action',path:ref.path,args});}
  budgets(){return this.closedBudgets?this.closedBudgets.map(metric=>metric.name==='browser-request-admission'?{...metric,...this.requests.stats(),name:metric.name}:metric):this.ledger.snapshot();}
- close(){if(this.closed)return;this.closedBudgets=this.ledger.snapshot().map(metric=>({...metric,bytes:0,entries:0}));clearTimeout(this.displayTimer);globalThis.removeEventListener?.('pagehide',this.displayHide);if(typeof document!=='undefined')document.removeEventListener('visibilitychange',this.displayVisibility);this.lastVisible.close();this.closed=true;this.revision++;this.requests.close();this.reads.clear();this.readBytes=0;this.memberships.close();this.controlQueries.close();this.entityView.close();this.reporter?.close();for(const cancel of this.authWaiters)cancel();this.authWaiters.clear();this.releaseChanges();for(const watch of this.watches.values()){watch.refs=0;watch.state={page:undefined,stale:true,version:watch.version+1};watch.unpin?.();watch.listeners.clear();}this.watches.clear();this.watchBytes=0;for(const cancel of this.tokenCancels.values())cancel();this.tokenCancels.clear();this.tokenRequests.clear();this.auth={};this.fetchToken=undefined;this.controlListeners.clear();this.authListeners.clear();this.credentialListeners.clear();this.rejectionListeners.clear();this.supportListeners.clear();this.fallbackListeners.clear();this.telemetryListeners.clear();this.controlsValue=undefined;this.pages.close();this.ledger.close();this.options.broker.close();}
+ close(){if(this.closed)return;this.commitCachedDisplay();this.closedBudgets=this.ledger.snapshot().map(metric=>({...metric,bytes:0,entries:0}));clearTimeout(this.displayTimer);globalThis.removeEventListener?.('pagehide',this.displayHide);if(typeof document!=='undefined')document.removeEventListener('visibilitychange',this.displayVisibility);this.lastVisible.close();this.closed=true;this.revision++;this.requests.close();this.reads.clear();this.readBytes=0;this.memberships.close();this.controlQueries.close();this.entityView.close();this.reporter?.close();for(const cancel of this.authWaiters)cancel();this.authWaiters.clear();this.releaseChanges();for(const watch of this.watches.values()){watch.refs=0;watch.state={page:undefined,stale:true,version:watch.version+1};watch.unpin?.();watch.listeners.clear();}this.watches.clear();this.watchBytes=0;for(const cancel of this.tokenCancels.values())cancel();this.tokenCancels.clear();this.tokenRequests.clear();this.auth={};this.fetchToken=undefined;this.controlListeners.clear();this.authListeners.clear();this.credentialListeners.clear();this.rejectionListeners.clear();this.supportListeners.clear();this.fallbackListeners.clear();this.telemetryListeners.clear();this.controlsValue=undefined;this.pages.close();this.ledger.close();this.options.broker.close();}
 }
