@@ -7,6 +7,11 @@ use futures_util::{
 };
 use std::collections::{BTreeMap, VecDeque};
 
+/// Per-socket bound on pending preparations. Large tenants (El Rey) open far more
+/// than 256 windows on a fresh replica; hitting the bound failed the page render.
+const MAX_ENTRIES: usize = 8192;
+const MAX_BYTES: usize = 32 * 1024 * 1024;
+
 type Completion<T> = (String, u64, bool, T);
 struct Entry {
     ticket: u64,
@@ -63,7 +68,7 @@ impl<T: Send + 'static> ReplicaOpenQueue<T> {
         future: BoxFuture<'static, T>,
     ) -> Result<(), &'static str> {
         self.remove(&id);
-        if self.entries.len() >= 256 || bytes > 524288 - self.bytes {
+        if self.entries.len() >= MAX_ENTRIES || bytes > MAX_BYTES - self.bytes {
             return Err("pending replica preparation allowance exceeded");
         }
         self.ticket = self.ticket.wrapping_add(1);
@@ -226,7 +231,7 @@ mod tests {
         queue
             .push(
                 "large".into(),
-                524288,
+                MAX_BYTES,
                 false,
                 std::future::pending::<()>().boxed(),
             )
@@ -236,7 +241,7 @@ mod tests {
             .push("overflow".into(), 1, false, async {}.boxed())
             .is_err());
         queue.clear();
-        for n in 0..256 {
+        for n in 0..MAX_ENTRIES {
             queue
                 .push(n.to_string(), 1, true, std::future::pending::<()>().boxed())
                 .unwrap();
