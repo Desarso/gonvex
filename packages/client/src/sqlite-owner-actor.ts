@@ -1,4 +1,3 @@
-import {SQLiteOwnerWorkQueue} from './sqlite-owner-work-queue.js';
 import {OriginStorageWorkerLease} from './origin-storage-worker-lease.js';
 import type {ByteBudgetSnapshot} from './byte-budget.js';
 import {SQLitePendingSnapshotReader} from './sqlite-pending-snapshot-reader.js';
@@ -9,7 +8,7 @@ import {SQLiteSnapshotPages} from './sqlite-snapshot-pages.js';
 import {sqliteRequestBytes} from './sqlite-request-frame.js';
 import {SQLiteCanonicalDispatcher} from './sqlite-canonical-dispatch.js';
 import {sqliteTypedReplicaStorage} from './sqlite-typed-row-layout.js';
-import {waitForSQLiteOwnerAdmission,sqliteOwnerTransactions} from './sqlite-owner-transactions.js';
+import {waitForSQLiteOwnerAdmission,SQLiteOwnerQueueBusyError,sqliteOwnerTransactions} from './sqlite-owner-transactions.js';
 import { sqliteWorkerOperations as publicOperations, sqliteOperationPublishes,sqliteWorkerProtocol as protocol } from './sqlite-worker-protocol.js';
 import { openOfficialSQLiteHost, type OfficialSQLiteHost } from './sqlite-official-host.js';
 import { SQLiteTypedReplicaEngine, sqlitePayloadBytes, type SQLiteTypedWrite } from './sqlite-typed-engine.js';
@@ -20,7 +19,7 @@ import type {SQLiteReplicaDatabase,SQLiteLocalReplicaStorage} from './sqlite-rep
 export type SQLiteOwnerCaller={tabID:string;requestID:string;signal:AbortSignal};
 export type SQLiteOwnerProgram={
  /** Network waits must stay outside the SQL FIFO. Use context.runOwner for
-  * every write phase and runRead for SQL-only committed reads; server replies\n  * must never wait behind their own call. */
+  * every disk phase; server replies must never wait behind their own call. */
  call(args:unknown,caller:SQLiteOwnerCaller):Promise<unknown>;
  budgets?():ByteBudgetSnapshot[];
  diagnostics?():Promise<unknown>;
@@ -30,8 +29,6 @@ export type SQLiteOwnerProgram={
 export type SQLiteOwnerProgramContext={
  database:SQLiteReplicaDatabase;engine:SQLiteTypedReplicaEngine;reader:SQLiteNativeReplicaReader;pendingReader:SQLitePendingSnapshotReader;canonical:SQLiteLocalReplicaStorage;snapshots:SQLiteSnapshotPages;activation:SQLiteSnapshotActivator;
  runOwner<T>(bytes:number,run:()=>Promise<T>,publishScopes?:readonly string[]):Promise<T>;
- /** SQL-only committed reads; no network waits or writes. */
- runRead?<T>(bytes:number,run:()=>Promise<T>):Promise<T>;
  /** Metadata-only hint; receiver polls bounded controls through clientCall. */
  notifyTab(tabID:string):Promise<void>;
 };
@@ -52,8 +49,7 @@ function sampleStartupMemory(stage:string){if(host&&startupMemory.length<3)start
 let canonical:SQLiteCanonicalDispatcher|undefined;
 let nativeReader:SQLiteNativeReplicaReader|undefined,pendingReader:SQLitePendingSnapshotReader|undefined;
 let snapshots:SQLiteSnapshotPages|undefined,activation:SQLiteSnapshotActivator|undefined;
-let operations = 0, bytes = 0,closed=false;
-let ownerDatabase:SQLiteReplicaDatabase|undefined;
+let lane = Promise.resolve(), operations = 0, bytes = 0,queuedOperations=0,queuedBytes=0,closed=false;
 let program:SQLiteOwnerProgram|undefined,ownerToken='';const workerLease=new OriginStorageWorkerLease();let originEpoch:number|undefined;
 const wireGeneration=(generation:{epoch:number;sequence:number})=>({...generation,epoch:originEpoch??generation.epoch});
 const ports = new Map<string, { port: MessagePort; seen: number; token: string }>();
@@ -73,12 +69,15 @@ function scope(value: unknown): string {
 function publish(scope:string,generation:{epoch:number;sequence:number}){
  tabs.publish(scope,wireGeneration(generation));
 }
-const workQueue=new SQLiteOwnerWorkQueue(async()=>{
- if(closed)throw Object.assign(Error('Storage owner is closed'),{code:'FENCED'});
- if(ownerToken&&!workerLease.stats().held)throw Object.assign(Error('Storage worker lease was released'),{code:'FENCED'});
- if(engine)await engine.verifyOwner();
-},async run=>{if(!ownerDatabase)throw Object.assign(Error('Storage owner is not ready'),{code:'FENCED'});await ownerDatabase.withTransactionAsync(run);});
-function schedule<T>(size:number,run:()=>Promise<T>):Promise<T>{return workQueue.submit(size,run);}
+function schedule<T>(size:number,run:()=>Promise<T>):Promise<T>{
+ if(closed)return Promise.reject(Object.assign(Error('Storage owner is closed'),{code:'FENCED'}));
+ if(!Number.isSafeInteger(size)||size<0||size>2097152)return Promise.reject(Object.assign(Error('Storage owner operation exceeds queue budget'),{code:'BUSY'}));
+ if(queuedOperations>=64||queuedBytes+size>2097152)return Promise.reject(new SQLiteOwnerQueueBusyError());
+ // The worker lifetime lock protects the connection through every disk phase.
+ // SQLite's durable owner epoch fences reads and writes without a second DB.
+ queuedOperations++;queuedBytes+=size;const operation=lane.then(async()=>{if(closed)throw Object.assign(Error('Storage owner is closed'),{code:'FENCED'});if(ownerToken&&!workerLease.stats().held)throw Object.assign(Error('Storage worker lease was released'),{code:'FENCED'});if(engine)await engine.verifyOwner();return run();});
+ lane=operation.then(()=>undefined,()=>undefined);void operation.then(()=>{queuedOperations--;queuedBytes-=size;},()=>{queuedOperations--;queuedBytes-=size;});return operation;
+}
 async function execute(op: string, args: any, requestID:string) {
   if (op === 'open') {
     if (host || args?.protocol !== protocol) throw Object.assign(new Error('Incompatible storage worker protocol'), { code: 'PROTOCOL' });
@@ -88,7 +87,7 @@ async function execute(op: string, args: any, requestID:string) {
       await workerLease.acquire();globalThis.postMessage({type:'progress',stage:'claiming-origin',sentAt:Date.now()});globalThis.postMessage({type:'progress',stage:'claimed-origin',sentAt:Date.now()});
       const initialize=async()=>{
       globalThis.postMessage({type:'progress',stage:'opening-sqlite',sentAt:Date.now()});host = await openOfficialSQLiteHost();globalThis.postMessage({type:'progress',stage:'opened-sqlite',sentAt:Date.now()});sampleStartupMemory('host');
-      const database=sqliteOwnerTransactions(host.database);ownerDatabase=database;
+      const database=sqliteOwnerTransactions(host.database);
       engine = new SQLiteTypedReplicaEngine(database, binding.schema??args.schema as SQLiteTypedSchema, undefined, { onProgress: () => globalThis.postMessage({ type: 'progress', sentAt: Date.now() }) });
       const epoch = await engine.open(args.owner);originEpoch=epoch;sampleStartupMemory('engine');globalThis.postMessage({type:'progress',stage:'opened-engine',sentAt:Date.now()});
       const storage=sqliteTypedReplicaStorage(database,engine.schema);
@@ -99,7 +98,6 @@ async function execute(op: string, args: any, requestID:string) {
       nativeReader=new SQLiteNativeReplicaReader(database,storage,engine);await nativeReader.ready();tabs.setGeneration(wireGeneration(await engine.verifyOwner()));
       pendingReader=new SQLitePendingSnapshotReader({database,canonical:storage,snapshots,schema:engine.schema,fence:()=>engine!.verifyOwner()});await pendingReader.ready();
       program=binding.createProgram?.({database,engine,notifyTab:tabID=>schedule(0,async()=>{if(typeof tabID!=='string'||!tabID||tabID.length>128)throw new TypeError('Invalid control recipient');tabs.notify(tabID,wireGeneration(await engine!.verifyOwner()));}),reader:nativeReader,pendingReader,canonical:storage,snapshots,activation,
-       runRead:(size,run)=>waitForSQLiteOwnerAdmission(()=>workQueue.submit(size,run,true),()=>{if(closed)throw Object.assign(Error('Storage owner is closed'),{code:'FENCED'});}),
        runOwner:async(size,run,scopes=[])=>{
         if(!Array.isArray(scopes)||scopes.length>8||scopes.some(value=>typeof value!=='string'||!value||value.length>512))throw new TypeError('Invalid owner publication scope');
         return waitForSQLiteOwnerAdmission(()=>schedule(size,async()=>{const before=await engine!.verifyOwner();const value=await run();const after=await engine!.verifyOwner();if(after.sequence!==before.sequence)for(const selected of scopes)publish(selected,after);return value;}),()=>{if(closed)throw Object.assign(Error('Storage owner is closed'),{code:'FENCED'});});
@@ -132,7 +130,7 @@ async function execute(op: string, args: any, requestID:string) {
     case 'canonicalRead': return canonical!.read(args);
     case 'canonicalGeneration': return canonical!.generation(scope(args.scope),args.expected);
     case 'ping': return { ready: true };
-    case 'stats': return { ...engine.stats(),originEpoch,persistence:host.persistence,workerLease:workerLease.stats(),startupMemory,...snapshots!.stats(),ingressNativeHash:Number(!!host.database.ingressNativeHash), wasmBytes: host.memoryBytes(), clients: ports.size,...workQueue.stats(),requests:operations,requestBytes:bytes,delivery:tabs.stats(),nativeProfile:host.takeProfile?.(),pendingPages:pendingReader?.budgets()??[],program:program?.budgets?.()??[],programDiagnostics:await program?.diagnostics?.() };
+    case 'stats': return { ...engine.stats(),originEpoch,persistence:host.persistence,workerLease:workerLease.stats(),startupMemory,...snapshots!.stats(),ingressNativeHash:Number(!!host.database.ingressNativeHash), wasmBytes: host.memoryBytes(), clients: ports.size,queuedOperations,queuedBytes,requests:operations,requestBytes:bytes,delivery:tabs.stats(),nativeProfile:host.takeProfile?.(),pendingPages:pendingReader?.budgets()??[],program:program?.budgets?.()??[],programDiagnostics:await program?.diagnostics?.() };
     case 'integrity': return engine.integrity();
     case 'page': return engine.page(scope(args.scope), args.plan as SQLitePagePlan);
     case 'viewPage': return engine.viewPage(scope(args.scope), args.signature, args.plan as SQLitePagePlan, args.offset);
@@ -241,7 +239,7 @@ let disposal:Promise<void>|undefined;
 return ()=>disposal??=(async()=>{
  closed=true;workerLease.cancelPending();clearInterval(timer);globalThis.onmessage=null;
  tabs.close();for(const peer of ports.values())peer.port.close();ports.clear();
- try{await program?.close?.();await workQueue.close();}finally{pendingReader?.close();host?.close();await workerLease.close();installed=false;}
+ try{await program?.close?.();await lane;}finally{pendingReader?.close();host?.close();await workerLease.close();installed=false;}
 })();
 
 }

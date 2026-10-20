@@ -219,3 +219,28 @@ it('starts the WASM resource hint only after this tab acquires ownership, before
   await expect(acquired!()).rejects.toThrow('stop before worker starts');expect(links).toHaveLength(1);
  }finally{broker.closed=true;broker.election?.abort();vi.stubGlobal('navigator',previousNavigator);vi.stubGlobal('document',previousDocument);}
 });
+
+it('classifies a read deadline without claiming an unknown commit or creating an intent',async()=>{
+ vi.useFakeTimers();const broker=client() as any;broker.send=vi.fn();broker.setState=vi.fn();broker.wakeBlocked=vi.fn();
+ try{
+  const pending=broker.request('clientCall',{method:'livePage',signature:'grid'},10);
+  const failure=expect(pending).rejects.toMatchObject({code:'TIMEOUT',outcome:'rejected',operation:'livePage',message:'Storage read timed out; retry the read'});
+  await vi.advanceTimersByTimeAsync(10);await failure;expect(broker.pending.size).toBe(0);expect(broker.pendingBytes).toBe(0);
+ }finally{vi.useRealTimers();}
+});
+it('retries a lost durable reply with the original public intent ID and returns its existing receipt once',async()=>{
+ vi.useFakeTimers();const broker=client() as any;broker.setState=vi.fn();broker.wakeBlocked=vi.fn();
+ const receipts=new Map<string,unknown>();let commits=0,drop=true;
+ broker.send=vi.fn((call:any)=>{
+  if(!receipts.has(call.id)){commits++;receipts.set(call.id,{commandId:call.id,result:'saved'});}
+  if(!drop){clearTimeout(call.timer);broker.pending.delete(call.id);broker.pendingBytes-=call.bytes;call.resolve(receipts.get(call.id));}
+ });
+ try{
+  const input={method:'reducer',path:'tasks/updateDetails',args:{id:'task',name:'offline'},now:100};
+  const first=broker.request('clientCall',input,10,'same-intent');
+  const failure=expect(first).rejects.toMatchObject({code:'TIMEOUT',outcome:'unknown',operation:'reducer',intentId:'same-intent'});
+  await vi.advanceTimersByTimeAsync(10);await failure;drop=false;
+  expect(await broker.request('clientCall',input,10,'same-intent')).toEqual({commandId:'same-intent',result:'saved'});
+  expect(commits).toBe(1);expect(receipts.size).toBe(1);expect(broker.pendingBytes).toBe(0);
+ }finally{vi.useRealTimers();}
+});

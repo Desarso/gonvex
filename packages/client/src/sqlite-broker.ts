@@ -390,7 +390,12 @@ export class SQLiteReplicaBroker {
       const timer = setTimeout(() => {
         const call = this.pending.get(id); if (!call) return;
         this.pending.delete(id); this.pendingBytes -= call.bytes;
-        this.setState('pending'); reject(error('TIMEOUT', 'Storage commit outcome is unknown; retry the same intent ID', 'unknown'));this.wakeBlocked();
+        this.setState('pending');
+        const method=op==='clientCall'&&admitted&&typeof admitted==='object'?String((admitted as {method?:unknown}).method):op;
+        const readOnly=new Set(['ping','stats','integrity','controls','status','entities','replicaPage','collectionPage','localLivePage','livePage','replicaPendingPage','livePendingPage','controlState']).has(method);
+        const failure=error('TIMEOUT',readOnly?'Storage read timed out; retry the read':'Storage commit outcome is unknown; retry the same intent ID',readOnly?'rejected':'unknown');
+        Object.assign(failure,{operation:method,...(requestID?{intentId:requestID}:{})});
+        reject(failure);this.wakeBlocked();
       }, timeoutMs);
       const replay=!(op==='clientCall'&&!!admitted&&typeof admitted==='object'&&['action','token'].includes(String((admitted as {method?:unknown}).method)));
       const call: Call = { id, op, args: admitted, bytes, replay,lastSent: 0, timer, resolve, reject };
