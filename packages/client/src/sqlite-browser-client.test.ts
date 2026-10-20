@@ -85,7 +85,7 @@ it('preserves an already displayed first page while its pending stage becomes ca
 });
 
 it('keeps separately filtered view pages pinned independently while sharing the owner source through distinct leases',async()=>{
- const f=fixture();f.handler=async input=>{if(input.method==='collectionPage')return {rows:[{id:'a',n:input.plan.where.value}],sequence:1,bytes:32,cursor:null,generation:'window'};};const one=f.client.watchReplica({path:'tasks/all'},{},{view:'grid'}),two=f.client.watchReplica({path:'tasks/all'},{},{view:'board'});cleanup.push(()=>{one.close();two.close();});const plan={order:[{field:'n',direction:'asc' as const}],limit:10};const first=await one.queryPage({...plan,where:{field:'n',op:'gte',value:1}}),second=await two.queryPage({...plan,where:{field:'n',op:'gte',value:2}});expect(one.snapshot().page).toBe(first);expect(two.snapshot().page).toBe(second);const opens=f.calls.filter(call=>call.input.method==='watchReplica');expect(opens).toHaveLength(2);expect(opens[0].input.lease).not.toBe(opens[1].input.lease);one.close();await vi.waitFor(()=>expect(f.calls.some(call=>call.input.method==='unwatchReplica'&&call.input.lease===opens[0].input.lease)).toBe(true));expect(two.snapshot().page).toBe(second);
+ const f=fixture();f.handler=async input=>{if(input.method==='collectionPage')return {rows:[{id:'a',n:input.plan.where.value}],sequence:1,bytes:32,cursor:null,generation:'window'};};const one=f.client.watchReplica({path:'tasks/all'},{},{view:'grid'}),two=f.client.watchReplica({path:'tasks/all'},{},{view:'board'});cleanup.push(()=>{one.close();two.close();});const plan={order:[{field:'n',direction:'asc' as const}],limit:10};const first=await one.queryPage({...plan,where:{field:'n',op:'gte',value:1}}),second=await two.queryPage({...plan,where:{field:'n',op:'gte',value:2}});expect(one.snapshot().page).toBe(first);expect(two.snapshot().page).toBe(second);const opens=f.calls.filter(call=>call.input.method==='watchReplica');expect(opens).toHaveLength(1);one.close();await Promise.resolve();expect(f.calls.filter(call=>call.input.method==='unwatchReplica')).toHaveLength(0);expect(two.snapshot().page).toBe(second);two.close();await vi.waitFor(()=>expect(f.calls.filter(call=>call.input.method==='unwatchReplica')).toHaveLength(1));
 });
 
 it('binds queued reducer RPCs to the current opaque worker admission key',async()=>{
@@ -120,7 +120,7 @@ it('presents only a bounded compatibility collection page and marks larger sourc
  stop();watch.close();expect(updates.length).toBeGreaterThan(0);
 });
 it('routes separately leased live views through bounded canonical and pending window pages',async()=>{
- const f=fixture(),ref={kind:'query',path:'tasks/grid',delivery:'live' as const,live:{entity:'tasks',key:'id',plan:{} as any}};f.handler=async input=>{if(input.method==='watchLive')return {signature:'live'};if(input.method==='livePage')return {generation:{epoch:1,sequence:1},rows:[{id:'a',value:{id:'a'}}]};if(input.method==='livePendingPage')return {generation:'pending',complete:false,serverVerified:false,rows:[{id:'a',value:{id:'a'}}]};if(input.method==='unwatchLive')return null;};const one=f.client.watchLiveWindow(ref,{},{view:'grid'}),two=f.client.watchLiveWindow(ref,{},{view:'preview'});const pending=await one.pendingPage({limit:10});expect(pending?.complete).toBe(false);await two.page({limit:10});expect(one.snapshot().page).toBe(pending);expect(f.calls.filter(call=>call.input.method==='watchLive')).toHaveLength(2);expect(f.calls.some(call=>call.input.method==='watchReplica')).toBe(false);one.close();two.close();await vi.waitFor(()=>expect(f.calls.filter(call=>call.input.method==='unwatchLive')).toHaveLength(2));
+ const f=fixture(),ref={kind:'query',path:'tasks/grid',delivery:'live' as const,live:{entity:'tasks',key:'id',plan:{} as any}};f.handler=async input=>{if(input.method==='watchLive')return {signature:'live'};if(input.method==='livePage')return {generation:{epoch:1,sequence:1},rows:[{id:'a',value:{id:'a'}}]};if(input.method==='livePendingPage')return {generation:'pending',complete:false,serverVerified:false,rows:[{id:'a',value:{id:'a'}}]};if(input.method==='unwatchLive')return null;};const one=f.client.watchLiveWindow(ref,{},{view:'grid'}),two=f.client.watchLiveWindow(ref,{},{view:'preview'});const pending=await one.pendingPage({limit:10});expect(pending?.complete).toBe(false);await two.page({limit:10});expect(one.snapshot().page).toBe(pending);expect(f.calls.filter(call=>call.input.method==='watchLive')).toHaveLength(1);expect(f.calls.some(call=>call.input.method==='watchReplica')).toBe(false);one.close();two.close();await vi.waitFor(()=>expect(f.calls.filter(call=>call.input.method==='unwatchLive')).toHaveLength(1));
 });
 it('rebuilds a structured live result from two fenced bounded pages',async()=>{
  const f=fixture(),ref={kind:'query',path:'tasks/grid',delivery:'live' as const,live:{entity:'tasks',key:'id',resultPath:['page'],plan:{} as any}};
@@ -401,4 +401,33 @@ it('keeps every client within its existing global reservation and releases regis
   f.client.close();expect(f.client.budgets().every(entry=>entry.bytes===0&&entry.entries===0)).toBe(true);
   f.client.close();expect(f.client.budgets().every(entry=>entry.bytes===0&&entry.entries===0)).toBe(true);
  }
+});
+
+it('shares one source and one in-flight page across identical arguments while retaining separate view pages',async()=>{
+ const f=fixture(),ref={path:'tasks/all'},one=f.client.watchReplica(ref,{},{view:'one'}),two=f.client.watchReplica(ref,{},{view:'two'});
+ cleanup.push(()=>{one.close();two.close();});
+ const [a,b]=await Promise.all([one.page({limit:128}),two.page({limit:128})]);
+ expect(f.calls.filter(call=>call.input.method==='watchReplica')).toHaveLength(1);
+ expect(f.calls.filter(call=>call.input.method==='replicaPage')).toHaveLength(1);
+ expect(a).toBe(b);expect(one.snapshot().page).toBe(a);expect(two.snapshot().page).toBe(b);
+ f.replaceOwner();await two.page({limit:128});expect(f.calls.filter(call=>call.input.method==='watchReplica')).toHaveLength(2);
+ one.close();await Promise.resolve();expect(f.calls.filter(call=>call.input.method==='unwatchReplica')).toHaveLength(0);
+ await two.page({offset:1,limit:10});expect(two.snapshot().page).toBeDefined();
+ two.close();await vi.waitFor(()=>expect(f.calls.filter(call=>call.input.method==='unwatchReplica')).toHaveLength(1));
+});
+
+it('keeps a shared opening source alive when its first view closes',async()=>{
+ const f=fixture();let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});
+ f.handler=async input=>{if(input.method==='watchReplica')await gate;};
+ const one=f.client.watchReplica({path:'tasks/all'},{},{view:'one'}),two=f.client.watchReplica({path:'tasks/all'},{},{view:'two'});cleanup.push(()=>{one.close();two.close();});
+ const first=one.page({limit:128}),second=two.page({limit:128});const rejected=expect(first).rejects.toMatchObject({code:'FENCED'});
+ await vi.waitFor(()=>expect(f.calls.filter(call=>call.input.method==='watchReplica')).toHaveLength(1));one.close();release();
+ await rejected;expect((await second)?.rows).toHaveLength(1);expect(f.calls.filter(call=>call.input.method==='watchReplica')).toHaveLength(1);expect(f.calls.filter(call=>call.input.method==='unwatchReplica')).toHaveLength(0);
+ two.close();await vi.waitFor(()=>expect(f.calls.filter(call=>call.input.method==='unwatchReplica')).toHaveLength(1));
+});
+
+it('keeps distinct argument subscriptions separate',async()=>{
+ const f=fixture(),one=f.client.watchReplica({path:'tasks/all'},{q:1}),two=f.client.watchReplica({path:'tasks/all'},{q:2});cleanup.push(()=>{one.close();two.close();});
+ await Promise.all([one.page({limit:128}),two.page({limit:128})]);const opens=f.calls.filter(call=>call.input.method==='watchReplica');expect(opens).toHaveLength(2);expect(opens[0].input.lease).not.toBe(opens[1].input.lease);
+ one.close();two.close();await vi.waitFor(()=>expect(f.calls.filter(call=>call.input.method==='unwatchReplica')).toHaveLength(2));
 });
