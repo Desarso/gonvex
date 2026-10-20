@@ -2,8 +2,8 @@ name: Runtime regression
 
 on:
   pull_request:
+  # Seed caches on the PR base, including Mergify's staging queue.
   push:
-    # Seed caches on the PR base, including Mergify's staging queue.
     branches: [main, staging]
 
 permissions:
