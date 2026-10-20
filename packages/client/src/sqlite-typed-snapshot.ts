@@ -50,7 +50,12 @@ export async function prepareSQLiteTypedSnapshot(db:SQLiteReplicaDatabase,schema
  if(n!.n>=2048)fail('BUDGET','Collect obsolete typed snapshot stages first');
  const clock=await db.getFirstAsync<{value:number}>('INSERT INTO gv_snapshot_scope_clock VALUES(1,1) ON CONFLICT(id) DO UPDATE SET value=value+1 WHERE value<9007199254740991 RETURNING value');
  if(!clock||!Number.isSafeInteger(clock.value)||clock.value<1)fail('FENCED','Snapshot physical scope clock exhausted');
- const physical='\u0000s:'+clock.value.toString(36);await db.runAsync('INSERT INTO gv_snapshot_typed VALUES(?,?,?,?,?)',input.scope,input.subscription,input.snapshot,input.entity,physical);return physical;
+ const physical='\u0000s:'+clock.value.toString(36);await db.runAsync('INSERT INTO gv_snapshot_typed VALUES(?,?,?,?,?)',input.scope,input.subscription,input.snapshot,input.entity,physical);
+ // A new private partition has no searchable canonical rows yet. Keep its
+ // FTS triggers off for all credited pages, then bulk-fill atomically with
+ // publication. Existing resumed partitions retain their prior indexing mode.
+ if(table.search?.length)await db.runAsync('INSERT INTO gv_fts_deferred VALUES(?,?)',physical,input.entity);
+ return physical;
 }
 
 /** Caller owns the snapshot publication transaction. Existing authority stays

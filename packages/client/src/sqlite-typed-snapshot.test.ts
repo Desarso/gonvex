@@ -143,3 +143,18 @@ it('keeps indexes installed for an empty source instead of dropping and rebuildi
  expect(commands.join('\n')).not.toMatch(/DROP INDEX|CREATE INDEX/);
  expect(await f.engine.integrity()).toBe('ok');
 });
+
+it('defers private snapshot FTS population until atomic publication and preserves restartable search',async()=>{
+ const f=await fixture(),writes=vi.spyOn(f.db,'runAsync');
+ const {input}=await f.stage([{id:'deferred',name:'deferred café 東京',detail:'searchable after publication'}]);
+ expect(await f.db.getFirstAsync('SELECT 1 FROM gv_fts_deferred WHERE entity=?','tasks')).toEqual({'1':1});
+ const ftsInserts=()=>writes.mock.calls.filter(([sql])=>/^INSERT INTO ".*_fts"/.test(sql));
+ expect(ftsInserts()).toHaveLength(0);
+ // Reopen the stager before publication: its durable marker must survive.
+ const stager=new SQLiteSnapshotPages(f.db,()=>f.engine.verifyOwner(),schema);await stager.ready();
+ expect((await f.engine.page('s',{table:'tasks',search:'café',order:[{field:'name',direction:'asc'}],textOrder:'binary',limit:10})).rows).toEqual([]);
+ await f.activator.activate(input);
+ expect(ftsInserts()).toHaveLength(1);expect(await f.db.getFirstAsync('SELECT 1 FROM gv_fts_deferred WHERE entity=?','tasks')).toBeNull();
+ expect((await f.engine.page('s',{table:'tasks',search:'café',order:[{field:'name',direction:'asc'}],textOrder:'binary',limit:10})).rows.map(row=>row.id)).toEqual(['deferred']);
+ expect(await f.engine.integrity()).toBe('ok');
+});
