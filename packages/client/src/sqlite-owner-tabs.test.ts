@@ -30,3 +30,22 @@ it('preserves a fresh control hint that arrives after polling but before the pre
  const sent:any[]=[],tabs=new SQLiteOwnerTabs((tab,change)=>sent.push({tab,change}));tabs.setGeneration({epoch:1,sequence:4});tabs.register('provider');const initial=sent[0];
  tabs.notify('provider',{epoch:1,sequence:4});expect(sent).toHaveLength(1);expect(tabs.stats().pending).toBe(1);tabs.acknowledge('provider',initial.change.notification,initial.change);expect(sent).toHaveLength(2);expect(sent[1].change.scope).toBe('@control');expect(sent[1].change.notification).toBeGreaterThan(initial.change.notification);tabs.close();
 });
+
+it('credits precommit display hints without advancing the committed generation across rollback',()=>{
+ const sent:Array<{tab:string;change:SQLiteOwnerChange}>=[],tabs=new SQLiteOwnerTabs((tab,change)=>sent.push({tab,change}));
+ tabs.setGeneration({epoch:3,sequence:7});tabs.register('reader');tabs.register('other');
+ for(const item of [...sent])tabs.acknowledge(item.tab,item.change.notification,item.change);
+ const before=sent.length;
+ for(let n=0;n<10000;n++)tabs.hintPending('reader');
+ expect(sent).toHaveLength(before+1);expect(sent.at(-1)).toMatchObject({tab:'reader',change:{scope:'@preview',epoch:3,sequence:7}});
+ expect(tabs.stats()).toMatchObject({inFlight:1,pending:1});
+ const hint=sent.at(-1)!;tabs.acknowledge('reader',hint.change.notification,hint.change);
+ const coalesced=sent.at(-1)!;expect(coalesced.change.scope).toBe('@preview');expect(coalesced.change.sequence).toBe(7);
+ tabs.acknowledge('reader',coalesced.change.notification,coalesced.change);
+ // Rollback has no committed publication. A retry committing sequence8 must
+ // still reach both tabs, and the next preview must use that committed8.
+ tabs.publish('tasks',{epoch:3,sequence:8});
+ for(const item of sent.slice(-2))tabs.acknowledge(item.tab,item.change.notification,item.change);
+ tabs.hintPending('reader');expect(sent.at(-1)).toMatchObject({tab:'reader',change:{scope:'@preview',sequence:8}});
+ tabs.drop('reader');expect(()=>tabs.hintPending('reader')).toThrow('detached');tabs.close();
+});

@@ -431,3 +431,15 @@ it('keeps distinct argument subscriptions separate',async()=>{
  await Promise.all([one.page({limit:128}),two.page({limit:128})]);const opens=f.calls.filter(call=>call.input.method==='watchReplica');expect(opens).toHaveLength(2);expect(opens[0].input.lease).not.toBe(opens[1].input.lease);
  one.close();two.close();await vi.waitFor(()=>expect(f.calls.filter(call=>call.input.method==='unwatchReplica')).toHaveLength(2));
 });
+
+it('refreshes only pending display interests on a preview hint and retains committed page identity',async()=>{
+ const f=fixture(async()=> 'opaque'),pending=f.client.watchReplica({path:'tasks/pending'}),committed=f.client.watchReplica({path:'tasks/complete'});
+ cleanup.push(()=>{pending.close();committed.close();});
+ await pending.pendingPage();const page=await committed.page();
+ let pendingHints=0,committedHints=0;const stopPending=pending.subscribe(()=>pendingHints++),stopCommitted=committed.subscribe(()=>committedHints++);
+ cleanup.push(()=>{stopPending();stopCommitted();});
+ const controls=f.calls.filter(call=>call.input.method==='controls').length;
+ f.change('@preview');
+ expect(pendingHints).toBe(1);expect(committedHints).toBe(0);expect(committed.snapshot().page).toBe(page);expect(committed.snapshot().stale).toBe(false);
+ expect(f.calls.filter(call=>call.input.method==='controls')).toHaveLength(controls);
+});

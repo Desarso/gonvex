@@ -31,6 +31,12 @@ export class SQLiteOwnerTabs {
   if(this.serial>=Number.MAX_SAFE_INTEGER)fail('FENCED','Owner notification sequence exhausted');
   tab.inFlight={...value,notification:++this.serial};tab.sentAt=Date.now();this.sent++;this.send(id,tab.inFlight);
  }
+ /** A precommit display hint reuses only the last committed generation.
+  * It must never fence out a later rollback/retry by advancing that cursor. */
+ hintPending(id:string){
+  if(!this.tabs.has(id))fail('FENCED','Preview recipient is detached');
+  if(this.latest)this.publish('@preview',this.latest,id);
+ }
  /** Control hints share the same one-inflight/one-pending credit as data. */
  notify(id:string,generation:Generation){if(!this.tabs.has(id))fail('FENCED','Control recipient is detached');this.publish('@control',generation,id);}
  publish(scope:string,generation:Generation,target?:string){
@@ -39,7 +45,7 @@ export class SQLiteOwnerTabs {
   for(const [id,tab]of this.tabs){
    if(target!==undefined&&id!==target)continue;
    const previous=tab.pending??tab.inFlight;
-   if(previous&&(compare(generation,previous)<0||compare(generation,previous)===0&&(previous.reset||previous.scope===scope)&&!(target!==undefined&&scope==='@control')))continue;
+   if(previous&&(compare(generation,previous)<0||compare(generation,previous)===0&&(previous.reset||previous.scope===scope)&&!(target!==undefined&&(scope==='@control'||scope==='@preview'))))continue;
    if(!tab.inFlight){this.deliver(id,tab,{scope,...generation});continue;}
    const reset=!!tab.pending&&(tab.pending.reset||tab.pending.scope!==scope);
    tab.pending={...generation,scope:reset?'*':scope,...(reset?{reset:true as const}:{})};

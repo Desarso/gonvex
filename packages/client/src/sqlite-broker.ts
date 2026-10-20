@@ -134,7 +134,7 @@ export class SQLiteReplicaBroker {
       try{if(m.epoch!==undefined){
         if(!Number.isSafeInteger(m.epoch)||m.epoch<0||this.owner&&m.epoch<this.owner.epoch)return;
         const changeKey=(m.reset?'r:':'s:')+m.scope;const previous=this.lastChanges.get(changeKey);
-        const freshControl=(m.scope==='@control'||m.reset===true)&&Number.isSafeInteger(m.notification)&&m.notification>0&&m.notification>(previous?.notification??0);
+        const freshControl=(m.scope==='@control'||m.scope==='@preview'||m.reset===true)&&Number.isSafeInteger(m.notification)&&m.notification>0&&m.notification>(previous?.notification??0);
         if(previous&&(m.epoch<previous.epoch||m.epoch===previous.epoch&&(m.sequence<previous.sequence||m.sequence===previous.sequence&&!freshControl)))return;
         if(previous){this.lastChanges.delete(changeKey);this.lastChangeBytes-=previous.bytes;}
         const bytes=m.scope.length*2+160;

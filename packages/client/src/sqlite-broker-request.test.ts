@@ -244,3 +244,11 @@ it('retries a lost durable reply with the original public intent ID and returns 
   expect(commits).toBe(1);expect(receipts.size).toBe(1);expect(broker.pendingBytes).toBe(0);
  }finally{vi.useRealTimers();}
 });
+
+it('delivers repeated credited preview hints at one committed generation without accepting duplicates',()=>{
+ const broker=client() as any,calls:string[]=[];broker.options={onChange:(scope:string)=>calls.push(scope)};broker.owner={epoch:1};broker.acknowledgeChange=vi.fn();
+ const hint={protocol:2,type:'change',scope:'@preview',sequence:4,epoch:1,notification:1};
+ broker.receiveControl(hint);broker.receiveControl({...hint,notification:2});broker.receiveControl({...hint,notification:2});broker.receiveControl(hint);
+ expect(calls).toEqual(['@preview','@preview']);
+ broker.receiveControl({...hint,scope:'tasks',sequence:5,notification:3});expect(calls).toEqual(['@preview','@preview','tasks']);
+});

@@ -124,6 +124,12 @@ export class SQLiteBrowserClient {
   this.ledger.register('browser-token-requests',()=>({name:'browser-token-requests',bytes:this.tokenRequests.size*40960,entries:this.tokenRequests.size,maxBytes:327680,maxEntries:8,evictions:0,refusals:0}));
   this.releaseChanges=options.broker.subscribeChanges((scope)=>{
    const epoch=options.broker.stats().ownerEpoch;if(epoch!==undefined&&this.epoch!==undefined&&epoch!==this.epoch)this.invalidate(false);if(epoch!==undefined)this.epoch=epoch;
+   if(scope==='@preview'){
+    // This is not a committed invalidation. Pending display consumers can poll
+    // their bounded memory slot without refreshing entities or auth controls.
+    for(const watch of this.watches.values())if(watch.pendingDisplay){watch.invalidation++;watch.stale=true;this.notify(watch);}
+    return;
+   }
    if(scope==='@pending'){
     // Coalesce staging hints across sources without invalidating complete
     // cached pages. Canonical authority is published at its terminal cohort.
