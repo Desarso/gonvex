@@ -15,6 +15,7 @@ export class SQLiteLegacyBootstrap {
  private readonly intents:SQLiteLegacyIntentMigration;
  private readonly rows:SQLiteLegacyRowMigration;
  private closed=false;
+ private intentCursor?:{scope:string;after:IDBValidKey};
  constructor(private readonly options:Options){
   this.intents=new SQLiteLegacyIntentMigration({database:options.owner.database,canonical:options.owner.canonical,journal:options.journal,runOwner:options.owner.runOwner,fence:()=>options.owner.engine.verifyOwner()});
   this.rows=new SQLiteLegacyRowMigration(options.owner,options.artifactHash);
@@ -40,7 +41,7 @@ export class SQLiteLegacyBootstrap {
   if(!selected)return;
   if(selected.artifactHash!==this.options.artifactHash)fail('SCHEMA_MISMATCH','Legacy offline session requires authoritative authentication for the current artifact');
   if(this.closed)fail('FENCED','Legacy bootstrap is closed');
-  if(source.outbox?.stores().includes('entries')){const input={source:source.outbox,store:'entries',identityScope,session:selected,current};if(!await this.intents.hasCutover(input))await this.intents.migrate(input);}
+  if(source.outbox?.stores().includes('entries')){const input={source:source.outbox,store:'entries',identityScope,session:selected,current};await this.intents.migrate(input);}
   else{
    await this.options.owner.runOwner(32768,()=>this.options.owner.database.withTransactionAsync(async()=>{
     await this.options.owner.engine.verifyOwner();check();const saved=await this.options.owner.canonical.loadSession(identityScope);
@@ -50,9 +51,12 @@ export class SQLiteLegacyBootstrap {
   }
   check();return structuredClone(selected);
  }
- async step(identityScope:string,session:LocalReplicaSession){
-  const source=await this.open();if(!source.replica?.stores().includes('entities'))return {verified:true};
-  return this.rows.step({source:source.replica,identityScope,session});
+ async step(identityScope:string,session:LocalReplicaSession,current:()=>boolean=()=>true){
+  const source=await this.open();
+  const imported=source.outbox?.stores().includes('entries')?await this.intents.migrate({source:source.outbox,store:'entries',identityScope,session,current:()=>!this.closed&&current(),onePage:true,after:this.intentCursor?.scope===identityScope?this.intentCursor.after:undefined}):undefined;
+  this.intentCursor=imported?.nextKey!=null?{scope:identityScope,after:imported.nextKey}:undefined;
+  const rows=source.replica?.stores().includes('entities')?await this.rows.step({source:source.replica,identityScope,session}):{verified:true};
+  return {...rows,imported:imported?.copied??0,watching:!!source.outbox,moreIntents:imported?.nextKey!=null};
  }
  close(){if(this.closed)return;this.closed=true;void this.sources?.then(source=>{source.replica?.close();source.outbox?.close();},()=>{});}
 }

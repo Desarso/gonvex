@@ -156,7 +156,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
  private scheduleMigration(connection:Connection,delay=0){
   clearTimeout(connection.migrationTimer);if(this.closed||!connection.migrationSession||this.connections.get(connection.id)!==connection)return;
   connection.migrationTimer=setTimeout(()=>{connection.migrationTimer=undefined;const admitted=this.admission(connection),session=connection.migrationSession;if(!admitted||!session)return;if(connection.restoring){this.scheduleMigration(connection,100);return;}
-   void this.legacy.step(admitted.intentScope,session).then(result=>{if(!result.verified)this.scheduleMigration(connection,100);},error=>{if(this.closed||this.connections.get(connection.id)!==connection)return;connection.failure={code:String((error as any)?.code??'SQLITE'),message:String((error as any)?.message??error).slice(0,512)};this.notify(connection);});
+   void this.legacy.step(admitted.intentScope,session,()=>this.connections.get(connection.id)===connection&&this.admission(connection)?.readGeneration===admitted.readGeneration).then(async result=>{if(result.imported){connection.recovered=false;await this.recover(connection);this.scheduleDelivery(connection);this.notify(connection);}if(!result.verified||result.watching)this.scheduleMigration(connection,!result.verified||result.moreIntents?100:1000);}).catch(error=>{if(this.closed||this.connections.get(connection.id)!==connection)return;connection.failure={code:String((error as any)?.code??'SQLITE'),message:String((error as any)?.message??error).slice(0,512)};this.notify(connection);});
   },delay);
  }
  private async demandReducerDependencies(connection:Connection,ref:NativeFunctionReference){

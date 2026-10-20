@@ -1,4 +1,5 @@
 import {DatabaseSync} from 'node:sqlite';
+import {createReducerOutbox} from './outbox.js';
 import {expect,it} from 'vitest';
 import {IDBFactory,IDBKeyRange} from 'fake-indexeddb';
 import {SQLiteIndexedDBMigrationSource} from './sqlite-idb-migration-source.js';
@@ -31,7 +32,7 @@ it('moves fenced sessions and original offline intents before replica rows, with
   const rows=[];let after=0;for(;;){const page=await f.journal.page(identityScope,after);rows.push(...page.entries);if(page.nextId===null)break;after=page.nextId;}
   expect(rows).toHaveLength(26);expect(rows.every(row=>row.scope===identityScope&&row.localExecution?.scope==='visible')).toBe(true);expect(rows[0]).toMatchObject({state:'pending',attempts:2,sentAt:110,idempotencyKey:'intent-1',patches:[{rowId:'stable-1'}]});expect(rows[1].state).toBe('failed');expect(rows[2].state).toBe('rejected');
   await f.journal.acknowledge(identityScope,[rows[0].id]);
-  expect(await f.migration.migrate(input)).toMatchObject({alreadyCopied:true,previouslySettled:0});expect((await f.journal.summary(identityScope)).count).toBe(25);expect(await legacy.count('entries')).toBe(30);
+  expect(await f.migration.migrate(input)).toMatchObject({alreadyCopied:true,previouslySettled:1,copied:0});expect((await f.journal.summary(identityScope)).count).toBe(25);expect(await legacy.count('entries')).toBe(30);
 
  }finally{f.sql.close();legacy.close();}
 });
@@ -71,4 +72,47 @@ it('never replaces a newer durable admission or revives a revoked cache during l
   expect(await safety.session(identityScope)).toEqual(newer);expect(await f.canonical.loadSession(identityScope)).toEqual(newer);expect((await f.journal.summary(identityScope)).count).toBe(0);
   await safety.revokeSession(identityScope);await expect(f.migration.migrate({source:legacy,store:'entries',identityScope,session:newer})).rejects.toMatchObject({code:'FENCED'});expect(await safety.sessionRevoked(identityScope)).toBe(true);
  }finally{legacy.close();f.sql.close();}
+});
+
+it('imports a late durable legacy enqueue once and never resurrects an acknowledged intent',async()=>{
+ const factory=new IDBFactory(),legacy=await source(factory),f=await sqlite();
+ const input={source:legacy,store:'entries',identityScope,session};
+ let db:IDBDatabase|undefined;
+ try{
+  await f.migration.migrate(input);
+  const first=(await f.journal.find(identityScope,'intent-1'))!;
+  await f.journal.acknowledge(identityScope,[first.id]);
+  db=await new Promise<IDBDatabase>((resolve,reject)=>{const r=factory.open('old-outbox');r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});
+  const write=async(change:(store:IDBObjectStore)=>void)=>new Promise<void>((resolve,reject)=>{const tx=db!.transaction('entries','readwrite');change(tx.objectStore('entries'));tx.oncomplete=()=>resolve();tx.onabort=()=>reject(tx.error);});
+  await write(store=>{const get=store.get(1);get.onsuccess=()=>store.put({...get.result,attempts:9,state:'pending',nextAttemptAt:999});store.put({id:31,scope:identityScope,path:'tasks/create',args:{title:'Late offline edit'},idempotencyKey:'late',entityKeys:[],createdAt:999,attempts:0,nextAttemptAt:999,state:'pending'});});
+  expect(await f.migration.migrate(input)).toMatchObject({sourceRows:31,copied:1,previouslySettled:1});
+  expect(await f.journal.find(identityScope,'intent-1')).toBeUndefined();
+  const late=(await f.journal.find(identityScope,'late'))!;expect(late.args).toEqual({title:'Late offline edit'});
+  await f.journal.acknowledge(identityScope,[late.id]);
+  const restarted=new SQLiteLegacyIntentMigration({database:f.db,canonical:f.canonical,journal:f.journal,fence:()=>f.engine.verifyOwner()});
+  expect(await restarted.migrate(input)).toMatchObject({copied:0,previouslySettled:2});
+  await write(store=>{const get=store.get(31);get.onsuccess=()=>store.put({...get.result,args:{title:'Different command with reused key'}});});
+  await expect(restarted.migrate(input)).rejects.toMatchObject({code:'INTENT_CONFLICT'});
+  expect(await f.journal.find(identityScope,'late')).toBeUndefined();
+ }finally{db?.close();legacy.close();f.sql.close();}
+});
+
+it('background bootstrap imports a public old-tab enqueue after cutover and preserves its durable source',async()=>{
+ const factory=new IDBFactory(),f=await sqlite();
+ const options={databaseName:'public-old-outbox',indexedDB:factory,IDBKeyRange};
+ const old=createReducerOutbox(options);
+ await old.enqueue({scope:identityScope,path:'tasks/create',args:{title:'Before'},idempotencyKey:'before'});
+ const owner={database:f.db,engine:f.engine,canonical:f.canonical,runOwner:<T>(_bytes:number,run:()=>Promise<T>)=>run()} as SQLiteOwnerProgramContext;
+ const bootstrap=new SQLiteLegacyBootstrap({owner,journal:f.journal,artifactHash:'artifact',replicaName:'absent',outboxName:options.databaseName,factory,ranges:IDBKeyRange});
+ try{
+  await bootstrap.prepare(identityScope,session);
+  const lateTab=createReducerOutbox(options);
+  await lateTab.enqueue({scope:identityScope,path:'tasks/create',args:{title:'After'},idempotencyKey:'after'});
+  expect(await bootstrap.step(identityScope,session)).toMatchObject({verified:true,imported:1,watching:true});
+  const imported=(await f.journal.find(identityScope,'after'))!;expect(imported.args).toEqual({title:'After'});
+  await f.journal.acknowledge(identityScope,[imported.id]);
+  expect(await bootstrap.step(identityScope,session)).toMatchObject({imported:0,watching:true});
+  expect(await f.journal.find(identityScope,'after')).toBeUndefined();
+  expect(await lateTab.count(identityScope)).toBe(2);
+ }finally{bootstrap.close();f.sql.close();}
 });
