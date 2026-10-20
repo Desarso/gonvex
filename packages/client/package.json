@@ -60,7 +60,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "bench:sync-engine:check": "node --test bench/sync-engine/statistics.checks.mjs",
     "sqlite:rebuild": "node scripts/rebuild-sqlite.mjs",
-    "test:node": "node --test scripts/sqlite-log-guards.test.mjs bench/sqlite-replica/fixture.test.mjs bench/sync-engine/statistics.checks.mjs test/sqlite-sahpool.checks.mjs test/sqlite-row-sharing.checks.mjs"
+    "test:node": "node --test scripts/sqlite-log-guards.test.mjs bench/sqlite-replica/fixture.test.mjs bench/sync-engine/statistics.checks.mjs test/sqlite-sahpool.checks.mjs test/sqlite-row-sharing.checks.mjs test/sqlite-engine-export.checks.mjs"
   },
   "dependencies": {
     "@gonvex/local-runtime": "workspace:*",

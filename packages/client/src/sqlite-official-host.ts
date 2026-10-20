@@ -1,3 +1,4 @@
+import {probeSQLiteWasmBytes,readSQLiteWasmSeed} from './sqlite-wasm-byte-cache.js';
 import type { BindableValue, Database, PreparedStatement, Sqlite3Static } from '@sqlite.org/sqlite-wasm';
 import type { SQLiteReplicaDatabase } from './sqlite-replica-storage.js';
 import { SQLiteBridgeBudgetError } from './wasm-sqlite-database.js';
@@ -28,10 +29,29 @@ export async function openOfficialSQLiteHost(): Promise<OfficialSQLiteHost> {
   (globalThis as typeof globalThis & { sqlite3ApiConfig?: unknown }).sqlite3ApiConfig = {
     disable: { vfs: { opfs: true, 'opfs-vfs': true, 'opfs-wl': true } },
   };
+  const pendingBytes=probeSQLiteWasmBytes();
   const { default: initialize } = await import('@gonvex/client/sqlite-module');
-  const initializePinned: (options?:{INITIAL_MEMORY:number})=>ReturnType<typeof initialize> = initialize;
-  const sqlite3 = await initializePinned({ INITIAL_MEMORY: 16 * 1024 * 1024 });
-  return openInitializedOfficialSQLiteHost(sqlite3);
+  const probe=await pendingBytes;
+  let reject!:(error:unknown)=>void;
+  const failure=new Promise<never>((_resolve,no)=>{reject=no;});
+  type Result=WebAssembly.WebAssemblyInstantiatedSource;
+  const initializePinned=initialize as unknown as (options:{INITIAL_MEMORY:number;instantiateWasm(this:{instantiateWasm?:unknown},imports:WebAssembly.Imports,receive:(instance:WebAssembly.Instance,module:WebAssembly.Module)=>void):object})=>ReturnType<typeof initialize>;
+  let seed:Promise<void>|undefined;
+  try{
+   const sqlite3=await Promise.race([initializePinned({INITIAL_MEMORY:16*1024*1024,instantiateWasm(imports,receive){
+    const network=async():Promise<Result>=>{
+     const response=await fetch(new URL('./vendor/sqlite3.wasm',import.meta.url),{credentials:'same-origin'});
+     if(probe.router){const copy=response.clone();seed=readSQLiteWasmSeed(copy).then(async bytes=>{if(bytes)await probe.store(bytes);}).catch(()=>{});}
+     if(WebAssembly.instantiateStreaming){try{return await WebAssembly.instantiateStreaming(response,imports);}catch{void response.body?.cancel().catch(()=>{});}}
+     const fallback=response.bodyUsed?await fetch(new URL('./vendor/sqlite3.wasm',import.meta.url),{credentials:'same-origin'}):response;
+     const bytes=await readSQLiteWasmSeed(fallback);if(!bytes)throw Error('Pinned SQLite WASM response exceeds its byte budget');return WebAssembly.instantiate(bytes,imports);
+    };
+    const load:Promise<Result>=probe.bytes?WebAssembly.instantiate(probe.bytes.buffer as ArrayBuffer,imports).catch(()=>network()):network();
+    void load.then(result=>{this.instantiateWasm={...result,imports};receive(result.instance,result.module);},reject);
+    return {};
+   }}),failure]);
+   return openInitializedOfficialSQLiteHost(sqlite3);
+  }finally{if(seed)void seed.finally(()=>probe.close());else probe.close();}
 }
 
 /** Both modes use the pinned engine and the identical storage/query program.

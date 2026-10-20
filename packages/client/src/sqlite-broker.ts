@@ -95,7 +95,7 @@ export class SQLiteReplicaBroker {
     if ((!this.options.hubURL&&!this.options.createHub) || typeof SharedWorker === 'undefined') return;
     try {
       this.port?.close();
-      this.hub = this.options.createHub?.()??new SharedWorker(this.options.hubURL!, { type: 'module', name: 'gonvex-sqlite-router-v1' });
+      this.hub = this.options.createHub?.()??new SharedWorker(this.options.hubURL!, { type: 'module', name: 'gonvex-sqlite-router-v1', extendedLifetime:true } as WorkerOptions);
       this.port = this.hub.port;
       this.port.onmessage = event => {
         const m = event.data;

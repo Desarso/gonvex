@@ -1,7 +1,10 @@
+import {installSQLiteWasmByteCache} from './sqlite-wasm-byte-cache.js';
 import {sqliteWorkerProtocol as protocol} from './sqlite-worker-protocol.js';
 import {sqliteRequestBytes} from './sqlite-request-frame.js';
 // Optional SharedWorker entry. This router holds only bounded ports and
-// heartbeat timestamps. It never imports SQLite, schema, rows or application code.
+// heartbeat timestamps and one SHA-verified public engine byte buffer. It never
+// imports SQLite, schema, rows or application code.
+installSQLiteWasmByteCache();
 const peers = new Map<string, { port: MessagePort; seen: number }>();
 const maxPeers = 64;
 let handshakes = 0;

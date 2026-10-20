@@ -40,7 +40,7 @@ export {createFirebaseAuthAdapter} from "@gonvex/client";
   'sqlite-browser.ts':`${header}import {SQLiteBrowserClient,type SQLiteBrowserOptions} from "@gonvex/client/sqlite/browser";
 import {SQLiteReplicaBroker} from "@gonvex/client/sqlite/broker";
 import {sqliteSchemaVersion} from "./sqlite-schema-version.js";
-export function sqliteBrowserOptions(options:Omit<SQLiteBrowserOptions,"broker">={}) {return {...options,artifactHash:${JSON.stringify(manifest.module.hash)},broker:new SQLiteReplicaBroker({schemaVersion:sqliteSchemaVersion,createWorker:()=>new Worker(new URL("./sqlite-client-worker.ts",import.meta.url),{type:"module"}),createHub:()=>new SharedWorker(new URL("./sqlite-router-worker.ts",import.meta.url),{type:"module",name:"gonvex-sqlite-router-v1"})})};}
+export function sqliteBrowserOptions(options:Omit<SQLiteBrowserOptions,"broker">={}) {return {...options,artifactHash:${JSON.stringify(manifest.module.hash)},broker:new SQLiteReplicaBroker({schemaVersion:sqliteSchemaVersion,createWorker:()=>new Worker(new URL("./sqlite-client-worker.ts",import.meta.url),{type:"module"}),createHub:()=>new SharedWorker(new URL("./sqlite-router-worker.ts",import.meta.url),{type:"module",name:"gonvex-sqlite-router-v1",extendedLifetime:true} as WorkerOptions)})};}
 export function createSQLiteBrowserClient(url:string,options:Omit<SQLiteBrowserOptions,"broker">={}) {return new SQLiteBrowserClient(url,sqliteBrowserOptions(options));}
 `,
  };

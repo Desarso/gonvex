@@ -8,6 +8,8 @@ const hash=data=>createHash('sha256').update(data).digest('hex'),require=createR
 const packageInfo=JSON.parse(await readFile(resolve(dirname(require.resolve('@sqlite.org/sqlite-wasm')),'../package.json'),'utf8'));
 if(packageInfo.version!==provenance.typesPackage)throw Error('Unpinned official SQLite type definitions');
 if(hash(await readFile(native+'/sqlite_wasm_extra_init.c'))!==provenance.extensionSourceSha256)throw Error('SQLite native extension changed; rebuild and review its artifacts');
+const wasmManifest=await readFile(root+'/src/sqlite-wasm-manifest.ts','utf8'),wasmBytes=await readFile(native+'/sqlite3.wasm');
+if(!wasmManifest.includes("sqliteWasmSHA256='"+hash(wasmBytes)+"'")||!wasmManifest.includes('sqliteWasmLength='+wasmBytes.length+';'))throw Error('SQLite WASM byte-cache manifest differs from pinned engine');
 await mkdir(root+'/dist/vendor',{recursive:true});
 if(JSON.stringify(Object.keys(provenance.files).sort())!==JSON.stringify(['sqlite3.mjs','sqlite3.wasm']))throw Error('Unexpected SQLite distribution files');
 for(const [file,expected]of Object.entries(provenance.files)){
