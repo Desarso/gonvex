@@ -339,6 +339,14 @@ export class SQLiteBrowserClient {
   const read=async<T extends Page>(method:string,options:unknown,display=true):Promise<T>=>{
    options=structuredClone(options);
    const revision=this.revision,dataRevision=this.dataRevision;if(closed)fail('FENCED','Native watch is closed');
+   // An identity/reference subscription may mount before the restore effect.
+   // Verify the exact credential envelope before choosing display vs owner;
+   // otherwise open() waits for a grid commit which this subscription enables.
+   if(display&&this.cachedPaint&&!this.bootRestored&&await this.displayFence()){
+    this.current(revision);if(dataRevision!==this.dataRevision)fail('FENCED','Display admission changed during verification');
+    this.bootRestored=true;
+   }
+
    const displayKey=method==='replicaPage'?selected.key:stable({watch:selected.key,method,options:options as JsonValue});
    if(display&&['replicaPage','localLivePage'].includes(method)&&this.bootRestored){
     const opts=options as SQLiteReplicaPageOptions;

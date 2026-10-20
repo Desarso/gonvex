@@ -62,3 +62,23 @@ it('does not hold a cold cache miss behind a rendering acknowledgment',async()=>
   stop();watch.close();
  }finally{client.close();vi.unstubAllGlobals();}
 });
+
+it('publishes a sealed first subscription started before session restore without awaiting the grid commit it enables',async()=>{
+ const saved=storage();vi.stubGlobal('sessionStorage',saved);let first:SQLiteBrowserClient|undefined,second:SQLiteBrowserClient|undefined,stop:(()=>void)|undefined;
+ try{
+  first=new SQLiteBrowserClient('ws://private/ws',{broker:broker() as any,artifactHash:'artifact',auth});
+  await first.restoreSession(auth);const seed=first.watchReplica({path:'tasks/all'});stop=seed.onUpdate(()=>{});
+  await vi.waitFor(()=>expect(saved.data.size).toBe(1));stop();stop=undefined;seed.close();first.close();first=undefined;
+  const owner=broker(),request=vi.spyOn(owner,'request');
+  second=new SQLiteBrowserClient('ws://private/ws',{broker:owner as any,artifactHash:'artifact',auth});
+  second.deferCachedDisplayUntilCommit();
+  // Auth/profile subscriptions can mount before the restore effect. Their
+  // stale cached result is required to mount the grid which releases the hold.
+  const watch=second.watchReplica({path:'tasks/all'});stop=watch.onUpdate(()=>{});
+  await second.restoreSession(auth);
+  await vi.waitFor(()=>expect(watch.localReplicaState()).toMatchObject({rows:[{name:'Real task'}],isUpToDate:false}),{timeout:250});
+  expect(request.mock.calls.some(call=>call[1]?.method==='watchReplica')).toBe(false);
+  second.commitCachedDisplay();
+  await vi.waitFor(()=>expect(watch.localReplicaState()?.isUpToDate).toBe(true));stop();stop=undefined;watch.close();
+ }finally{stop?.();first?.close();second?.close();vi.unstubAllGlobals();}
+});
