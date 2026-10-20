@@ -61,7 +61,12 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
   if(this.sources.has(input.id))throw new TypeError('Native source already registered');if(this.sources.size>=256||this.sourceBytes+this.startBytes+this.closingBytes+bytes>262144)fail('BUDGET','Native source registry exceeded budget');
   this.sources.set(input.id,{...owned,deferredKey:crypto.randomUUID(),bytes,opening:true});this.sourceBytes+=bytes;
  }
- private removeSource(id:string){const source=this.sources.get(id);if(!source)return;this.sources.delete(id);if(source.start)this.startBytes-=sqlitePayloadBytes(source.start,16384);if(source.closing){clearTimeout(source.closing.timer);this.closingBytes-=512;}this.sourceBytes-=source.bytes;const state=this.state;if(state)void this.initialized.then(()=>this.options.owner.runOwner(16384,()=>this.deferred.cancel(state.scope,source.deferredKey))).catch(()=>{});}
+ private async retireDeferred(scope:string,key:string){
+  // A closed source has no remaining ordered writer. Empty queues need no
+  // durable cancellation record or later cancellation-GC transaction.
+  if(await this.options.owner.database.getFirstAsync('SELECT 1 FROM gv_deferred_replica_frames WHERE scope=? AND signature=? LIMIT 1',scope,key))await this.deferred.cancel(scope,key);
+ }
+ private removeSource(id:string){const source=this.sources.get(id);if(!source)return;this.sources.delete(id);if(source.start)this.startBytes-=sqlitePayloadBytes(source.start,16384);if(source.closing){clearTimeout(source.closing.timer);this.closingBytes-=512;}this.sourceBytes-=source.bytes;const state=this.state;if(state)void this.initialized.then(()=>this.options.owner.runOwner(16384,()=>this.retireDeferred(state.scope,source.deferredKey))).catch(()=>{});}
  unregister(id:string){if(this.state&&!this.state.closed)fail('FENCED','Close an online source through its protocol acknowledgement');this.removeSource(id);}
  closeSource(id:string):Promise<void>{
   const source=this.source(id);if(source.closing)return source.closing.promise;const state=this.state;if(!state||state.closed){this.removeSource(id);return Promise.resolve();}this.check(state);
@@ -71,7 +76,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
  }
  private source(id:string){const source=this.sources.get(id);if(!source)fail('FENCED','Native frame has no generated subscription');return source;}
  private check(state:State){if(this.state!==state||state.closed||state.admission===undefined)fail('FENCED','Native feed admission changed');this.options.sessions.assertFrameAdmission(this.options.connection,state.generation,state.admission);}
- private stop(){const state=this.state;if(state){state.closed=true;const pending=this.pendingControls;if(pending?.state===state){this.pendingControls=undefined;clearTimeout(pending.timer);pending.reject(Object.assign(Error('Native feed admission changed'),{code:'FENCED'}));}state.ingress.close();const keys=[...this.sources.values()].map(source=>source.deferredKey);void this.initialized.then(()=>this.options.owner.runOwner(16384,async()=>{await this.groups.retire(state.stream);for(const key of keys)await this.deferred.cancel(state.scope,key);})).catch(()=>{});}this.state=undefined;for(const source of [...this.sources.values()])if(source.closing){const closing=source.closing;this.removeSource(source.id);closing.reject(Object.assign(Error('Native source connection changed'),{code:'FENCED'}));}}
+ private stop(){const state=this.state;if(state){state.closed=true;const pending=this.pendingControls;if(pending?.state===state){this.pendingControls=undefined;clearTimeout(pending.timer);pending.reject(Object.assign(Error('Native feed admission changed'),{code:'FENCED'}));}state.ingress.close();const keys=[...this.sources.values()].map(source=>source.deferredKey);void this.initialized.then(()=>this.options.owner.runOwner(16384,async()=>{await this.groups.retire(state.stream);for(const key of keys)await this.retireDeferred(state.scope,key);})).catch(()=>{});}this.state=undefined;for(const source of [...this.sources.values()])if(source.closing){const closing=source.closing;this.removeSource(source.id);closing.reject(Object.assign(Error('Native source connection changed'),{code:'FENCED'}));}}
  authenticating(intentScope:string,generation:number){this.stop();this.startBytes=0;this.options.sessions.authenticating(this.options.connection,intentScope,generation);for(const source of this.sources.values()){source.start=undefined;source.preparedStart=undefined;source.deferActivation=false;source.opening=true;source.deferredKey=crypto.randomUUID();}}
  async session(input:SQLiteTransportSession,isCurrent:()=>boolean){
   this.stop();if(!input.directive){await this.options.sessions.activate(this.options.connection,input,isCurrent);return;}
@@ -253,8 +258,9 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
     const source=this.source(message.id),closing=source.closing;if(!closing)fail('INVALID_ROW','Unexpected native source close acknowledgement');
     while(await this.run(state,16384,()=>this.groups.discardSource(state.stream,source.id))){}
     await this.run(state,16384,async()=>{
-     const stage=source.start?{subscription:source.id,snapshot:source.start.snapshotId}:await owner.database.getFirstAsync<{subscription:string;snapshot:string}>('SELECT a.subscription,a.snapshot FROM gv_windows w JOIN gv_snapshot_window_alias a USING(scope,signature,generation) WHERE w.scope=? AND w.signature=?',state.scope,source.signature);
-     if(stage)await owner.snapshots.discard(state.scope,stage.subscription,stage.snapshot);
+     // The last verified alias belongs to the retained replica, not to the
+     // network lease. Only discard an unfinished source incarnation here.
+     if(source.start)await owner.snapshots.discard(state.scope,source.id,source.start.snapshotId);
     });
     this.removeSource(source.id);closing.resolve();await this.publishWatermark(state);return;
    }
@@ -272,17 +278,19 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
    case 'replica.readyMany':for(const ready of message.ready)await this.process(state,{type:'replica.ready',...ready});return;
    case 'replica.ready':{
     const source=this.source(message.id);this.cursor(state,message.cursor);
-    if(source.opening&&!source.start&&!source.deferActivation&&(message.truncated===undefined||typeof message.truncated==='boolean')){
-     // A resumed source can repeat an existing durable certificate verbatim.
-     // No new rows, cursor or completeness become authoritative in this case.
+    if(!source.start&&!source.deferActivation&&(message.truncated===undefined||typeof message.truncated==='boolean')){
+     // A matching digest at a newer cursor changes only its certificate.
+     // Pending data/reset cohorts still take the ordered reconciliation path.
      const unchanged=await this.run(state,0,async()=>{
-      if(!await owner.database.getFirstAsync(`SELECT 1 FROM gv_native_feed_progress p WHERE p.scope=? AND p.epoch=? AND p.unclosed=0 AND p.applied=?
+      if(!await owner.database.getFirstAsync(`SELECT 1 FROM gv_native_feed_progress p WHERE p.scope=? AND p.epoch=? AND p.unclosed=0 AND p.applied<=?
        AND NOT EXISTS(SELECT 1 FROM gv_native_feed_resets r WHERE r.scope=p.scope)
        AND EXISTS(SELECT 1 FROM _gonvex_replica_meta m WHERE m.scope=p.scope AND m.key='currentEpoch' AND m.value=?)`,state.scope,state.epoch,message.cursor.revision,message.cursor.epoch)||await this.groups.pending(state.stream))return false;
       const header=(await this.windows.header(state.scope,source.signature))?.header,columns=source.columns??Object.keys(owner.engine.schema[source.entity]!.fields);
-      return header?.kind==='replica'&&header.source==='server'&&header.entity===source.entity&&header.key===source.key&&header.artifactHash===this.options.artifactHash
-       &&header.cursor?.epoch===message.cursor.epoch&&header.cursor.revision===message.cursor.revision&&header.aggregateDigest===message.digest
+      const matches=header?.kind==='replica'&&header.source==='server'&&header.entity===source.entity&&header.key===source.key&&header.artifactHash===this.options.artifactHash
+       &&header.cursor?.epoch===message.cursor.epoch&&header.cursor.revision<=message.cursor.revision&&header.aggregateDigest===message.digest
        &&header.completeness===(message.truncated?'partial':'complete')&&header.columns?.length===columns.length&&header.columns.every((column,index)=>column===columns[index]);
+      if(matches)await this.windows.confirmReady(state.scope,source.signature,message.cursor,message.digest,message.truncated??false);
+      return matches;
      });
      if(unchanged){source.opening=false;this.committed(source.id,()=>this.options.sourceReady?.(source.id));await this.publishWatermark(state);return;}
     }

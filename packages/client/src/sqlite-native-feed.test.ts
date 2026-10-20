@@ -459,3 +459,12 @@ it('rolls back a deferred typed binding on a rejected first page without grantin
  expect(await f.db.getFirstAsync('SELECT 1 FROM gv_snapshot_typed')).toBeNull();
  expect(await f.canonical.loadEntityRows('visible','tasks',['a','b'])).toEqual([]);expect(await f.engine.integrity()).toBe('ok');
 });
+
+it('advances an unchanged Ready cursor without snapshot, feed or membership writes',async()=>{
+ const f=await fixture();await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();
+ const writes:string[]=[];const run=f.db.runAsync.bind(f.db);vi.spyOn(f.db,'runAsync').mockImplementation(async(sql,...args)=>{writes.push(sql);return run(sql,...args);});
+ f.feed.frame({type:'replica.ready',id:'source',cursor:cursor(12),digest:await digest()},1);f.feed.frame({type:'replica.watermark',revision:12},1);await f.feed.assertReadable();
+ expect(f.failures).toEqual([]);expect(writes.filter(sql=>/gv_snapshot|gv_feed_group|gv_window_rows/.test(sql))).toEqual([]);
+ expect((await new SQLiteWindowStore(f.db,()=>f.engine.verifyOwner()).header('visible','tasks-all'))?.header.cursor).toEqual(cursor(12));
+ expect((await f.canonical.loadEntityRows('visible','tasks',['a','b'])).map(row=>row.row)).toEqual(rows);
+});

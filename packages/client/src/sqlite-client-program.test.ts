@@ -164,7 +164,7 @@ it('queries a bounded authorized membership with typed filters and optimistic SQ
 });
 
 it('shares a replica source across independent view leases and closes it only after the last view releases',async()=>{
- const f=await fixture(false),{socket,open}=await f.authenticate();const watch={method:'watchReplica',path:'__local.tasks',args:{}};const one:any=await f.call({...watch,lease:'grid'}),two:any=await f.call({...watch,lease:'board'});expect(two).toEqual(one);const before=f.program.budgets().find(value=>value.name==='native-source-interests')!.bytes;await f.call({...watch,lease:'board'});expect(f.program.budgets().find(value=>value.name==='native-source-interests')!.bytes).toBe(before);expect(socket.sent.filter(message=>message.type==='replica.open')).toHaveLength(1);await f.call({method:'unwatchReplica',signature:one.signature});await f.call({method:'unwatchReplica',signature:one.signature,lease:'grid'});expect(socket.sent.some(message=>message.type==='replica.close')).toBe(false);expect((await f.call({method:'replicaPage',signature:two.signature}) as any).rows[0].value).toEqual({id:'a',n:1});const closing=f.call({method:'unwatchReplica',signature:two.signature,lease:'board'});await vi.waitFor(()=>expect(socket.sent.some(message=>message.type==='replica.close')).toBe(true));socket.receive({type:'replica.closed',id:open.id});await closing;expect(f.program.budgets().find(value=>value.name==='native-source-interests')!.bytes).toBe(0);expect(await f.engine.integrity()).toBe('ok');
+ const f=await fixture(false),{socket,open}=await f.authenticate();const watch={method:'watchReplica',path:'__local.tasks',args:{}};const one:any=await f.call({...watch,lease:'grid'}),two:any=await f.call({...watch,lease:'board'});expect(two).toEqual(one);const before=f.program.budgets().find(value=>value.name==='native-source-interests')!.bytes;await f.call({...watch,lease:'board'});expect(f.program.budgets().find(value=>value.name==='native-source-interests')!.bytes).toBe(before);expect(socket.sent.filter(message=>message.type==='replica.open')).toHaveLength(1);await f.call({method:'unwatchReplica',signature:one.signature});await f.call({method:'unwatchReplica',signature:one.signature,lease:'grid'});expect(socket.sent.some(message=>message.type==='replica.close')).toBe(false);expect((await f.call({method:'replicaPage',signature:two.signature}) as any).rows[0].value).toEqual({id:'a',n:1});const closing=f.call({method:'unwatchReplica',signature:two.signature,lease:'board'});await vi.waitFor(()=>expect(socket.sent.some(message=>message.type==='replica.close')).toBe(true));socket.receive({type:'replica.closed',id:open.id});await closing;await vi.waitFor(()=>expect(f.program.budgets().find(value=>value.name==='native-source-interests')!.bytes).toBe(0));expect(await f.engine.integrity()).toBe('ok');
 });
 
 it('keeps Control-only connections separated from tenant sources even when a tenant route is present',async()=>{
@@ -371,5 +371,25 @@ it('accepts a Ready-only verified resume at a newer cursor without another row b
  const f=await fixture();await f.authenticate();const watched:any=await f.call({method:'watchReplica',path:'__local.tasks',args:{}});await f.call({method:'replicaPage',signature:watched.signature});
  const socket=Socket.instances.at(-1)!;socket.receive({type:'replica.ready',id:socket.sent.find(frame=>frame.type==='replica.open').id,cursor:{epoch:'e',revision:2},digest:await rowDigest({id:'a',n:1})});socket.receive({type:'replica.watermark',revision:2});
  await vi.waitFor(async()=>expect(await f.call({method:'replicaPage',signature:watched.signature})).toMatchObject({rows:[{id:'a',value:{id:'a',n:1}}],window:{header:{cursor:{epoch:'e',revision:2}}}}));
+ expect(await f.engine.integrity()).toBe('ok');
+});
+
+it('reuses a just-released source during a frame remount without close or another resume',async()=>{
+ const f=await fixture(false);const {socket}=await f.authenticate();const watched:any=await f.call({method:'watchReplica',path:'__local.tasks',args:{}});await f.call({method:'replicaPage',signature:watched.signature});
+ const before=await f.owner.runOwner(0,()=>f.db.getFirstAsync('SELECT total_changes() n'));
+ await f.call({method:'unwatchReplica',signature:watched.signature});
+ const again=await f.call({method:'watchReplica',path:'__local.tasks',args:{}});expect(again).toEqual(watched);
+ expect(socket.sent.filter(frame=>frame.type==='replica.open')).toHaveLength(1);expect(socket.sent.some(frame=>frame.type==='replica.close')).toBe(false);
+ expect(await f.owner.runOwner(0,()=>f.db.getFirstAsync('SELECT total_changes() n'))).toEqual(before);
+});
+
+it('retires a quiet network lease without discarding its published snapshot or writing empty cancellation tombstones',async()=>{
+ const f=await fixture(false);const {socket,open}=await f.authenticate();const watched:any=await f.call({method:'watchReplica',path:'__local.tasks',args:{}});await f.call({method:'replicaPage',signature:watched.signature});
+ const before=await f.owner.runOwner(0,()=>f.db.getAllAsync('SELECT subscription,snapshot,discarded,complete,digest FROM gv_snapshot_stages'));
+ await f.call({method:'unwatchReplica',signature:watched.signature});
+ await vi.waitFor(()=>expect(socket.sent.some(frame=>frame.type==='replica.close')).toBe(true));socket.receive({type:'replica.closed',id:open.id});
+ await vi.waitFor(()=>expect(f.program.budgets().find(row=>row.name==='native-source-descriptors')?.entries).toBe(0));
+ expect(await f.owner.runOwner(0,()=>f.db.getAllAsync('SELECT subscription,snapshot,discarded,complete,digest FROM gv_snapshot_stages'))).toEqual(before);
+ expect(await f.owner.runOwner(0,()=>f.db.getFirstAsync('SELECT count(*) n FROM gv_deferred_replica_canceled'))).toEqual({n:0});
  expect(await f.engine.integrity()).toBe('ok');
 });

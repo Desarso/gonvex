@@ -29,7 +29,7 @@ import {SQLiteWindowStore} from './sqlite-window-store.js';
 import {fail,sqlitePayloadBytes} from './sqlite-admission.js';
 type Auth=Pick<GonvexClientAuth,'project'|'tenant'|'token'|'identity'>;
 type NativeFunctionReference=FunctionReference&{localDependencyTables?:string};
-type Source={forceSnapshot?:boolean;id:string;signature:string;ref:FunctionReference;args:JsonValue;tabs:Set<string>;leases:Map<string,Set<string>>;eager:boolean;bytes:number;closing?:Promise<void>};
+type Source={forceSnapshot?:boolean;id:string;signature:string;ref:FunctionReference;args:JsonValue;tabs:Set<string>;leases:Map<string,Set<string>>;eager:boolean;bytes:number;closing?:Promise<void>;retireTimer?:ReturnType<typeof setTimeout>};
 type ControlSource={signature:string;ref:FunctionReference;args:JsonValue;tabs:Set<string>;value?:JsonValue;error?:string;version:number;bytes:number;resultBytes:number;close():void};
 type LiveSource={leases:Map<string,Set<string>>;signature:string;ref:FunctionReference;args:JsonValue;tabs:Set<string>;bytes:number;error?:string;close():void};
 type Connection={supportCommands:Array<SupportCommand&{sequence:number}>;supportSequence:number;supportCursors:Map<string,number>;liveStream:string;lives:Map<string,LiveSource>;liveBytes:number;lastIdentity?:string;rejections:Array<ReducerRejectionEvent&{sequence:number}>;rejectionSequence:number;rejectionCursors:Map<string,number>;controlOnly:boolean;public:boolean;authVersion:number;authError?:{id:string;message:string;definitive:boolean;code?:string};developer?:{id:string;token:string;acked:Set<string>};route:Omit<Auth,'token'>;id:string;url:string;identityKey:string;client:SQLiteNativeTransport;feed:SQLiteNativeFeed;delivery:SQLiteReducerDelivery;tabs:Set<string>;sources:Map<string,Source>;sourceBytes:number;controls:Map<string,ControlSource>;controlBytes:number;restoring?:Promise<void>;migrationBlocked?:unknown;restoreScope?:string;restoreGeneration?:number;migrationTimer?:ReturnType<typeof setTimeout>;migrationSession?:LocalReplicaSession;denied?:boolean;admissionKey?:{generation:string;value:Promise<string>};recovered?:boolean;recovering?:Promise<void>;lastScope?:string;reconnectTimer?:ReturnType<typeof setTimeout>;reconnectAttempts?:number;timer?:ReturnType<typeof setTimeout>;failure?:{code:string;message:string}};
@@ -186,6 +186,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
   if(tab)text(lease,128);if(ref.delivery!=='replica'||!ref.replica)fail('INVALID_ROW','Expected a generated Replica Collection');const encoded=stable(args),signature=await digest(this.binding.artifactHash+'\0'+connection.id+'\0'+ref.path+'\0'+encoded);let source=connection.sources.get(signature);
   if(source?.closing){await source.closing.catch(()=>{});return this.addSource(connection,ref,args,tab,eager,lease);}
   if(tab&&this.tabs.get(tab)!==connection.id)fail('FENCED','Native source caller detached');
+  if(source?.retireTimer){clearTimeout(source.retireTimer);source.retireTimer=undefined;}
   if(!source){
    const bytes=sqlitePayloadBytes({path:ref.path,args},16384)+1024;if(connection.sources.size>=256||connection.sourceBytes+bytes+(tab?192:0)>262144)fail('BUDGET','Native subscription allowance exceeded');
    source={id:'source:'+signature,signature,ref,args:JSON.parse(encoded),tabs:new Set(),leases:new Map(),eager,bytes};
@@ -197,7 +198,17 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
   if(tab){text(lease,128);let leases=source.leases.get(tab);if(!leases?.has(lease)){if((leases?.size??0)>=64||connection.sourceBytes+192>262144)fail('BUDGET','Native source interests exceed budget');if(!leases)source.leases.set(tab,leases=new Set());leases.add(lease);source.tabs.add(tab);connection.sourceBytes+=192;}}source.eager||=eager;return source;
  }
  private releaseSourceInterest(connection:Connection,source:Source,tab:string,lease?:string){const leases=source.leases.get(tab);if(!leases)return;if(lease===undefined){connection.sourceBytes-=leases.size*192;leases.clear();}else if(leases.delete(lease))connection.sourceBytes-=192;if(!leases.size){source.leases.delete(tab);source.tabs.delete(tab);}}
+ private deferSourceClose(connection:Connection,source:Source){
+  if(source.retireTimer||source.closing)return;
+  // Keep a released bounded descriptor for one frame so a provider remount
+  // can reuse its existing server subscription instead of close/verify churn.
+  source.retireTimer=setTimeout(()=>{
+   source.retireTimer=undefined;
+   if(this.connections.get(connection.id)===connection&&!source.tabs.size&&!source.eager&&!source.closing)void this.closeSource(connection,source).catch(error=>this.feedFailed(connection,error));
+  },16);
+ }
  private closeSource(connection:Connection,source:Source):Promise<void>{
+  clearTimeout(source.retireTimer);source.retireTimer=undefined;
   if(source.closing)return source.closing;
   source.closing=connection.feed.closeSource(source.id).catch(error=>{if((error as any)?.code!=='FENCED')throw error;}).finally(()=>{if(connection.sources.get(source.signature)===source){connection.sources.delete(source.signature);connection.sourceBytes-=source.bytes;}});return source.closing;
  }
@@ -348,7 +359,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
    case 'livePendingPage':{const source=connection.lives.get(input.signature);if(!source?.tabs.has(caller.tabID))fail('FENCED','Tab does not own that live window');const admitted=this.checkCaller(caller,connection),stream=connection.liveStream;return this.owner.runOwner(262144,async()=>{let result;await this.owner.database.withTransactionAsync(async()=>{this.checkCaller(caller,connection,admitted.generation);if(connection.liveStream!==stream||connection.lives.get(source.signature)!==source||!source.tabs.has(caller.tabID))fail('FENCED','Pending live query detached');const saved=await this.owner.canonical.loadSession(admitted.intentScope);if(!saved)fail('FENCED','Pending live session changed');const databaseEpoch=connection.feed.databaseEpoch();if(!databaseEpoch)return;result=await this.liveWindows.page(stream,admitted.scope,source.signature,databaseEpoch,{offset:input.offset,limit:input.limit,generation:input.generation});this.checkCaller(caller,connection,admitted.generation);});return result;});}
    case 'livePage':{const source=connection.lives.get(input.signature);if(!source?.tabs.has(caller.tabID))fail('FENCED','Tab does not own that live window');if(source.error)throw Error(source.error);const admitted=this.checkCaller(caller,connection);return this.readCommitted(connection,admitted,caller,async()=>{if(connection.lives.get(source.signature)!==source||!source.tabs.has(caller.tabID))fail('FENCED','Live query detached');return await this.owner.reader.window({scope:admitted.scope,signature:source.signature,offset:input.offset,limit:input.limit,generation:input.generation,expected:input.expected})??null;});}
    case 'watchReplica':{if(connection.controlOnly||connection.public)fail('INVALID_ROW','This connection does not own tenant replica collections');const source=await this.addSource(connection,this.ref(input.path,'query'),input.args??{},caller.tabID,false,input.lease??'default');return {id:source.id,signature:source.signature};}
-   case 'unwatchReplica':{text(input.signature,128);const source=connection.sources.get(input.signature);if(source){this.releaseSourceInterest(connection,source,caller.tabID,input.lease??'default');if(!source.tabs.size&&!source.eager){await this.closeSource(connection,source);}}return null;}
+   case 'unwatchReplica':{text(input.signature,128);const source=connection.sources.get(input.signature);if(source){this.releaseSourceInterest(connection,source,caller.tabID,input.lease??'default');if(!source.tabs.size&&!source.eager)this.deferSourceClose(connection,source);}return null;}
    case 'entities':{
     const admission=this.checkCaller(caller,connection);return this.readCommitted(connection,admission,caller,async()=>{this.checkCachedCaller(caller,connection,admission.readGeneration);const result=await this.owner.reader.entities({scope:admission.scope,entity:input.entity,ids:input.ids,expected:input.expected});this.checkCachedCaller(caller,connection,admission.readGeneration);return result;});
    }
@@ -405,7 +416,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
   for(const source of [...connection.lives.values()])this.unwatchLive(connection,source,tabID);
   for(const source of [...connection.controls.values()])this.unwatchControl(connection,source,tabID);
   for(const source of connection.sources.values())if(source.tabs.has(tabID)){this.releaseSourceInterest(connection,source,tabID);if(!source.tabs.size&&!source.eager)void this.closeSource(connection,source).catch(()=>{});}
-  if(!connection.tabs.size){if(connection.lastScope)void this.maintenance.retire(connection.lastScope,[...connection.sources.values()].map(source=>source.id)).catch(()=>{});if(connection.timer)clearTimeout(connection.timer);clearTimeout(connection.reconnectTimer);clearTimeout(connection.migrationTimer);this.tokens.invalidate(id);connection.delivery.close();connection.client.dispose();connection.feed.close();this.sessions.close(id);this.connections.delete(id);}
+  if(!connection.tabs.size){for(const source of connection.sources.values())clearTimeout(source.retireTimer);if(connection.lastScope)void this.maintenance.retire(connection.lastScope,[...connection.sources.values()].map(source=>source.id)).catch(()=>{});if(connection.timer)clearTimeout(connection.timer);clearTimeout(connection.reconnectTimer);clearTimeout(connection.migrationTimer);this.tokens.invalidate(id);connection.delivery.close();connection.client.dispose();connection.feed.close();this.sessions.close(id);this.connections.delete(id);}
  }
  async diagnostics(){return {feeds:[...this.connections.values()].map(connection=>({...connection.feed.stats(),...connection.client.diagnostics(),restoring:!!connection.restoring,recovering:!!connection.recovering,recovered:!!connection.recovered})),progress:await this.owner.database.getAllAsync('SELECT observed,applied,unclosed FROM gv_native_feed_progress LIMIT 8')};}
  budgets(){return this.ledger.snapshot();}
