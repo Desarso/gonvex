@@ -366,10 +366,11 @@ it('does not rewrite disk certificates for an already published quiet watermark'
 });
 
 
-it('prepares a clean snapshot incarnation in one fenced owner transaction before granting any credit',async()=>{
- const f=await fixture();f.host.takeProfile();
+it('accepts a clean snapshot header without a disk write and prepares it with the first credited page',async()=>{
+ const f=await fixture();f.host.takeProfile();const before=await f.db.getFirstAsync('SELECT total_changes() n');
  await f.start();await vi.waitFor(()=>expect(f.feed.pendingSource('source')).toMatchObject({snapshot:'base'}));
- const profile=f.host.takeProfile();expect(profile.commits).toBe(1);
+ expect(await f.db.getFirstAsync('SELECT total_changes() n')).toEqual(before);
+ expect(await f.db.getFirstAsync('SELECT 1 FROM gv_snapshot_typed')).toBeNull();
  expect(f.sends).toEqual([]);expect(f.watermarks).toEqual([]);
  expect(await f.canonical.loadEntityRows('visible','tasks',['a','b'])).toEqual([]);
  await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();
@@ -448,4 +449,13 @@ it('cancels a delayed control group on disconnect without committing or returnin
  const f=await fixture();f.host.takeProfile();f.feed.frame({type:'replica.watermark',revision:10},1);f.feed.disconnected();
  await vi.waitFor(()=>expect(f.feed.stats().queued).toBe(0));
  expect(f.watermarks).toEqual([]);expect(f.failures).toEqual([]);expect(f.host.takeProfile().commits).toBe(0);
+});
+
+
+it('rolls back a deferred typed binding on a rejected first page without granting credit',async()=>{
+ const f=await fixture();await f.start();await vi.waitFor(()=>expect(f.feed.pendingSource('source')).toBeDefined());
+ f.feed.binary(new TextEncoder().encode(JSON.stringify({type:'replica.snapshotEncodedPage',id:'source',snapshotId:'base',scope:'tenant',visibilityScope:'visible',cursor:cursor(10),key:'id',sequence:1,last:true,canonicalRows:rows.map(stable),digest:await digest(),path:'tasks/all'})).buffer,1);
+ await vi.waitFor(()=>expect(f.failures).toHaveLength(1));expect(f.sends).toEqual([]);expect(f.watermarks).toEqual([]);
+ expect(await f.db.getFirstAsync('SELECT 1 FROM gv_snapshot_typed')).toBeNull();
+ expect(await f.canonical.loadEntityRows('visible','tasks',['a','b'])).toEqual([]);expect(await f.engine.integrity()).toBe('ok');
 });
