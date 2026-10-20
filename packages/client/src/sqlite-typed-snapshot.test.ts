@@ -54,7 +54,7 @@ it('collects incomplete private partitions in bounded pages and keeps an activat
 it('collects retired physical rows without disturbing current counts, search or canonical writes',async()=>{
  const {collectSQLiteRetiredEntityRows}=await import('./sqlite-typed-snapshot.js'),f=await fixture();
  await f.write(20,Array.from({length:150},(_,i)=>({entity:'tasks',id:'old-'+i,operation:'insert',newValue:{id:'old-'+i,name:'retained '+i}})));
- const first=await f.stage([{id:'fresh',name:'café 東京'}]);await f.activator.activate(first.input);
+ const first=await f.stage([...Array.from({length:150},(_,i)=>({id:'old-'+i,name:'retained '+i})),{id:'fresh',name:'café 東京'}]);await f.activator.activate(first.input);
  await f.db.withTransactionAsync(async()=>{expect(await collectSQLiteRetiredEntityRows(f.db,schema)).toBe(false);});
  await f.db.withTransactionAsync(async()=>{expect(await collectSQLiteRetiredEntityRows(f.db,schema)).toBe(true);});
  expect(await f.db.getFirstAsync('SELECT count(*) n FROM '+q(sqliteTableName('tasks')))).toEqual({n:151});expect((await f.canonical.loadEntityRows('s','tasks',['old-149','fresh'])).length).toBe(2);
@@ -156,5 +156,30 @@ it('defers private snapshot FTS population until atomic publication and preserve
  await f.activator.activate(input);
  expect(ftsInserts()).toHaveLength(1);expect(await f.db.getFirstAsync('SELECT 1 FROM gv_fts_deferred WHERE entity=?','tasks')).toBeNull();
  expect((await f.engine.page('s',{table:'tasks',search:'café',order:[{field:'name',direction:'asc'}],textOrder:'binary',limit:10})).rows.map(row=>row.id)).toEqual(['deferred']);
+ expect(await f.engine.integrity()).toBe('ok');
+});
+
+it('merges an overlapping source without copying its whole retained canonical corpus',async()=>{
+ const f=await fixture(),old=Array.from({length:300},(_,i)=>({id:String(i).padStart(3,'0'),name:'Retained '+i}));
+ const base=await f.stage(old,'base');await f.activator.activate({...base.input,header:{...base.input.header,signature:'base-window'}});
+ const alias=()=>f.db.getFirstAsync<{physical:string}>("SELECT json_quote(physical) physical FROM gv_entity_alias WHERE scope='s' AND entity='tasks'");
+ const before=await alias();
+ const next=await f.stage([old[0]!,{id:'fresh',name:'Fresh searchable 東京'}],'overlap');
+ // In-place publication must still roll back a crash, including row values,
+ // membership and receipts, while preserving the durable private stage.
+ await expect(f.db.withTransactionAsync(async()=>{await f.activator.activate(next.input);throw Error('power loss');})).rejects.toThrow('power loss');
+ expect(await alias()).toEqual(before);expect(await f.canonical.loadEntityRows('s','tasks',['fresh'])).toEqual([]);
+ expect((await f.stager.read('s','collection','overlap')).rows).toHaveLength(2);
+ const receipt=await f.activator.activate(next.input);
+ expect(await alias()).toEqual(before);
+ expect(await f.db.getFirstAsync('SELECT count(*) n FROM '+q(sqliteTableName('tasks')))).toEqual({n:303});
+ const {collectSQLiteRetiredEntityRows}=await import('./sqlite-typed-snapshot.js');
+ let done=false;for(let n=0;n<4&&!done;n++)await f.db.withTransactionAsync(async()=>{done=await collectSQLiteRetiredEntityRows(f.db,schema);});
+ expect(done).toBe(true);
+ expect(await f.db.getFirstAsync('SELECT count(*) n FROM '+q(sqliteTableName('tasks')))).toEqual({n:301});
+ expect((await f.canonical.loadEntityRows('s','tasks',['299','fresh'])).map(row=>row.id).sort()).toEqual(['299','fresh']);
+ expect((await f.engine.page('s',{table:'tasks',search:'東京',order:[{field:'name',direction:'asc'}],textOrder:'binary',limit:10})).rows).toEqual([{id:'fresh',name:'Fresh searchable 東京'}]);
+ expect(await f.activator.activate(next.input)).toEqual(receipt);
+ await expect(f.stager.read('s','collection','overlap')).rejects.toMatchObject({code:'PAGE_CHANGED'});
  expect(await f.engine.integrity()).toBe('ok');
 });

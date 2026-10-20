@@ -75,6 +75,7 @@ export async function activateSQLiteTypedSnapshot(db:SQLiteReplicaDatabase,schem
  OR EXISTS(SELECT 1 FROM gv_canonical_tombstones t WHERE t.scope=? AND t.entity=? AND t.id=s.id)
  OR EXISTS(SELECT 1 FROM _gonvex_replica_meta m WHERE m.scope=? AND m.key='row:'||json_array(?,s.id)))`,...args,previous,input.scope,input.entity,input.scope,input.entity);
  const overlap=await db.getFirstAsync<{n:number}>('SELECT count(*) n FROM temp.gv_snapshot_overlap');
+ const retainCanonical=!!await db.getFirstAsync(`SELECT 1 FROM ${name} WHERE scope=? LIMIT 1`,previous);
  await db.runAsync(`INSERT INTO _gonvex_replica_changes SELECT ?,'row',?,s.id,? FROM gv_snapshot_rows s WHERE ${selection}
  AND NOT EXISTS(SELECT 1 FROM temp.gv_snapshot_overlap o WHERE o.id=s.id) ON CONFLICT(scope,kind,entity,id) DO UPDATE SET sequence=excluded.sequence`,input.scope,input.entity,input.sequence,...args);
  const body=`(SELECT ${sqliteRowBodySQL(table,'typed')} FROM ${name} typed WHERE typed.scope=${literal(physical)} AND typed.id=gv_snapshot_rows.id)`;
@@ -83,6 +84,35 @@ export async function activateSQLiteTypedSnapshot(db:SQLiteReplicaDatabase,schem
   // authority result, plus rows retained by other windows, entirely in SQL.
   const columns=['scope','id','body','version',...Object.keys(table.fields).map(sqliteFieldName),...(table.search??[]).map((_,i)=>'s'+i)];
   const rest=columns.slice(1).map(column=>'old.'+q(column)).join(',');
+  // Preserve an existing canonical corpus rather than copying it into every
+  // overlapping collection's private snapshot partition. The authority merge
+  // has already resolved overlaps; only fresh incoming rows need copying.
+  if(retainCanonical){
+   await db.runAsync(`INSERT INTO ${name}(${columns.map(q).join(',')}) SELECT ?,${rest} FROM ${name} old WHERE old.scope=?
+    AND NOT EXISTS(SELECT 1 FROM temp.gv_snapshot_overlap o WHERE o.id=old.id)`,previous,physical);
+   if(input.rows&&await db.getFirstAsync('SELECT 1 FROM gv_snapshot_index_deferred WHERE entity=?',input.entity)){
+    const indexes=compileSQLiteTypedSchema({[input.entity]:table}).indexes;if(indexes)await db.execAsync(indexes);
+    await db.runAsync('DELETE FROM gv_snapshot_index_deferred WHERE entity=?',input.entity);
+   }
+  if(table.search?.length&&await db.getFirstAsync('SELECT 1 FROM gv_fts_deferred WHERE scope=? AND entity=?',physical,input.entity)){
+   const columns=table.search.map((_,i)=>q('s'+i)).join(','),fts=q(sqliteSearchName(input.entity));
+   let after=0;for(;;){const last=(await db.getFirstAsync<{last:number|null}>(`SELECT max(rid) last FROM (SELECT rid FROM ${name} NOT INDEXED WHERE scope=? AND rid>? ORDER BY rid LIMIT 512)`,physical,after))?.last;if(last==null)break;
+    await db.runAsync(`INSERT INTO ${fts}(rowid,${columns}) SELECT rid,${columns} FROM ${name} NOT INDEXED WHERE scope=? AND rid>? AND rid<=? ORDER BY rid`,physical,after,last);after=last;
+   }
+   await db.runAsync('DELETE FROM gv_fts_deferred WHERE scope=? AND entity=?',physical,input.entity);
+  }
+   await db.runAsync('INSERT INTO gv_entity_alias VALUES(?,?,?) ON CONFLICT(scope,entity) DO UPDATE SET physical=excluded.physical',input.scope,input.entity,previous);
+   // Transfer the typed publication proof to the canonical partition only
+   // after the authority merge and fresh-row insertion have succeeded. Older
+   // published bindings are immutable receipts plus membership, not value owners.
+   await db.runAsync(`DELETE FROM gv_snapshot_typed AS b WHERE b.entity=? AND b.physical=?
+    AND EXISTS(SELECT 1 FROM gv_snapshot_activation_receipts r WHERE r.scope=b.scope AND r.subscription=b.subscription AND r.snapshot=b.snapshot)`,input.entity,previous);
+   await db.runAsync('UPDATE gv_snapshot_typed SET physical=? WHERE scope=? AND subscription=? AND snapshot=?',previous,input.scope,input.subscription,input.snapshot);
+   // Publication retires immutable value reads, while retained membership owns
+   // only IDs/hashes. Collect the private values in the existing bounded lane.
+   await db.runAsync('INSERT INTO gv_entity_retired VALUES(?,?,?) ON CONFLICT(entity,physical) DO NOTHING',input.scope,input.entity,physical);
+   return;
+  }
   await db.runAsync(`DELETE FROM ${name} WHERE scope=? AND id IN (SELECT id FROM temp.gv_snapshot_overlap)`,physical);
   await db.runAsync(`INSERT INTO ${name}(${columns.map(q).join(',')}) SELECT ?,${rest} FROM ${name} old WHERE old.scope=?
    AND (EXISTS(SELECT 1 FROM temp.gv_snapshot_overlap o WHERE o.id=old.id) OR NOT EXISTS(SELECT 1 FROM gv_snapshot_rows s WHERE ${selection} AND s.id=old.id))`,physical,previous,...args);
@@ -136,6 +166,7 @@ export class SQLiteTypedSnapshotWriter {
 
 export async function sqliteTypedSnapshotBody(db:SQLiteReplicaDatabase,schema:SQLiteTypedSchema|undefined,scope:string,subscription:string,snapshot:string){
  if(!await db.getFirstAsync("SELECT 1 FROM sqlite_master WHERE name='gv_snapshot_typed' AND type='table'"))return;
+ if(await db.getFirstAsync("SELECT 1 FROM sqlite_master WHERE name='gv_snapshot_activation_receipts' AND type='table'")&&await db.getFirstAsync('SELECT 1 FROM gv_snapshot_activation_receipts WHERE scope=? AND subscription=? AND snapshot=?',scope,subscription,snapshot))fail('PAGE_CHANGED','Typed snapshot has already become mutable canonical state');
  const row=await db.getFirstAsync<{entity:string;physical:string}>('SELECT entity,json_quote(physical) physical FROM gv_snapshot_typed WHERE scope=? AND subscription=? AND snapshot=?',scope,subscription,snapshot);if(!row)return;
  const table=schema&&Object.hasOwn(schema,row.entity)&&schema[row.entity];if(!table)fail('INVALID_ROW','Typed snapshot requires its generated schema');
  if((await db.getFirstAsync("SELECT 1 FROM sqlite_master WHERE name='gv_snapshot_activation_receipts' AND type='table'")&&await db.getFirstAsync('SELECT 1 FROM gv_snapshot_activation_receipts WHERE scope=? AND subscription=? AND snapshot=?',scope,subscription,snapshot))||await db.getFirstAsync('SELECT 1 FROM gv_entity_alias WHERE entity=? AND physical=?',row.entity,JSON.parse(row.physical)))fail('PAGE_CHANGED','Typed snapshot has already become mutable canonical state');
