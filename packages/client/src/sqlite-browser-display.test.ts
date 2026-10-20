@@ -15,7 +15,7 @@ function broker(blocked=false,control=false,blockReads=false){
   default:throw Error('Unexpected display test RPC '+input.method);
  }},subscribeChanges(){return ()=>{};},stats(){return {ownerEpoch:1};},close(){}};
 }
-it.each([[false,false],[true,false],[true,true]])('shows stale sealed real names before owner connection, with a control client and initial credential adoption=%s owner-connected=%s',async(initialCredentials,connectedOwner)=>{
+it.each([[false,false,false],[true,false,false],[true,true,false],[true,false,true],[true,true,true]])('shows stale sealed real names before owner connection, with a control client and initial credential adoption=%s owner-connected=%s token-provider=%s',async(initialCredentials,connectedOwner,tokenProvider)=>{
  const saved=storage();vi.stubGlobal('sessionStorage',saved);
  let first:SQLiteBrowserClient|undefined,second:SQLiteBrowserClient|undefined,stop:(()=>void)|undefined;
  try{
@@ -26,7 +26,7 @@ it.each([[false,false],[true,false],[true,true]])('shows stale sealed real names
   const control=new SQLiteBrowserClient('ws://private/ws',{broker:broker(false,true) as any,artifactHash:'artifact',role:'control'});
   try{await control.restoreSession(auth);expect(saved.data.size).toBe(1);}finally{control.close();}
   const pending=broker(!connectedOwner,false,connectedOwner);second=new SQLiteBrowserClient('ws://private/ws',{broker:pending as any,artifactHash:'artifact',auth:initialCredentials?{project:auth.project}:auth});
-  expect(await second.restoreSession(auth)).toBe(true);expect(second.localSessionState()).toBe('restored');if(connectedOwner)await second.connect();
+  expect(await second.restoreSession(tokenProvider?{...auth,token:undefined,fetchToken:async()=>auth.token}:auth)).toBe(true);expect(second.localSessionState()).toBe('restored');if(connectedOwner)await second.connect();
   const display=second.watchReplica({path:'tasks/all'} as any);stop=display.onUpdate(()=>{});
   await vi.waitFor(()=>expect(display.localReplicaState()).toMatchObject({rows:[{name:'Real task'}],freshness:connectedOwner?'verifying':'offline',isUpToDate:false}));
   if(!connectedOwner)expect(pending.reads()).toBe(0);pending.release();

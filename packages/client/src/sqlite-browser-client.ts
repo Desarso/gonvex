@@ -150,7 +150,7 @@ export class SQLiteBrowserClient {
   // Initial credential adoption must leave the sealed disk envelope available
   // for exact-context verification. A previously admitted/credentialed client
   // still revokes it on every account, tenant or credential change.
-  const preserveDisplay=!this.auth.token&&!this.bootRestored&&this.admissionKey===undefined&&(!!auth.token||!!auth.identity&&!Object.hasOwn(auth,'token'));
+  const preserveDisplay=!this.auth.token&&!this.bootRestored&&this.admissionKey===undefined&&(!!auth.token||!!auth.identity);
   const old=stable({project:this.auth.project??null,tenant:this.auth.tenant??null,identity:this.auth.identity as JsonValue??null});if(Object.hasOwn(auth,'token')&&auth.token!==this.auth.token){this.bootRestored=false;this.lastVisible.revoke({preserveStored:preserveDisplay});}this.auth={...this.auth,...structuredClone(auth)};if(Object.hasOwn(auth,'tenant'))this.reporter?.setTenant(auth.tenant);if(auth.project!==undefined)this.reporter?.setProject(auth.project);
   if(identity!==old||!this.auth.identity&&Object.hasOwn(auth,'token')){this.invalidate(true,preserveDisplay);await this.connect();return;}
   const revision=this.revision;await this.connect();this.current(revision);await this.options.broker.request('clientCall',{method:'auth',auth:{token:this.auth.token}});this.current(revision);void this.pollControls().catch(()=>{});
