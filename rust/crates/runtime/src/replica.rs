@@ -220,7 +220,14 @@ impl Runtime {
             &cursor,
             snapshot.clock.retained_revision,
         );
-        if resumable {
+        if aggregate
+            && unchanged_resume(&request, &cursor, &digest, snapshot.clock.retained_revision)
+        {
+            // The current authorized projection already matches the client's
+            // durable set. No historical SQL visibility reconstruction, empty
+            // delta, or replacement snapshot is needed. Ready below certifies
+            // the current cursor without re-delivering unchanged row bodies.
+        } else if resumable {
             if !request.digest.as_deref().unwrap_or_default().is_empty()
                 && !request.full_integrity
                 && request.hashes.is_empty()
@@ -988,6 +995,23 @@ fn cursor_resumable(
             && client.revision <= current.revision
             && client.revision >= retained
     })
+}
+
+/// A current set checksum is sufficient only within the existing cursor and
+/// integrity contract. The caller has already queried this session's current
+/// authorized projection using the requested collection definition.
+fn unchanged_resume(
+    request: &ReplicaOpenRequest,
+    current: &ReplicaCursor,
+    current_digest: &str,
+    retained: u64,
+) -> bool {
+    !request.full_integrity
+        && request.keys.is_empty()
+        && request.hashes.is_empty()
+        && !current_digest.is_empty()
+        && cursor_resumable(request.cursor.as_ref(), current, retained)
+        && request.digest.as_deref() == Some(current_digest)
 }
 
 fn verify_resume_hashes(
@@ -1976,6 +2000,57 @@ mod tests {
         assert!(
             matches!(&pages[0], ServerMessage::ReplicaSnapshotPage { result, last: false, .. } if result.len() == 1)
         );
+    }
+
+    #[test]
+    fn unchanged_resume_accepts_a_current_checksum_without_historical_visibility() {
+        let current = ReplicaCursor {
+            epoch: "e".into(),
+            revision: 10,
+        };
+        for digest in [
+            "sum128-v1:00000000000000000000000000000000",
+            "xor1:0000000000000000000000000000000000000000000000000000000000000000",
+        ] {
+            let request: ReplicaOpenRequest = serde_json::from_value(serde_json::json!({
+                "id":"r", "path":"tasks.list", "args":{},
+                "cursor":{"epoch":"e","revision":9}, "digest":digest
+            }))
+            .unwrap();
+            assert!(unchanged_resume(&request, &current, digest, 5));
+        }
+    }
+
+    #[test]
+    fn unchanged_resume_preserves_epoch_retention_and_explicit_integrity_checks() {
+        let current = ReplicaCursor {
+            epoch: "e".into(),
+            revision: 10,
+        };
+        let digest = "sum128-v1:00000000000000000000000000000000";
+        let base = serde_json::json!({"id":"r", "path":"tasks.list", "args":{},
+            "cursor":{"epoch":"e","revision":9}, "digest":digest});
+        for patch in [
+            serde_json::json!({"cursor":null}),
+            serde_json::json!({"cursor":{"epoch":"foreign","revision":9}}),
+            serde_json::json!({"cursor":{"epoch":"e","revision":4}}),
+            serde_json::json!({"cursor":{"epoch":"e","revision":11}}),
+            serde_json::json!({"digest":"sum128-v1:11111111111111111111111111111111"}),
+            serde_json::json!({"digest":null}),
+            serde_json::json!({"fullIntegrity":true}),
+            serde_json::json!({"keys":["a"]}),
+            serde_json::json!({"hashes":{"a":"hash"}}),
+        ] {
+            let mut value = base.clone();
+            for (key, field) in patch.as_object().unwrap() {
+                value
+                    .as_object_mut()
+                    .unwrap()
+                    .insert(key.clone(), field.clone());
+            }
+            let request: ReplicaOpenRequest = serde_json::from_value(value).unwrap();
+            assert!(!unchanged_resume(&request, &current, digest, 5));
+        }
     }
 
     #[test]
