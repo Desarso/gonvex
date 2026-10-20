@@ -168,3 +168,35 @@ it('keeps precommit staging separate from durable acceptance while FULL commit i
   }finally{release();ingress.close();f.sql.close();}
  }
 });
+
+it('revokes uncommitted staging display on durable commit and rollback without granting early credit',async()=>{
+ for(const failCommit of [false,true]){
+  const f=fixture(),tx=f.options.database.withTransactionAsync.bind(f.options.database);
+  let release!:()=>void,entered!:()=>void,visible=false,revoked=0;
+  const gate=new Promise<void>(resolve=>{release=resolve;}),staged=new Promise<void>(resolve=>{entered=resolve;});
+  f.options.database.withTransactionAsync=run=>tx(async()=>{await run();entered();await gate;if(failCommit)throw Error('sync failure');});
+  const ingress=new SQLiteNativeIngress({...f.options,async previewStaging(receipt){
+   expect(f.transaction).toBe(true);expect(receipt.progress.complete).toBe(false);expect(f.acks).toEqual([]);
+   visible=true;return ()=>{visible=false;revoked++;};
+  }});
+  try{
+   const done=ingress.accept(wire(0)).then(()=>true,()=>false);await staged;
+   expect(visible).toBe(true);expect(f.acks).toEqual([]);expect(f.commits).toBe(0);
+   release();expect(await done).toBe(!failCommit);expect(visible).toBe(false);expect(revoked).toBe(1);
+   expect(f.acks).toHaveLength(failCommit?0:1);
+  }finally{release();ingress.close();f.sql.close();}
+ }
+});
+
+it('revokes a staging display immediately on close even while the durable commit is blocked',async()=>{
+ const f=fixture(),tx=f.options.database.withTransactionAsync.bind(f.options.database);
+ let release!:()=>void,entered!:()=>void,visible=false,revoked=0;
+ const gate=new Promise<void>(resolve=>{release=resolve;}),staged=new Promise<void>(resolve=>{entered=resolve;});
+ f.options.database.withTransactionAsync=run=>tx(async()=>{await run();entered();await gate;});
+ const ingress=new SQLiteNativeIngress({...f.options,async previewStaging(){visible=true;return ()=>{visible=false;revoked++;throw Error('display cleanup failure');};}});
+ try{
+  const done=Promise.allSettled([ingress.accept(wire(0))]);await staged;expect(visible).toBe(true);
+  ingress.close();expect(visible).toBe(false);expect(revoked).toBe(1);expect(f.acks).toEqual([]);
+  release();expect((await done)[0].status).toBe('rejected');expect(revoked).toBe(1);expect(f.acks).toEqual([]);
+ }finally{release();ingress.close();f.sql.close();}
+});

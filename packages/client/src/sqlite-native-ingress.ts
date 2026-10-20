@@ -15,6 +15,11 @@ type Options={
  /** Publish a staging generation inside the same durable batch. This must
   * never advance a server/reducer watermark or grant complete coverage. */
  commitProgress?():Promise<void>;
+ /** SDK-owned first-page display only. Called after immutable stage validation,
+  * before activation/FULL sync. Return a revoker for the non-authoritative
+  * display; it runs on commit, rollback, or close. Never issue protocol credit
+  * or durable coverage from this hook. No application callbacks are accepted. */
+ previewStaging?(receipt:SQLiteSnapshotReceipt):Promise<(()=>void)|undefined>;
  sendAck(ack:SQLiteSnapshotReceipt['ack']):void;
  /** Runs inside the atomic batch, before the final staging credit is returned. */
  activateVerified?(receipt:SQLiteSnapshotReceipt):Promise<void>;
@@ -31,6 +36,7 @@ function closed(){return Object.assign(new Error('Snapshot connection is closed'
 export class SQLiteNativeIngress {
  private readonly ledger=new ByteLedger(maxWireBytes+maxFrames*metadataBytes);
  private readonly tasks=new SQLiteTaskYield();
+ private readonly previews=new Set<()=>void>();
  private pending:Pending[]=[];
  private active:Pending[]=[];
  private rejectGate?: (error:Error)=>void;
@@ -110,7 +116,9 @@ export class SQLiteNativeIngress {
      // commit. Only already prepared sources can join this bounded prefix.
      let end=0;while(end<this.pending.length&&this.pending[end]!.gateReady)end++;
      batch.push(...this.pending.splice(0,end));
-     const receipts=await this.options.runOwner(async()=>{
+     const previews:Array<()=>void>=[];
+     let receipts:SQLiteSnapshotReceipt[];
+     try{receipts=await this.options.runOwner(async()=>{
       if(this.disposed)throw closed();
       await this.options.snapshots.ready?.();
       const receipts:SQLiteSnapshotReceipt[]=[];
@@ -118,6 +126,14 @@ export class SQLiteNativeIngress {
        for(const entry of batch){
         if(this.disposed)throw closed();
         const receipt=await this.options.snapshots.appendEncodedReceipt(this.options.scope,entry.bytes,true);
+        if(this.options.previewStaging){
+         const revoke=await this.options.previewStaging(receipt);
+         if(revoke){
+          let active=true;
+          const clear=()=>{if(!active)return;active=false;this.previews.delete(clear);try{revoke();}catch{}};
+          if(this.disposed)clear();else{this.previews.add(clear);previews.push(clear);}
+         }
+        }
         // Replaying an earlier page can observe an already complete stage.
         // Only the final page schedules publication, which is itself idempotent.
         if(receipt.progress.complete&&receipt.ack.sequence+1===receipt.progress.nextPage)await this.options.activateVerified?.(receipt);
@@ -125,7 +141,11 @@ export class SQLiteNativeIngress {
        }
        await this.options.commitProgress?.();
       });return receipts;
-     });
+     });}finally{
+      // Display invalidation must not turn a successful durable commit into a
+      // failed intent or suppress frame credit. The owner reconciles from SQL.
+      for(const revoke of previews){try{revoke();}catch{}}
+     }
      if(this.disposed)throw closed();
      // The outer transaction has committed. A failed socket send has an unknown
      // delivery outcome; immutable frame receipts make reconnect replay safe.
@@ -139,6 +159,7 @@ export class SQLiteNativeIngress {
  }
  close(){
   if(this.disposed)return;this.disposed=true;this.tasks.close();this.releaseBatch?.();this.rejectGate?.(closed());
+  for(const revoke of [...this.previews])revoke();
   const pending=this.pending;this.pending=[];
   for(const entry of pending){entry.reject(closed());this.release(entry);}
  }
