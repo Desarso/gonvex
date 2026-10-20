@@ -392,3 +392,13 @@ it('does not count another page read as a canonical invalidation',async()=>{
  f.handler=async input=>{if(input.method!=='replicaPage')return;if(input.limit===128){started=true;await gate;}return {generation:{epoch:1,sequence:1},offset:0,nextOffset:null,rows:[{id:'row',value:{id:'row'}}],window:{generation:'one',total:1,header:{source:'server',completeness:'complete'}}};};
  const watch=f.client.watchReplica({path:'tasks/all'});cleanup.push(()=>watch.close());const full=watch.page({limit:128});await vi.waitFor(()=>expect(started).toBe(true));await watch.page({limit:1});release();await full;expect(watch.snapshot().stale).toBe(false);
 });
+
+it('keeps every client within its existing global reservation and releases registrations on close',()=>{
+ for(let n=0;n<100;n++){
+  const f=fixture(),budgets=f.client.budgets();
+  expect(budgets.reduce((sum,entry)=>sum+entry.maxBytes,0)).toBeLessThanOrEqual(12582912);
+  expect(budgets.find(entry=>entry.name==='browser-last-visible-pages')?.maxBytes).toBe(524288);
+  f.client.close();expect(f.client.budgets().every(entry=>entry.bytes===0&&entry.entries===0)).toBe(true);
+  f.client.close();expect(f.client.budgets().every(entry=>entry.bytes===0&&entry.entries===0)).toBe(true);
+ }
+});

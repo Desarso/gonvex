@@ -9,8 +9,10 @@ export class ByteBudgetError extends Error {
  * owner rather than being double-charged by every dependent view. */
 export class ByteLedger {
   private readonly caches = new Map<string, () => ByteBudgetSnapshot>();
+  private closed=false;
   constructor(readonly maxBytes = 8388608) { if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new RangeError('Positive finite global byte budget required'); }
   register(name: string, snapshot: () => ByteBudgetSnapshot): () => void {
+    if(this.closed)throw new Error('Byte ledger is closed');
     if (!/^[a-z][a-z0-9.-]{0,63}$/.test(name) || this.caches.has(name) || this.caches.size >= 64) throw new RangeError('Invalid or duplicate byte-ledger registration');
     const declared = snapshot();
     let reserved = 0; for (const read of this.caches.values()) reserved += read().maxBytes;
@@ -18,6 +20,7 @@ export class ByteLedger {
     this.caches.set(name, snapshot);
     return () => { if (this.caches.get(name) === snapshot) this.caches.delete(name); };
   }
+  close(){this.closed=true;this.caches.clear();}
   snapshot(): ByteBudgetSnapshot[] { return [...this.caches.values()].map(read => read()); }
   get bytes() { let total = 0; for (const read of this.caches.values()) total += read().bytes; return total; }
 }
