@@ -86,6 +86,14 @@ export class SQLiteLastVisiblePages{
   const rows=new Map(selected.rows.map((row:any)=>[row.id,row]));
   const value={generation:selected.generation,rows:ids.map(id=>rows.get(id))};this.restoredPages.add(value);return value;
  }
+ releaseWatch(watch:string){
+  // A detached React subscription must not consume the only boot copy.
+  // Eligibility and credential/admission fencing remain unchanged.
+  for(const key of this.eligible){
+   if(key===watch){this.served.delete(key);continue;}
+   try{if(JSON.parse(key)?.watch===watch)this.served.delete(key);}catch{/* SDK keys only. */}
+  }
+ }
  hasWatch(watch:string){
   if(this.closed||!this.signing)return false;
   for(const key of this.eligible){

@@ -82,3 +82,21 @@ it('publishes a sealed first subscription started before session restore without
   await vi.waitFor(()=>expect(watch.localReplicaState()?.isUpToDate).toBe(true));stop();stop=undefined;watch.close();
  }finally{stop?.();first?.close();second?.close();vi.unstubAllGlobals();}
 });
+
+it('republishes a sealed reference after its first subscriber unmounts before grid commit',async()=>{
+ const saved=storage();vi.stubGlobal('sessionStorage',saved);let first:SQLiteBrowserClient|undefined,second:SQLiteBrowserClient|undefined;const cleanup:Array<()=>void>=[];
+ try{
+  first=new SQLiteBrowserClient('ws://private/ws',{broker:broker() as any,artifactHash:'artifact',auth});
+  await first.restoreSession(auth);const seed=first.watchReplica({path:'tasks/all'});const stopSeed=seed.onUpdate(()=>{});
+  await vi.waitFor(()=>expect(saved.data.size).toBe(1));stopSeed();seed.close();first.close();first=undefined;
+  const owner=broker();second=new SQLiteBrowserClient('ws://private/ws',{broker:owner as any,artifactHash:'artifact',auth});
+  second.deferCachedDisplayUntilCommit();await second.restoreSession(auth);
+  const a=second.watchReplica({path:'tasks/all'});const stopA=a.onUpdate(()=>{});
+  await vi.waitFor(()=>expect(a.localReplicaState()?.rows).toEqual([{id:'a',name:'Real task'}]));
+  stopA();a.close();await Promise.resolve();
+  const b=second.watchReplica({path:'tasks/all'});cleanup.push(()=>b.close());cleanup.push(b.onUpdate(()=>{}));
+  await vi.waitFor(()=>expect(b.localReplicaState()?.rows).toEqual([{id:'a',name:'Real task'}]),{timeout:250});
+  expect(owner.reads()).toBe(0);second.commitCachedDisplay();
+  await vi.waitFor(()=>expect(b.localReplicaState()?.isUpToDate).toBe(true));
+ }finally{cleanup.reverse().forEach(f=>f());first?.close();second?.close();vi.unstubAllGlobals();}
+});
