@@ -161,6 +161,122 @@ async fn tenant_database_is_the_final_membership_authority() {
         Err(DatabaseError::MemberNotFound(account)) if account == "account-1"
     ));
 
+    // A self developer grant can browse B without reactivating its revoked
+    // membership. The ordinary session and support impersonation stay denied.
+    let grants = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&control_url)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO gonvex_project_members(project_id,email,role) VALUES('project','member@example.test','dev')")
+        .execute(&grants).await.unwrap();
+    for (id, token, tenant) in [
+        ("devmode_nonmember", "gvx_imp_nonmember", "tenant-b"),
+        ("imp_nonmember", "gvx_imp_support", "tenant-b"),
+        ("devmode_member", "gvx_imp_member", "tenant-a"),
+    ] {
+        sqlx::query("INSERT INTO gonvex_impersonation_grants(id,project_id,token_hash,actor_account_id,target_account_id,tenant_id,reason,expires_at) VALUES($1,'project',$2,'account-1','account-1',$3,'developer mode',now()+interval '5 minutes')")
+            .bind(id).bind(token_hash(token)).bind(tenant).execute(&grants).await.unwrap();
+    }
+    assert!(control
+        .authenticate_session("gvx_session_rust_test", Some("project"), Some("tenant-b"))
+        .await
+        .is_err());
+    assert!(control
+        .authenticate_impersonation(
+            "gvx_imp_nonmember",
+            Some("project"),
+            Some("tenant-a"),
+            "support"
+        )
+        .await
+        .is_err());
+    let support = control
+        .authenticate_impersonation(
+            "gvx_imp_nonmember",
+            Some("project"),
+            Some("tenant-b"),
+            "support",
+        )
+        .await
+        .unwrap();
+    assert_eq!(support.tenant.member.id, "developer:account-1");
+    assert_eq!(support.tenant.member.role, "admin");
+    assert!(support.tenant.developer_session.is_some());
+    control
+        .validate_impersonation_session(&support.reconnect_token, "project", "tenant-b", "support")
+        .await
+        .unwrap();
+    let reloaded = control
+        .authenticate_impersonation(
+            &support.reconnect_token,
+            Some("project"),
+            Some("tenant-b"),
+            "reload",
+        )
+        .await
+        .unwrap();
+    assert_eq!(reloaded.tenant.member, support.tenant.member);
+    assert!(matches!(
+        control
+            .admit_member("project", "tenant-b", "account-1")
+            .await,
+        Err(DatabaseError::MemberNotFound(_))
+    ));
+    assert!(control
+        .authenticate_impersonation(
+            "gvx_imp_support",
+            Some("project"),
+            Some("tenant-b"),
+            "impersonate"
+        )
+        .await
+        .is_err());
+    let member_grant = control
+        .authenticate_impersonation(
+            "gvx_imp_member",
+            Some("project"),
+            Some("tenant-a"),
+            "member",
+        )
+        .await
+        .unwrap();
+    assert_eq!(member_grant.tenant.member.id, "member-a");
+    assert_eq!(member_grant.tenant.member.role, "manager");
+    let tenant_b = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&tenant_b_url)
+        .await
+        .unwrap();
+    let row = sqlx::query(
+        "SELECT count(*) AS total, count(*) FILTER (WHERE status='active') AS active FROM members",
+    )
+    .fetch_one(&tenant_b)
+    .await
+    .unwrap();
+    assert_eq!(row.get::<i64, _>("total"), 1);
+    assert_eq!(row.get::<i64, _>("active"), 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM account_tenant_index WHERE account_id='account-1'"
+        )
+        .fetch_one(&grants)
+        .await
+        .unwrap(),
+        1
+    );
+    // Removing project developer authority invalidates the grant immediately.
+    sqlx::query("DELETE FROM gonvex_project_members WHERE project_id='project'")
+        .execute(&grants)
+        .await
+        .unwrap();
+    assert!(control
+        .validate_impersonation_session(&reloaded.reconnect_token, "project", "tenant-b", "reload")
+        .await
+        .is_err());
+    grants.close().await;
+    tenant_b.close().await;
+
     control
         .ensure_reducer_idempotency(&tenant_session.route)
         .await

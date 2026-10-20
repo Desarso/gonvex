@@ -101,6 +101,10 @@ async fn tenant_directory_allows_project_developers_without_support_administrati
     sqlx::query(
         "INSERT INTO gonvex_runtime_projects(id,name,status,owner_email) VALUES('project','Project','active','owner@example.test'),('other','Other','active','other-owner@example.test')",
     ).execute(&fixture).await.unwrap();
+    sqlx::query("INSERT INTO accounts(id,email,name) VALUES('dev','dev@example.test','Dev')")
+        .execute(&fixture)
+        .await
+        .unwrap();
     sqlx::query(
         "INSERT INTO gonvex_project_members(project_id,email,name,role) VALUES('project','admin@example.test','Admin','admin'),('project','dev@example.test','Dev','dev'),('other','other-dev@example.test','Other developer','dev')",
     ).execute(&fixture).await.unwrap();
@@ -180,6 +184,16 @@ async fn tenant_directory_allows_project_developers_without_support_administrati
             assert_eq!(rows[0]["id"], "visible");
             assert_eq!(live.unwrap().1.last_result, rows);
             if role == "dev" {
+                let grant = runtime
+                    .execute_control_reducer(
+                        &connection,
+                        "control.developer.enter",
+                        &serde_json::json!({"tenantId":"visible"}),
+                        "nonmember-entry",
+                    )
+                    .await
+                    .expect("a project developer can enter without provisioning");
+                assert!(grant["id"].as_str().unwrap().starts_with("devmode_"));
                 for path in [
                     "control.support.listSessions",
                     "control.support.listErrors",

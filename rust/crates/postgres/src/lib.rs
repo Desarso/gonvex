@@ -625,9 +625,13 @@ impl ControlPlane {
         .ok_or(DatabaseError::InvalidSession)?;
         transaction.commit().await?;
         drop(_admission);
-        let (route, member, admission_revision) = self
-            .admit_member(&project_id, &tenant_id, &account_id)
-            .await?;
+        let (route, member, admission_revision) = if developer_session.is_some() {
+            self.admit_developer(&project_id, &tenant_id, &account_id)
+                .await?
+        } else {
+            self.admit_member(&project_id, &tenant_id, &account_id)
+                .await?
+        };
         Ok(ImpersonationSession {
             tenant: TenantSession {
                 identity: SessionIdentity {
@@ -668,7 +672,7 @@ impl ControlPlane {
         }
         let _admission = self.pools.admit().await?;
         let row = sqlx::query(
-            r#"SELECT project_id,target_account_id,tenant_id
+            r#"SELECT id,project_id,actor_account_id,target_account_id,tenant_id,reason,expires_at
                FROM gonvex_impersonation_grants
                WHERE reconnect_token_hash=$1 AND used_at IS NOT NULL
                  AND used_connection_id=$2 AND revoked_at IS NULL AND expires_at>now()"#,
@@ -684,8 +688,23 @@ impl ControlPlane {
         if project_id != requested_project_id || tenant_id != requested_tenant_id {
             return Err(DatabaseError::InvalidSession);
         }
-        self.admit_member(&project_id, &tenant_id, &account_id)
-            .await?;
+        let developer = developer_session_metadata(
+            &row.get::<String, _>("id"),
+            &row.get::<String, _>("reason"),
+            &row.get::<String, _>("actor_account_id"),
+            &account_id,
+            &tenant_id,
+            row.get::<chrono::DateTime<chrono::Utc>, _>("expires_at")
+                .timestamp_millis(),
+        )
+        .is_some();
+        if developer {
+            self.admit_developer(&project_id, &tenant_id, &account_id)
+                .await?;
+        } else {
+            self.admit_member(&project_id, &tenant_id, &account_id)
+                .await?;
+        }
         Ok(())
     }
 
@@ -1003,6 +1022,54 @@ impl ControlPlane {
             member_from_row(row),
             u64::try_from(revision).unwrap_or_default(),
         ))
+    }
+
+    /// Admission for a verified self developer grant only. The support principal
+    /// is ephemeral: no members or account_tenant_index row is written. Ordinary
+    /// sessions and user impersonation must continue through admit_member.
+    async fn admit_developer(
+        &self,
+        project_id: &str,
+        tenant_id: &str,
+        account_id: &str,
+    ) -> Result<(TenantRoute, Member, u64), DatabaseError> {
+        let row = sqlx::query(
+            r#"SELECT account.name,account.avatar_url FROM accounts account
+               WHERE account.id=$2 AND account.auth_realm_id=$1 AND account.disabled_at IS NULL
+                 AND (EXISTS(SELECT 1 FROM gonvex_runtime_projects project
+                            WHERE project.id=$1 AND project.owner_email<>''
+                              AND lower(project.owner_email)=lower(account.email))
+                   OR EXISTS(SELECT 1 FROM gonvex_project_members member
+                             WHERE member.project_id=$1 AND lower(member.email)=lower(account.email)
+                               AND member.role IN ('owner','admin','dev')))"#,
+        )
+        .bind(project_id)
+        .bind(account_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(DatabaseError::InvalidSession)?;
+        let route = self.resolve_public_tenant(project_id, tenant_id).await?;
+        match self
+            .admit_member(project_id, &route.tenant_id, account_id)
+            .await
+        {
+            Ok(member) => Ok(member),
+            Err(DatabaseError::MemberNotFound(_)) => Ok((
+                route,
+                Member {
+                    id: format!("developer:{account_id}"),
+                    account_id: account_id.to_owned(),
+                    status: "active".to_owned(),
+                    display_name: row.get("name"),
+                    avatar_url: row.get("avatar_url"),
+                    role: "admin".to_owned(),
+                    permissions: serde_json::json!({"developer":true}),
+                    membership_revision: 0,
+                },
+                0,
+            )),
+            Err(error) => Err(error),
+        }
     }
 
     /// The current row of one Member by ID, whatever its status.
