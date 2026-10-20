@@ -130,16 +130,19 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
   let next:Promise<void>;
   if(batchable){
    let batch=this.pendingControls;
-   if(batch&&(batch.state!==state||batch.frames.length>=16||batch.bytes+bytes>262144)){this.flushControls();batch=undefined;}
+   if(batch&&(batch.state!==state||batch.bytes+bytes>262144)){this.flushControls();batch=undefined;}
    if(!batch){
     let resolve!:()=>void,reject!:(error:unknown)=>void;const promise=new Promise<void>((yes,no)=>{resolve=yes;reject=no;});
     batch={state,frames:[],bytes:0,previous:state.gate,preceding,promise,resolve,reject};this.pendingControls=batch;state.gate=promise;
+    // Global queue count/bytes and this group's existing byte credit bound
+    // tiny controls too. A separate sixteen-frame cap fragmented a byte-small
+    // startup burst into multiple FULL commits before the coalescing turn.
     // The existing ingress queue waits four ms for adjacent network tasks.
     // Use the same bounded window for certificates and feed controls.
     batch.timer=setTimeout(()=>this.flushControls(),4);
    }
    batch.frames.push(owned);batch.bytes+=bytes;next=batch.promise;
-   if(batch.frames.length===16||batch.bytes>=262144)this.flushControls();
+   if(batch.bytes>=262144)this.flushControls();
   }else{
    this.flushControls();next=state.gate.then(()=>preceding).then(async()=>{this.check(state);await this.process(state,owned);});state.gate=next;
   }

@@ -468,3 +468,13 @@ it('advances an unchanged Ready cursor without snapshot, feed or membership writ
  expect((await new SQLiteWindowStore(f.db,()=>f.engine.verifyOwner()).header('visible','tasks-all'))?.header.cursor).toEqual(cursor(12));
  expect((await f.canonical.loadEntityRows('visible','tasks',['a','b'])).map(row=>row.row)).toEqual(rows);
 });
+
+it('keeps a small forty-control cold burst in one FULL commit within existing byte credit',async()=>{
+ const f=await fixture();await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();f.host.takeProfile();
+ for(let revision=11;revision<=50;revision++)f.feed.frame({type:'replica.watermark',revision},1);
+ await f.feed.assertReadable();
+ expect(f.failures).toEqual([]);expect(f.watermarks).toEqual([10,50]);
+ // A byte-small burst needs one commit, plus the unchanged read guard.
+ expect(f.host.takeProfile().commits).toBe(2);
+ expect((await new SQLiteWindowStore(f.db,()=>f.engine.verifyOwner()).header('visible','tasks-all'))?.header.cursor).toEqual(cursor(50));
+});
