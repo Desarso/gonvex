@@ -125,6 +125,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
  }
  private checkCachedCaller(caller:SQLiteOwnerCaller,connection:Connection,generation:string){const current=this.checkCaller(caller,connection);if(current.readGeneration!==generation)fail('FENCED','Cached read admission changed');return current;}
  private async readCommitted<T>(connection:Connection,admitted:ReturnType<SQLiteWorkerSessions['resolveTab']>,caller:SQLiteOwnerCaller,read:()=>Promise<T>){
+  connection.feed.flushControls();
   await this.recover(connection);
   let reconciliationRequired=false;
   const attempt=()=>this.owner.runOwner(131072,async()=>{

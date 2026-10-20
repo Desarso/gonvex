@@ -14,6 +14,7 @@ type Start=Extract<ServerMessage,{type:'replica.snapshotStart'}>;
 type Delta=Extract<ServerMessage,{type:'replica.delta'}>;
 export type SQLiteFeedSource={id:string;signature:string;entity:string;key:string;path:string;completeEntity?:true;columns?:readonly string[]};
 type Source=SQLiteFeedSource&{deferredKey:string;bytes:number;start?:Start;deferActivation?:boolean;opening:boolean;closing?:{promise:Promise<void>;resolve():void;reject(error:unknown):void;timer:ReturnType<typeof setTimeout>}};
+type ControlBatch={state:State;frames:ServerMessage[];bytes:number;previous:Promise<void>;preceding:Promise<void>;promise:Promise<void>;resolve():void;reject(error:unknown):void;timer?:ReturnType<typeof setTimeout>};
 type State={stream:string;generation:number;scope:string;epoch:string;cursorEpoch?:string;logicalScope:string;gate:Promise<void>;ingress:SQLiteNativeIngress;admission?:number;closed:boolean;watermark?:number};
 type Options={owner:SQLiteOwnerProgramContext;sessions:SQLiteWorkerSessions;connection:string;artifactHash:string;
  reserve?(bytes:number):()=>void;
@@ -29,6 +30,7 @@ type Options={owner:SQLiteOwnerProgramContext;sessions:SQLiteWorkerSessions;conn
 };
 const progressSchema=`CREATE TABLE IF NOT EXISTS gv_native_feed_progress(scope TEXT NOT NULL,epoch TEXT NOT NULL,observed INTEGER NOT NULL,applied INTEGER NOT NULL,unclosed INTEGER NOT NULL,PRIMARY KEY(scope,epoch)) WITHOUT ROWID; CREATE TABLE IF NOT EXISTS gv_native_feed_resets(scope TEXT PRIMARY KEY) WITHOUT ROWID;`;
 const empty={entities:{},liveQueries:{}};
+const watermarkEffect=Symbol('watermark');
 /** One authenticated socket's ordered native feed. Its bounded control lane
  * never waits for future snapshot bytes. Membership changes preceding the last
  * base page live on disk; only a verified window can retire those records. */
@@ -36,6 +38,8 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
  private readonly sources=new Map<string,Source>();
  private sourceBytes=0;private startBytes=0;private closingBytes=0;
  private state?:State;
+ private pendingControls?:ControlBatch;
+ private activeControls?:{state:State;after:Map<string|symbol,()=>void>};
  private queued=0;private queuedBytes=0;private authorityDepth=0;
  private readonly windows:SQLiteWindowStore;private readonly deferred:SQLiteDeferredReplicaFrames;
  private readonly initialized:Promise<void>;private readonly groups:SQLiteFeedGroups;
@@ -67,7 +71,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
  }
  private source(id:string){const source=this.sources.get(id);if(!source)fail('FENCED','Native frame has no generated subscription');return source;}
  private check(state:State){if(this.state!==state||state.closed||state.admission===undefined)fail('FENCED','Native feed admission changed');this.options.sessions.assertFrameAdmission(this.options.connection,state.generation,state.admission);}
- private stop(){const state=this.state;if(state){state.closed=true;state.ingress.close();const keys=[...this.sources.values()].map(source=>source.deferredKey);void this.initialized.then(()=>this.options.owner.runOwner(16384,async()=>{await this.groups.retire(state.stream);for(const key of keys)await this.deferred.cancel(state.scope,key);})).catch(()=>{});}this.state=undefined;for(const source of [...this.sources.values()])if(source.closing){const closing=source.closing;this.removeSource(source.id);closing.reject(Object.assign(Error('Native source connection changed'),{code:'FENCED'}));}}
+ private stop(){const state=this.state;if(state){state.closed=true;const pending=this.pendingControls;if(pending?.state===state){this.pendingControls=undefined;clearTimeout(pending.timer);pending.reject(Object.assign(Error('Native feed admission changed'),{code:'FENCED'}));}state.ingress.close();const keys=[...this.sources.values()].map(source=>source.deferredKey);void this.initialized.then(()=>this.options.owner.runOwner(16384,async()=>{await this.groups.retire(state.stream);for(const key of keys)await this.deferred.cancel(state.scope,key);})).catch(()=>{});}this.state=undefined;for(const source of [...this.sources.values()])if(source.closing){const closing=source.closing;this.removeSource(source.id);closing.reject(Object.assign(Error('Native source connection changed'),{code:'FENCED'}));}}
  authenticating(intentScope:string,generation:number){this.stop();this.startBytes=0;this.options.sessions.authenticating(this.options.connection,intentScope,generation);for(const source of this.sources.values()){source.start=undefined;source.deferActivation=false;source.opening=true;source.deferredKey=crypto.randomUUID();}}
  async session(input:SQLiteTransportSession,isCurrent:()=>boolean){
   this.stop();if(!input.directive){await this.options.sessions.activate(this.options.connection,input,isCurrent);return;}
@@ -94,7 +98,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
   state={stream:crypto.randomUUID(),generation:input.connectionGeneration,scope:input.directive.visibilityScope,epoch:input.directive.epoch,logicalScope:input.directive.scope,gate:Promise.resolve(),ingress,closed:false};this.state=state;
   state.gate=(async()=>{await this.initialized;const admitted=await this.options.sessions.activate(this.options.connection,input,()=>this.state===state&&!state.closed&&isCurrent());if(!admitted)fail('FENCED','Native feed has no tenant admission');const current=this.options.sessions.frameAdmission(this.options.connection,state.generation);state.admission=current.token;this.check(state);})();void state.gate.catch(()=>{});await state.gate;
  }
- binary(frame:ArrayBuffer,generation:number){const state=this.state;if(!state||state.generation!==generation||state.closed)fail('FENCED','Binary frame has no native session');void state.ingress.accept(frame,state.gate).catch(error=>this.reject(state,error));}
+ binary(frame:ArrayBuffer,generation:number){this.flushControls();const state=this.state;if(!state||state.generation!==generation||state.closed)fail('FENCED','Binary frame has no native session');void state.ingress.accept(frame,state.gate).catch(error=>this.reject(state,error));}
  frame(message:ServerMessage,generation:number){
   if(!message.type.startsWith('replica.'))return false;
   const state=this.state;if(!state||state.generation!==generation||state.closed)fail('FENCED','Control frame has no native session');
@@ -104,8 +108,43 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
   // not consume preceding binary rows or publish canonical authority. Ordered
   // controls still flush every preceding frame before they enter the gate.
   const preceding=message.type==='replica.snapshotStart'?Promise.resolve():state.ingress.flush();void preceding.catch(()=>{});this.queued++;this.queuedBytes+=bytes;
-  const next=state.gate.then(()=>preceding).then(async()=>{this.check(state);await this.process(state,owned);});state.gate=next;
+  const batchable=['replica.snapshotStart','replica.delta','replica.transactionEncoded','replica.ready','replica.readyMany','replica.watermark'].includes(owned.type);
+  let next:Promise<void>;
+  if(batchable){
+   let batch=this.pendingControls;
+   if(batch&&(batch.state!==state||batch.frames.length>=16||batch.bytes+bytes>262144)){this.flushControls();batch=undefined;}
+   if(!batch){
+    let resolve!:()=>void,reject!:(error:unknown)=>void;const promise=new Promise<void>((yes,no)=>{resolve=yes;reject=no;});
+    batch={state,frames:[],bytes:0,previous:state.gate,preceding,promise,resolve,reject};this.pendingControls=batch;state.gate=promise;
+    // The existing ingress queue waits four ms for adjacent network tasks.
+    // Use the same bounded window for certificates and feed controls.
+    batch.timer=setTimeout(()=>this.flushControls(),4);
+   }
+   batch.frames.push(owned);batch.bytes+=bytes;next=batch.promise;
+   if(batch.frames.length===16||batch.bytes>=262144)this.flushControls();
+  }else{
+   this.flushControls();next=state.gate.then(()=>preceding).then(async()=>{this.check(state);await this.process(state,owned);});state.gate=next;
+  }
   void next.then(()=>{this.queued--;this.queuedBytes-=bytes;release?.();},error=>{this.queued--;this.queuedBytes-=bytes;release?.();this.reject(state,error);});return true;
+ }
+ /** Release the short group-commit delay when a row reader or binary frame waits.
+  * Does not wait for network freshness or drain an unfinished feed cohort. */
+ flushControls(){
+  const batch=this.pendingControls;if(!batch)return;this.pendingControls=undefined;clearTimeout(batch.timer);
+  void batch.previous.then(()=>batch.preceding).then(()=>this.processControls(batch)).then(batch.resolve,batch.reject);
+ }
+ private committed(key:string|symbol,effect:()=>void){if(this.activeControls)this.activeControls.after.set(key,effect);else effect();}
+ private async processControls(batch:ControlBatch){
+  const state=batch.state;let after=new Map<string|symbol,()=>void>();
+  const release=this.options.reserve?.(this.sources.size*128+batch.frames.length*64);
+  try{await this.run(state,Math.max(262144,batch.bytes),async()=>{
+   const saved=[...this.sources.values()].map(source=>({source,start:source.start,opening:source.opening,deferActivation:source.deferActivation})),startBytes=this.startBytes,watermark=state.watermark,cursorEpoch=state.cursorEpoch;
+   const active={state,after:new Map<string|symbol,()=>void>()};this.activeControls=active;
+   try{for(const frame of batch.frames){this.check(state);await this.process(state,frame);}after=active.after;}
+   catch(error){for(const entry of saved){entry.source.start=entry.start;entry.source.opening=entry.opening;entry.source.deferActivation=entry.deferActivation;}this.startBytes=startBytes;state.watermark=watermark;state.cursorEpoch=cursorEpoch;throw error;}
+   finally{this.activeControls=undefined;}
+  });this.check(state);for(const effect of after.values())effect();}
+  finally{release?.();}
  }
  private reject(state:State,error:unknown){if(this.state!==state||state.closed)return;const sourceID=String((error as Error)?.message??error).match(/source:[0-9a-f]{64}/)?.[0],source=sourceID?this.sources.get(sourceID):undefined;
   if(source)error=Object.assign(new Error(`${String((error as Error).message)} (${source.path})`),{code:(error as {code?:string}).code});this.stop();this.options.failed(error);}
@@ -114,6 +153,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
  databaseEpoch(){return this.state?.cursorEpoch;}
  private cursor(state:State,cursor:ReplicaCursor){if(!cursor||typeof cursor.epoch!=='string'||!cursor.epoch||cursor.epoch.length>256||!Number.isSafeInteger(cursor.revision)||cursor.revision<0)fail('INVALID_ROW','Invalid native feed cursor');if(state.cursorEpoch===undefined)state.cursorEpoch=cursor.epoch;else if(cursor.epoch!==state.cursorEpoch)fail('FENCED','Native feed cursor changed epoch');}
  private async run<T>(state:State,bytes:number,run:()=>Promise<T>,scopes:readonly string[]=[state.scope]):Promise<T>{
+  if(this.activeControls?.state===state){this.check(state);const value=await run();this.check(state);return value;}
   const loaded=new Set<string>();let preparationBytes=0;
   for(;;){try{return await waitForSQLiteOwnerAdmission(()=>this.options.owner.runOwner(bytes,async()=>{let value!:T;await this.options.owner.database.withTransactionAsync(async()=>{this.check(state);value=await run();this.check(state);});return value;},scopes),()=>this.check(state));}
    catch(error){if(!(error instanceof SQLiteReducerPreparationRequiredError)||!this.options.prepare)throw error;
@@ -173,7 +213,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
    await this.options.owner.database.runAsync('DELETE FROM gv_native_feed_resets WHERE scope=?',state.scope);
    await this.options.owner.database.runAsync('INSERT INTO gv_native_feed_progress VALUES(?,?,?, ?,0) ON CONFLICT(scope,epoch) DO UPDATE SET observed=max(observed,excluded.observed),applied=max(applied,excluded.applied),unclosed=0',state.scope,state.epoch,revision,revision);if(!pending||pending.applied<revision||pending.unclosed)await markSQLiteStagingCommit(this.options.owner.database,()=>this.options.owner.engine.verifyOwner());applied=true;
    };if(stages||pending?.unclosed||groups||windows)await this.mutate(state.scope,publish);else await publish();
-  }));this.check(state);if(applied){for(const id of readySources){const source=this.sources.get(id);if(source?.deferActivation&&source.start){this.startBytes-=sqlitePayloadBytes(source.start,16384);source.start=undefined;source.deferActivation=false;}this.options.sourceReady?.(id);}this.options.advanceWatermark(revision);}
+  }));this.check(state);if(applied){for(const id of readySources){const source=this.sources.get(id);if(source?.deferActivation&&source.start){this.startBytes-=sqlitePayloadBytes(source.start,16384);source.start=undefined;source.deferActivation=false;}this.committed(id,()=>this.options.sourceReady?.(id));}this.committed(watermarkEffect,()=>this.options.advanceWatermark(revision));}
  }
  private async process(state:State,message:ServerMessage):Promise<void>{
   const {owner}=this.options;
@@ -231,7 +271,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
        &&header.cursor?.epoch===message.cursor.epoch&&header.cursor.revision===message.cursor.revision&&header.aggregateDigest===message.digest
        &&header.completeness===(message.truncated?'partial':'complete')&&header.columns?.length===columns.length&&header.columns.every((column,index)=>column===columns[index]);
      });
-     if(unchanged){source.opening=false;this.options.sourceReady?.(source.id);await this.publishWatermark(state);return;}
+     if(unchanged){source.opening=false;this.committed(source.id,()=>this.options.sourceReady?.(source.id));await this.publishWatermark(state);return;}
     }
     if(source.deferActivation&&source.start){
      await this.run(state,16384,()=>this.groups.append(state.stream,message));source.opening=false;await this.publishWatermark(state);return;
@@ -242,7 +282,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
      // belong to the same terminal group; verify after applying that delta.
      if(source.opening){source.opening=false;if(state.watermark!==undefined&&state.watermark>=message.cursor.revision)await this.publishWatermark(state);}return;
     }
-    await this.run(state,16384,async()=>{await this.replay(state,source);await this.windows.confirmReady(state.scope,source.signature,message.cursor,message.digest,message.truncated??false);});if(source.start)this.startBytes-=sqlitePayloadBytes(source.start,16384);source.start=undefined;source.opening=false;this.options.sourceReady?.(source.id);await this.publishWatermark(state);return;
+    await this.run(state,16384,async()=>{await this.replay(state,source);await this.windows.confirmReady(state.scope,source.signature,message.cursor,message.digest,message.truncated??false);});if(source.start)this.startBytes-=sqlitePayloadBytes(source.start,16384);source.start=undefined;source.opening=false;this.committed(source.id,()=>this.options.sourceReady?.(source.id));await this.publishWatermark(state);return;
    }
    case 'replica.watermark':if(!Number.isSafeInteger(message.revision)||message.revision<0)fail('INVALID_ROW','Invalid native watermark');state.watermark=Math.max(state.watermark??0,message.revision);await this.publishWatermark(state);return;
    case 'replica.needHashes':{const source=this.source(message.id);if(this.options.freshSnapshot&&!source.start){source.opening=true;await this.options.freshSnapshot(source.id);return;}throw Object.assign(Error(`Native source requires fresh snapshot reconciliation (${source.path}: hashes requested)`),{code:'PAGE_CHANGED',resetSource:source.id});}
@@ -265,6 +305,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
  /** A verified read cannot expose half a transaction/membership feed group.
   * Pending first-sync pages use their separate incomplete display contract. */
  async assertReadable(cached?:{scope:string;epoch:string}){
+  this.flushControls();
   const state=this.state;
   if(!state){
    if(!cached)fail('FENCED','Native feed unavailable');sqlitePayloadBytes(cached,4096);

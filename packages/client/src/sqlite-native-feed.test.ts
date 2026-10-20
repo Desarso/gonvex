@@ -66,7 +66,7 @@ it.each(['queued','running'] as const)('does not certify a newly registered sour
  await windows.publishSnapshot('visible',{...first.header,signature:'tasks-second'},'source','base');
  let release!:()=>void,entered!:()=>void,armed=true;const barrier=new Promise<void>(resolve=>{release=resolve;}),waiting=new Promise<void>(resolve=>{entered=resolve;});
  if(phase==='queued'){
-  const original=f.owner.runOwner.bind(f.owner);vi.spyOn(f.owner,'runOwner').mockImplementation(async(...args)=>{if(armed&&args[0]===0){armed=false;entered();await barrier;}return original(...args);});
+  const original=f.owner.runOwner.bind(f.owner);vi.spyOn(f.owner,'runOwner').mockImplementation(async(...args)=>{if(armed&&args[0]===262144){armed=false;entered();await barrier;}return original(...args);});
  }else{
   const original=f.db.getFirstAsync.bind(f.db);vi.spyOn(f.db,'getFirstAsync').mockImplementation(async(sql,...args)=>{const value=await original(sql,...args);if(armed&&sql.startsWith('SELECT unclosed,applied FROM gv_native_feed_progress')){armed=false;entered();await barrier;}return value;});
  }
@@ -413,4 +413,39 @@ it('replays a newly mounted source delta received before its credit-delayed warm
  expect((await new SQLiteWindowStore(f.db,()=>f.engine.verifyOwner()).header('visible','second-window'))?.header.cursor).toEqual(cursor(14));
  expect((await new SQLiteDeferredReplicaFrames(f.db,'artifact',()=>f.engine.verifyOwner()).summary('visible')).frames).toBe(0);
  expect(await f.engine.integrity()).toBe('ok');
+});
+
+it('FULL-commits adjacent terminal controls together and flushes immediately for a waiting reader',async()=>{
+ const f=await fixture();await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();f.host.takeProfile();
+ for(let revision=11;revision<=22;revision++)f.feed.frame({type:'replica.watermark',revision},1);
+ await f.feed.assertReadable();
+ expect(f.failures).toEqual([]);expect(f.watermarks).toEqual([10,22]);
+ // One FULL transaction for all twelve controls, one for the reader's guard.
+ expect(f.host.takeProfile().commits).toBe(2);
+ expect((await new SQLiteWindowStore(f.db,()=>f.engine.verifyOwner()).header('visible','tasks-all'))?.header.cursor).toEqual(cursor(22));
+});
+
+it('publishes no group watermark until its outer durable commit completes',async()=>{
+ const f=await fixture();await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();
+ let release!:()=>void,entered!:()=>void,armed=true;const barrier=new Promise<void>(resolve=>{release=resolve;}),waiting=new Promise<void>(resolve=>{entered=resolve;});
+ const original=f.host.database.withTransactionAsync.bind(f.host.database);
+ vi.spyOn(f.host.database,'withTransactionAsync').mockImplementation(run=>original(async()=>{await run();if(armed){armed=false;entered();await barrier;}}));
+ f.feed.frame({type:'replica.watermark',revision:11},1);f.feed.frame({type:'replica.watermark',revision:12},1);f.feed.flushControls();await waiting;
+ expect(f.watermarks).toEqual([10]);release();await f.feed.assertReadable();expect(f.watermarks).toEqual([10,12]);expect(f.failures).toEqual([]);
+});
+
+it('rolls back the whole control batch and emits no early certificate on commit failure',async()=>{
+ const f=await fixture();await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();
+ const original=f.host.database.withTransactionAsync.bind(f.host.database);let armed=true;
+ vi.spyOn(f.host.database,'withTransactionAsync').mockImplementation(run=>original(async()=>{await run();if(armed){armed=false;throw Error('simulated sync failure');}}));
+ f.feed.frame({type:'replica.watermark',revision:11},1);f.feed.frame({type:'replica.watermark',revision:12},1);f.feed.flushControls();
+ await vi.waitFor(()=>expect(f.failures).toHaveLength(1));expect(f.watermarks).toEqual([10]);
+ expect((await f.runOwner(0,()=>new SQLiteWindowStore(f.db,()=>f.engine.verifyOwner()).header('visible','tasks-all')))?.header.cursor).toEqual(cursor(10));
+ expect(await f.engine.integrity()).toBe('ok');
+});
+
+it('cancels a delayed control group on disconnect without committing or returning coverage',async()=>{
+ const f=await fixture();f.host.takeProfile();f.feed.frame({type:'replica.watermark',revision:10},1);f.feed.disconnected();
+ await vi.waitFor(()=>expect(f.feed.stats().queued).toBe(0));
+ expect(f.watermarks).toEqual([]);expect(f.failures).toEqual([]);expect(f.host.takeProfile().commits).toBe(0);
 });
