@@ -49,6 +49,18 @@ const stable=(value:JsonValue):string=>value===null||typeof value!=='object'?JSO
  * runtime or application transport. The elected worker owns all durable state.
  * Generated clients install this facade by default. SQLite persistence and
  * one-time legacy migration stay in the elected worker. */
+// Compare only JSON values already retained by the bounded page cache. No
+// encoded copy or additional row map survives publication.
+function sameJSON(left:unknown,right:unknown):boolean{
+ if(left===right)return true;
+ if(left===null||right===null||typeof left!=='object'||typeof right!=='object')return false;
+ if(Array.isArray(left))return Array.isArray(right)&&left.length===right.length&&left.every((value,index)=>sameJSON(value,right[index]));
+ if(Array.isArray(right))return false;
+ const a=left as Record<string,unknown>,b=right as Record<string,unknown>;
+ let count=0;for(const key in a)if(Object.hasOwn(a,key)){count++;if(!Object.hasOwn(b,key)||!sameJSON(a[key],b[key]))return false;}
+ for(const key in b)if(Object.hasOwn(b,key))count--;
+ return count===0;
+}
 export class SQLiteBrowserClient {
  private fetchToken?:GonvexClientAuth['fetchToken'];private readonly controlListeners=new Set<()=>void>();private readonly authListeners=new Set<(message:string,details:{definitive:boolean;code?:string})=>void>();private readonly credentialListeners=new Set<(token:string)=>void>();private readonly reporter?:GonvexErrorReporter;private lastRejection=0;private lastSupport=0;private readonly supportListeners=new Set<(command:SupportCommand)=>void>();private readonly rejectionListeners=new Set<(event:ReducerRejectionEvent)=>void>();private readonly fallbackListeners=new Set<(event:LocalExecutionFallbackEvent)=>void>();private readonly telemetryListeners=new Set<(event:GonvexTelemetryEvent)=>void>();private authSerial=0;private readonly authWaiters=new Set<()=>void>();private lastUpdateRequired?:string;private lastAuthError?:string;private lastCredential?:string;
  private readonly publicTenant?:string;private auth:Auth;private closed=false;private revision=0;private dataRevision=0;private admissionKey?:string|null;private epoch?:number;private handle?:Handle;private connecting?:Promise<Handle>;private connectingRevision=0;
@@ -186,7 +198,9 @@ export class SQLiteBrowserClient {
   const revision=this.revision,operation=this.rpc<{id?:string;signature:string}>({method:watch.kind==='live'?'watchLive':'watchReplica',path:watch.path,args:watch.args,lease:watch.lease}).then(source=>{this.current(revision);watch.source=source;watch.bound=revision;});watch.opening=operation;void operation.then(()=>{if(watch.opening===operation)watch.opening=undefined;},()=>{if(watch.opening===operation)watch.opening=undefined;});return operation;
  }
  private store(watch:Watch,value:Page,compatibleFirstPage=false,stale=false){
-  if(!watch.refs)fail('FENCED','Native watch closed during read');const bytes=sqlitePayloadBytes({key:watch.key,value},262144);watch.unpin?.();watch.unpin=undefined;
+  if(!watch.refs)fail('FENCED','Native watch closed during read');
+  if(value&&'window'in value){const prior=this.pages.get(watch.key);if(prior&&'window'in prior&&prior.window.header.entity===value.window.header.entity&&prior.rows.length===value.rows.length){for(let index=0;index<value.rows.length;index++){const slot=value.rows[index],old=prior.rows[index];if(slot.id===old.id&&sameJSON(slot.value,old.value)){slot.id=old.id;slot.value=old.value;}}}}
+  const bytes=sqlitePayloadBytes({key:watch.key,value},262144);watch.unpin?.();watch.unpin=undefined;
   try{this.pages.put(watch.key,value,bytes);}finally{watch.unpin=this.pages.pin(watch.key);}
   watch.compatibleFirstPage=compatibleFirstPage;watch.stale=stale;this.notify(watch);
  }
@@ -244,8 +258,8 @@ export class SQLiteBrowserClient {
   const publish=()=>{for(const listener of listeners)try{listener();}catch{/* Observer only. */}};
   const clear=()=>{if(state!==undefined){state=undefined;publish();}};
   const refresh=async()=>{if(this.closed||closed||!listeners.size)return;if(loading){again=true;return;}loading=true;try{do{again=false;const retained=cached(),page=retained===undefined?await base.page({limit:128}):retained;if(closed||!listeners.size)return;
-    if(page){const rows=page.rows.filter(slot=>slot.value!==null).map(slot=>slot.value as T & ReplicaRow),header=page.window.header,truncated=Boolean(header.truncated||page.nextOffset!==null),complete=header.completeness==='complete'&&!truncated;
-     state={rows,ids:page.rows.map(slot=>slot.id),total:page.window.total,source:header.source,completeness:complete?'complete':'partial',freshness:this.connectionState().isWebSocketConnected?'current':'offline',truncated,isUpToDate:complete,computedRevision:page.generation.sequence};publish();}
+    if(page){const previous=state;let rowIndex=0,identical=!!previous;for(const slot of page.rows)if(slot.value!==null){if(!previous||previous.rows[rowIndex]!==slot.value)identical=false;rowIndex++;}if(previous&&rowIndex!==previous.rows.length)identical=false;const rows=identical?previous!.rows:page.rows.filter(slot=>slot.value!==null).map(slot=>slot.value as T & ReplicaRow),ids=previous&&previous.ids.length===page.rows.length&&page.rows.every((slot,index)=>slot.id===previous.ids[index])?previous.ids:page.rows.map(slot=>slot.id),header=page.window.header,truncated=Boolean(header.truncated||page.nextOffset!==null),complete=header.completeness==='complete'&&!truncated;
+     state={rows,ids,total:page.window.total,source:header.source,completeness:complete?'complete':'partial',freshness:this.connectionState().isWebSocketConnected?'current':'offline',truncated,isUpToDate:complete,computedRevision:page.generation.sequence};publish();}
    }while(again&&!closed);}catch(error){const code=(error as {code?:string})?.code,page=base.snapshot().page;const certified=page&&'window'in page&&page.window.header.completeness==='complete'&&!page.window.header.truncated&&page.nextOffset===null;if(code!=='PAGE_CHANGED'&&(code!=='FENCED'||!certified))clear();}finally{loading=false;if(again&&!this.closed&&!closed&&listeners.size)setTimeout(()=>{void refresh();},25);}};
   return {...base,onUpdate:(listener:()=>void)=>{if(closed)fail('FENCED','Native watch is closed');listeners.add(listener);if(!stop){stop=base.subscribe(()=>{const snapshot=base.snapshot();if(!snapshot.page)clear();if(snapshot.stale)void refresh();});void refresh();}return ()=>{listeners.delete(listener);if(!listeners.size){stop?.();stop=undefined;state=undefined;}};},localReplicaResult:()=>state?.rows,localReplicaState:()=>state,close:()=>{if(closed)return;closed=true;stop?.();stop=undefined;listeners.clear();state=undefined;base.close();}};
  }
