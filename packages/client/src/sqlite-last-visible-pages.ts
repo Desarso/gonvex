@@ -17,7 +17,7 @@ export class SQLiteLastVisiblePages{
  constructor(private readonly storage:Pick<Storage,'getItem'|'setItem'|'removeItem'>|undefined,private readonly maxBytes=defaultMaxBytes){if(!Number.isSafeInteger(maxBytes)||maxBytes<1024||maxBytes>defaultMaxBytes)throw new RangeError('Invalid display byte allowance');}
  private reset(){this.entries.clear();this.eligible.clear();this.served.clear();this.bytes=0;this.admission='';this.fingerprint='';this.signing=undefined;}
  private remove(){try{this.storage?.removeItem(storageKey);}catch{/* Display cache is optional. */}}
- revoke(){this.revision++;this.scope='';this.pending=undefined;this.reset();this.remove();}
+ revoke(options:{preserveStored?:boolean}={}){this.revision++;this.scope='';this.pending=undefined;this.reset();if(!options.preserveStored)this.remove();}
  close(){this.closed=true;this.revision++;this.scope='';this.pending=undefined;this.reset();}
  async open(input:SQLiteDisplayFence):Promise<number>{
   if(this.closed)return 0;

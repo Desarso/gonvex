@@ -15,7 +15,7 @@ function broker(blocked=false){
   default:throw Error('Unexpected display test RPC '+input.method);
  }},subscribeChanges(){return ()=>{};},stats(){return {ownerEpoch:1};},close(){}};
 }
-it('shows stale sealed real names before owner connection, then replaces them from SQLite',async()=>{
+it.each([false,true])('shows stale sealed real names before owner connection, including initial credential adoption=%s',async(initialCredentials)=>{
  const saved=storage();vi.stubGlobal('sessionStorage',saved);
  let first:SQLiteBrowserClient|undefined,second:SQLiteBrowserClient|undefined,stop:(()=>void)|undefined;
  try{
@@ -23,7 +23,7 @@ it('shows stale sealed real names before owner connection, then replaces them fr
   await first.restoreSession(auth);const initial=first.watchReplica({path:'tasks/all'} as any);
   stop=initial.onUpdate(()=>{});await vi.waitFor(()=>expect(initial.localReplicaState()?.rows).toEqual([{id:'a',name:'Real task'}]));
   await vi.waitFor(()=>expect(saved.data.size).toBe(1));stop();stop=undefined;initial.close();first.close();first=undefined;
-  const pending=broker(true);second=new SQLiteBrowserClient('ws://private/ws',{broker:pending as any,artifactHash:'artifact',auth});
+  const pending=broker(true);second=new SQLiteBrowserClient('ws://private/ws',{broker:pending as any,artifactHash:'artifact',auth:initialCredentials?{project:auth.project}:auth});
   expect(await second.restoreSession(auth)).toBe(true);expect(second.localSessionState()).toBe('restored');
   const display=second.watchReplica({path:'tasks/all'} as any);stop=display.onUpdate(()=>{});
   await vi.waitFor(()=>expect(display.localReplicaState()).toMatchObject({rows:[{name:'Real task'}],freshness:'offline',isUpToDate:false}));
