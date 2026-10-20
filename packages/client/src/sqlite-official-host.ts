@@ -17,6 +17,8 @@ export type OfficialSQLiteHost = {
   close(): void;
 };
 
+function startupPhase(name:string,start:number,detail?:Record<string,unknown>){try{performance.measure('gonvex-startup:'+name,{start,end:performance.now(),...(detail?{detail}:{})});}catch{/* Diagnostic timing cannot affect storage. */}}
+
 /** Lazy worker-only factory. The origin broker must hold its ownership lease
  * before invoking this. Followers never import WASM or acquire OPFS handles. */
 export async function openOfficialSQLiteHost(): Promise<OfficialSQLiteHost> {
@@ -29,9 +31,12 @@ export async function openOfficialSQLiteHost(): Promise<OfficialSQLiteHost> {
   (globalThis as typeof globalThis & { sqlite3ApiConfig?: unknown }).sqlite3ApiConfig = {
     disable: { vfs: { opfs: true, 'opfs-vfs': true, 'opfs-wl': true } },
   };
+  const importStart=performance.now();
   const pendingBytes=probeSQLiteWasmBytes();
   const { default: initialize } = await import('@gonvex/client/sqlite-module');
+  startupPhase('engine-module-import',importStart);
   const probe=await pendingBytes;
+  const initializeStart=performance.now();
   let reject!:(error:unknown)=>void;
   const failure=new Promise<never>((_resolve,no)=>{reject=no;});
   type Result=WebAssembly.WebAssemblyInstantiatedSource;
@@ -50,6 +55,7 @@ export async function openOfficialSQLiteHost(): Promise<OfficialSQLiteHost> {
     void load.then(result=>{this.instantiateWasm={...result,imports};receive(result.instance,result.module);},reject);
     return {};
    }}),failure]);
+   startupPhase('engine-initialize',initializeStart,{rawByteCacheHit:!!probe.bytes,router:probe.router});
    return openInitializedOfficialSQLiteHost(sqlite3);
   }finally{if(seed)void seed.finally(()=>probe.close());else probe.close();}
 }
@@ -63,7 +69,8 @@ export async function openInitializedOfficialSQLiteHost(sqlite3: Sqlite3Static):
     try {
       // One database connection uses the database/WAL and temporary files.
       // Existing pools keep their handles; never shrink or clear durable files.
-      pool = await sqlite3.installOpfsSAHPoolVfs({ directory: '.gonvex-sqlite-v1', initialCapacity: 4, preserveOnInitFailure: true } as Parameters<typeof sqlite3.installOpfsSAHPoolVfs>[0]);
+      const poolStart=performance.now();
+      try{pool = await sqlite3.installOpfsSAHPoolVfs({ directory: '.gonvex-sqlite-v1', initialCapacity: 4, preserveOnInitFailure: true } as Parameters<typeof sqlite3.installOpfsSAHPoolVfs>[0]);}finally{startupPhase('sahpool-open',poolStart);}
     } catch (error) {
       const e=error as Error;
       if (!['SecurityError','NotSupportedError','NotAllowedError'].includes(e.name) && !/OPFS.*(?:unavailable|not supported)|(?:unavailable|not supported).*OPFS/i.test(e.message)) throw error;
@@ -72,7 +79,10 @@ export async function openInitializedOfficialSQLiteHost(sqlite3: Sqlite3Static):
   let db: Database | undefined;
   const persistence=pool?'opfs':'memory';
   try {
+    const databaseStart=performance.now();
     db = pool ? new pool.OpfsSAHPoolDb('/replica.sqlite') : new sqlite3.oo1.DB(':memory:');
+    startupPhase('database-open',databaseStart);
+    const configureStart=performance.now();
     db.exec('PRAGMA locking_mode=EXCLUSIVE');
     const host = officialSQLiteDatabase(sqlite3, db);
     await host.database.execAsync(`PRAGMA locking_mode=EXCLUSIVE;
@@ -84,6 +94,7 @@ PRAGMA recursive_triggers=ON; PRAGMA busy_timeout=3000;`);
       const row = await host.database.getFirstAsync<Record<string, unknown>>('PRAGMA ' + pragma);
       if (!row || Object.values(row)[0] !== expected) throw new Error('SQLite storage mode invariant failed: ' + pragma);
     }
+    startupPhase('host-configuration',configureStart);
     return { ...host, persistence, close() { host.close(); pool?.pauseVfs(); } };
   } catch (error) { db?.close(); pool?.pauseVfs(); throw error; }
 }
