@@ -13,7 +13,7 @@ export class SQLiteReducerPreparationRequiredError extends Error {
  readonly code='MODULE_REQUIRED';
  constructor(readonly path:string){super('Prepare the reducer module outside the SQLite owner queue');this.name='SQLiteReducerPreparationRequiredError';}
 }
-export type SQLiteReducerReceipt={intentId:number;commandId:string;result:JsonValue;queuedOnly?:true;originalGeneration:{epoch:number;sequence:number}};
+export type SQLiteReducerReceipt={intentId:number;commandId:string;result:JsonValue;queuedOnly?:true;predictionUnavailable?:{reason:string;table?:string};originalGeneration:{epoch:number;sequence:number}};
 export type SQLitePreparedReducer={intent:ReducerOutboxEntry;receipt:SQLiteReducerReceipt};
 export type SQLiteReducerRecoveryContext=Pick<SQLiteReducerContext,'identity'|'intentScope'>;
 export type SQLiteReducerContext={identity:LocalExecution['identity'];coverage:ReadCoverage;intentScope:string;predictionBlocked?:boolean};
@@ -64,9 +64,9 @@ export class SQLiteReducerCore {
    const generation=await this.options.engine.verifyOwner(),captured=await this.context(owned.scope);if(captured.intentScope!==intentScope)fail('FENCED','Reducer durable identity changed');
    const old=await this.stored(intentScope,owned.commandId,hash,captured,owned.scope);if(old){receipt=old;return;}
    const execution:LocalExecution={scope:owned.scope,commandId:owned.commandId,now:owned.now,artifactHash:this.options.artifactHash,identity:structuredClone(captured.identity),...(owned.intentEntropy===undefined?{}:{intentEntropy:owned.intentEntropy})};
-   let transaction:LocalTransactionResult|undefined;
+   let transaction:LocalTransactionResult|undefined;let predictionUnavailable:SQLiteReducerReceipt['predictionUnavailable']=captured.predictionBlocked?{reason:'unfinishedFeed'}:undefined;
    try{if(!captured.predictionBlocked)transaction=await this.options.predictions.withReadView(owned.scope,captured.coverage,view=>this.options.runtime.execute(owned.path,owned.args,view,execution));}
-   catch(error){if(!(error instanceof Error&&(error.name==='IncompleteReplicaError'||'code' in error&&error.code==='replica-read-budget')))throw error;}
+   catch(error){if(!(error instanceof Error&&(error.name==='IncompleteReplicaError'||'code' in error&&error.code==='replica-read-budget')))throw error;predictionUnavailable={reason:error.name==='IncompleteReplicaError'?'incompleteReplica':'readBudget',...((error as any).read?.table?{table:String((error as any).read.table).slice(0,256)}:{})};}
    if(transaction)sqlitePayloadBytes(transaction,262144);
    // Missing coverage is an explicit queued-only command, never an invented
    // result or partial prediction. Its barrier preserves causal delivery.
@@ -75,7 +75,7 @@ export class SQLiteReducerCore {
    const intent=await this.options.journal.append(draft);
    await this.options.predictions.apply(owned.scope,intent.id,patches);
    if(generation.sequence>=Number.MAX_SAFE_INTEGER)fail('FENCED','Storage sequence exhausted');
-   receipt={intentId:intent.id,commandId:owned.commandId,result:transaction?.result??null,...(!transaction?{queuedOnly:true as const}:{}),originalGeneration:{epoch:generation.epoch,sequence:generation.sequence+1}};
+   receipt={intentId:intent.id,commandId:owned.commandId,result:transaction?.result??null,...(!transaction?{queuedOnly:true as const,...(predictionUnavailable?{predictionUnavailable}:{})}:{}),originalGeneration:{epoch:generation.epoch,sequence:generation.sequence+1}};
    sqlitePayloadBytes(receipt,131072);const stored=JSON.stringify(receipt);decodedJSONBytes(stored,131072);if(new TextEncoder().encode(stored).byteLength>130000)fail('BUDGET','Reducer receipt exceeds native wire budget');
    // The local body and all row/intent/reply admission have succeeded. Make
    // the independent recovery copy durable before this SQL transaction can

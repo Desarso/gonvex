@@ -256,3 +256,23 @@ it('keeps durable predictions and original replies across repeated offline recov
   }
  }finally{f.sql.close();}
 });
+
+
+it('retains an offline-created prediction and merges its authoritative row without duplication',async()=>{
+ const f=await fixture();try{
+  const invocation={scope:'s',path:'create',commandId:'offline-create',now:100,args:{}};
+  const receipt=await f.core.invoke(invocation);
+  expect(receipt.queuedOnly).toBeUndefined();
+  const queued=(await f.journal.page('s')).entries;
+  expect(queued).toHaveLength(1);expect(queued[0].patches).not.toHaveLength(0);
+  const rowId=queued[0].patches[0].rowId;
+  expect((await f.predictions.entities('s','tasks',[rowId]))[0].row.n).toBe(10);
+  expect(await f.core.invoke(invocation)).toEqual(receipt);
+  await f.core.rebase('s',async()=>{
+   await f.canonical.applyTransaction({cursor:{epoch:'e',revision:2},changes:[{entity:'tasks',id:rowId,operation:'insert',newValue:{id:rowId,n:10}}]},{entities:{},liveQueries:{}},'s');
+   await f.journal.acknowledge('s',[receipt.intentId]);
+  });
+  expect((await f.predictions.entities('s','tasks',[rowId]))[0].row.n).toBe(10);
+  expect((await f.journal.summary('s')).count).toBe(0);
+ }finally{f.sql.close();}
+});
