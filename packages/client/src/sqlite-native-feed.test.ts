@@ -532,3 +532,24 @@ it('settles a mixed search-resubscription burst above300 controls while credited
  expect((await f.canonical.loadEntityRows('visible','tasks',['a','b'])).map(row=>row.id)).toEqual(['a','b']);
  budget.close();
 },30000);
+
+it('coalesces ten wait-queue capacities of watermark frames without a budget failure',async()=>{
+ const budget=new SQLiteTransientBudget(),f=await fixture({acquire:bytes=>budget.acquire(bytes)});await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await vi.waitFor(()=>expect(f.watermarks).toContain(10));
+ for(let n=0;n<2560;n++)expect(()=>f.feed.frame({type:'replica.watermark',revision:11+n},1)).not.toThrow();
+ await vi.waitFor(()=>expect(f.watermarks).toContain(2570));expect(f.failures).toEqual([]);expect(f.feed.stats().coalescedWatermarks).toBeGreaterThanOrEqual(2559);expect(budget.stats().peakBytes).toBeLessThanOrEqual(budget.maxBytes);expect(budget.stats().entries).toBe(0);expect(await f.canonical.loadEntityRows('visible','tasks',['a','b'])).toEqual(rows.map(row=>({id:row.id,row})));
+});
+it('drops an overloaded source cohort to resync without throwing or losing committed rows',async()=>{
+ const budget=new SQLiteTransientBudget(),f=await fixture({acquire:bytes=>budget.acquire(bytes)});await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await vi.waitFor(()=>expect(f.watermarks).toContain(10));
+ const hash=await digest();for(let n=0;n<2560;n++)expect(()=>f.feed.frame({type:'replica.delta',id:'source',cursor:cursor(11+n),canonicalUpserts:[],deleted:[],digest:hash},1)).not.toThrow();
+ await vi.waitFor(()=>expect(f.failures).toHaveLength(1));expect(f.failures[0]).toMatchObject({code:'PAGE_CHANGED',resyncRequired:true});expect(f.feed.stats().queuedBytes).toBeLessThanOrEqual(2097152);await vi.waitFor(()=>expect(budget.stats().entries).toBe(0));expect(await f.canonical.loadEntityRows('visible','tasks',['a','b'])).toEqual(rows.map(row=>({id:row.id,row})));
+ f.feed.authenticating('identity',2);await f.feed.session({...f.session,connectionGeneration:2},()=>true);
+ f.feed.frame({type:'replica.snapshotStart',id:'source',snapshotId:'recovered',scope:'tenant',visibilityScope:'visible',cursor:cursor(3000),key:'id',digest:hash,path:'tasks/all'},2);
+ f.feed.binary(new TextEncoder().encode(JSON.stringify({type:'replica.snapshotEncodedPage',id:'source',snapshotId:'recovered',scope:'tenant',visibilityScope:'visible',cursor:cursor(3000),key:'id',sequence:0,last:true,canonicalRows:rows.map(stable),digest:hash,path:'tasks/all'})).buffer,2);
+ f.feed.frame({type:'replica.ready',id:'source',cursor:cursor(3000),digest:hash},2);f.feed.frame({type:'replica.watermark',revision:3000},2);
+ await vi.waitFor(()=>expect(f.watermarks).toContain(3000));expect(await f.canonical.loadEntityRows('visible','tasks',['a','b'])).toEqual(rows.map(row=>({id:row.id,row})));expect(budget.stats().peakBytes).toBeLessThanOrEqual(budget.maxBytes);
+});
+it('never moves a later watermark ahead of an intervening transaction',async()=>{
+ const f=await fixture();await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await vi.waitFor(()=>expect(f.watermarks).toContain(10));
+ f.feed.frame({type:'replica.watermark',revision:11},1);f.transaction(12);f.feed.frame({type:'replica.watermark',revision:12},1);
+ await vi.waitFor(()=>expect(f.watermarks).toContain(12));expect((await f.canonical.loadEntityRows('visible','tasks',['a']))[0].row.n).toBe(12);expect(f.failures).toEqual([]);
+});

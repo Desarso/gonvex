@@ -480,3 +480,12 @@ it('accounts retained subscriptions within the same cap and returns dialog lease
  expect(socket.sent.filter(frame=>frame.type==='replica.close')).toHaveLength(closes);
  expect(f.program.budgets().find(row=>row.name==='native-source-interests')?.entries).toBe(0);
 });
+
+it('bounds simultaneous snapshot opens and releases an admission after close acknowledgement',async()=>{
+ const f=await fixture(),{socket}=await f.authenticate();const before=socket.sent.filter(m=>m.type==='replica.open').length;const watches:any[]=[];
+ for(let n=0;n<70;n++)watches.push(await f.call({method:'watchReplica',path:'__local.tasks',args:{slice:n}}));
+ expect(socket.sent.filter(m=>m.type==='replica.open').length-before).toBe(64);
+ const close=f.call({method:'unwatchReplica',signature:watches[0].signature});await close;await vi.waitFor(()=>expect(socket.sent.some(m=>m.type==='replica.close')).toBe(true));const request=socket.sent.find(m=>m.type==='replica.close');socket.receive({type:'replica.closed',id:request.id});
+ await vi.waitFor(()=>expect(socket.sent.filter(m=>m.type==='replica.open').length-before).toBe(65));
+ const state=await f.call({method:'controls'}) as any;expect(state.failure?.code).not.toBe('BUDGET');
+});

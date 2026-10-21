@@ -51,6 +51,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
  private countControl(message:ServerMessage){const kind=this.controlKinds.has(message.type)||this.controlKinds.size<32?message.type:'other';this.controlKinds.set(kind,(this.controlKinds.get(kind)??0)+1);const id=(message as any).id;if(typeof id==='string'&&this.sources.has(id))this.sourceControlCounts.set(id,(this.sourceControlCounts.get(id)??0)+1);}
  private registryPeakBytes=0;private registryPeakEntries=0;private closePeakBytes=0;
  private observeRegistry(){this.registryPeakBytes=Math.max(this.registryPeakBytes,this.sourceBytes+this.startBytes+this.closingBytes);this.registryPeakEntries=Math.max(this.registryPeakEntries,this.sources.size);this.closePeakBytes=Math.max(this.closePeakBytes,this.closingBytes);}
+ private overflowResyncs=0;private coalescedWatermarks=0;
  private queued=0;private queuedBytes=0;private authorityDepth=0;
  private readonly windows:SQLiteWindowStore;private readonly deferred:SQLiteDeferredReplicaFrames;
  private readonly initialized:Promise<void>;private readonly groups:SQLiteFeedGroups;
@@ -132,10 +133,13 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
   state={catchup:this.admissions++>0,stream:crypto.randomUUID(),generation:input.connectionGeneration,scope:input.directive.visibilityScope,epoch:input.directive.epoch,logicalScope:input.directive.scope,gate:Promise.resolve(),ingress,closed:false};this.state=state;
   state.gate=(async()=>{await this.initialized;const admitted=await this.options.sessions.activate(this.options.connection,input,()=>this.state===state&&!state.closed&&isCurrent());if(!admitted)fail('FENCED','Native feed has no tenant admission');const current=this.options.sessions.frameAdmission(this.options.connection,state.generation);state.admission=current.token;this.check(state);})();void state.gate.catch(()=>{});await state.gate;
  }
- binary(frame:ArrayBuffer,generation:number){this.binaryFrames++;this.flushControls();const state=this.state;if(!state||state.generation!==generation||state.closed)fail('FENCED','Binary frame has no native session');void state.ingress.accept(frame,state.gate).catch(error=>this.reject(state,error));}
- frame(message:ServerMessage,generation:number){
+ binary(frame:ArrayBuffer,generation:number){const state=this.state;if(!state||state.generation!==generation||state.closed)return;try{this.acceptBinary(frame,generation);}catch(error){this.reject(state,error);}}
+ private acceptBinary(frame:ArrayBuffer,generation:number){this.binaryFrames++;this.flushControls();const state=this.state;if(!state||state.generation!==generation||state.closed)fail('FENCED','Binary frame has no native session');void state.ingress.accept(frame,state.gate).catch(error=>this.reject(state,error));}
+ frame(message:ServerMessage,generation:number){const state=this.state;if(!state||state.generation!==generation||state.closed)return false;try{return this.acceptFrame(message,generation);}catch(error){this.reject(state,error);return false;}}
+ private acceptFrame(message:ServerMessage,generation:number){
   if(!message.type.startsWith('replica.'))return false;this.countControl(message);
   const state=this.state;if(!state||state.generation!==generation||state.closed)fail('FENCED','Control frame has no native session');
+  if(message.type==='replica.watermark'&&this.pendingControls?.state===state){const prior=this.pendingControls.frames.at(-1);if(prior?.type==='replica.watermark'&&Number.isSafeInteger(message.revision)&&message.revision>=0){prior.revision=Math.max(prior.revision,message.revision);this.coalescedWatermarks++;return true;}}
   const bytes=sqlitePayloadBytes(message,262144);// One certificate per admitted source plus bounded protocol controls.
   if(this.queued>=320||this.queuedBytes+bytes>2097152)fail('BUDGET','Native control queue exceeded budget');
   const batchable=['replica.snapshotStart','replica.delta','replica.transactionEncoded','replica.ready','replica.readyMany','replica.watermark'].includes(message.type);
@@ -186,7 +190,8 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
   });this.check(state);for(const effect of after.values())effect();
  }
  private reject(state:State,error:unknown){if(this.state!==state||state.closed)return;const sourceID=String((error as Error)?.message??error).match(/source:[0-9a-f]{64}/)?.[0],source=sourceID?this.sources.get(sourceID):undefined;
-  if(source)error=Object.assign(new Error(`${String((error as Error).message)} (${source.path})`),{code:(error as {code?:string}).code});this.stop();this.options.failed(error);}
+  if((error as {code?:string})?.code==='BUDGET'){this.overflowResyncs++;error=Object.assign(new Error('Replica ingress requires resync after bounded admission overflow'),{code:'PAGE_CHANGED',resyncRequired:true});}
+  if(source)error=Object.assign(new Error(`${String((error as Error).message)} (${source.path})`),{code:(error as {code?:string}).code,...((error as {resyncRequired?:boolean}).resyncRequired?{resyncRequired:true}:{})});this.stop();this.options.failed(error);}
  /** Live windows share the authenticated database clock with replica frames. */
  observeCursor(cursor:ReplicaCursor){const state=this.state;if(!state)fail('FENCED','Native feed unavailable');this.check(state!);this.cursor(state!,cursor);}
  databaseEpoch(){return this.state?.cursorEpoch;}
@@ -367,7 +372,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
  }
  quarantined(generation:number){this.stop();void this.options.sessions.quarantine(this.options.connection,generation).catch(error=>this.options.failed(error));}
  disconnected(){this.stop();this.options.sessions.disconnected(this.options.connection);}
- failed(error:unknown){this.stop();this.options.failed(error);}
+ failed(error:unknown){if(this.state){this.reject(this.state,error);return;}this.options.failed((error as {code?:string})?.code==='BUDGET'?Object.assign(Error('Replica ingress requires resync'),{code:'PAGE_CHANGED',resyncRequired:true}):error);}
  close(){this.stop();this.sources.clear();this.sourceBytes=0;this.startBytes=0;this.closingBytes=0;}
- stats(){this.observeRegistry();return {catchupMaxControlBatchFrames:this.catchupMaxControlBatchFrames,binaryFrames:this.binaryFrames,controlKinds:Object.fromEntries(this.controlKinds),sourceControlCounts:[...this.sourceControlCounts].map(([id,frames])=>({path:this.sources.get(id)?.path,frames})),registryPeakBytes:this.registryPeakBytes,registryPeakEntries:this.registryPeakEntries,closePeakBytes:this.closePeakBytes,sources:this.sources.size,opening:[...this.sources.values()].filter(source=>source.opening).length,watermark:this.state?.watermark,sourceBytes:this.sourceBytes+this.startBytes+this.closingBytes,queued:this.queued,queuedBytes:this.queuedBytes,ingress:this.state?.ingress.stats()};}
+ stats(){this.observeRegistry();return {overflowResyncs:this.overflowResyncs,coalescedWatermarks:this.coalescedWatermarks,catchupMaxControlBatchFrames:this.catchupMaxControlBatchFrames,binaryFrames:this.binaryFrames,controlKinds:Object.fromEntries(this.controlKinds),sourceControlCounts:[...this.sourceControlCounts].map(([id,frames])=>({path:this.sources.get(id)?.path,frames})),registryPeakBytes:this.registryPeakBytes,registryPeakEntries:this.registryPeakEntries,closePeakBytes:this.closePeakBytes,sources:this.sources.size,opening:[...this.sources.values()].filter(source=>source.opening).length,watermark:this.state?.watermark,sourceBytes:this.sourceBytes+this.startBytes+this.closingBytes,queued:this.queued,queuedBytes:this.queuedBytes,ingress:this.state?.ingress.stats()};}
 }
