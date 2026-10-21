@@ -14,15 +14,23 @@ function projection(result:JsonValue,path:readonly string[]){let current=result;
  const replace=(value:JsonValue,depth:number):JsonValue=>depth===path.length?(scalar?null:[]):{...(value as Record<string,JsonValue>),[path[depth]!]:replace((value as Record<string,JsonValue>)[path[depth]!]!,depth+1)};
  return {rows:rows as Array<Record<string,JsonValue>>,scalar,skeleton:replace(result,0)};
 }
+/** Validate and charge row-by-row: the parsed graph is not the wire byte cap.
+ * Aggregate results are consumed in decoded batches at publication. */
+export function nativeLivePayloadBytes(ref:FunctionReference,frame:Exclude<SQLiteLiveQueryUpdate,{error:string}>){
+ const {rows,skeleton}=projection(frame.result,ref.live?.resultPath??[]);
+ let bytes=sqlitePayloadBytes({...frame,result:skeleton},16384);
+ for(const row of rows)bytes+=sqlitePayloadBytes(row,131072);
+ return bytes;
+}
 /** Validate the generated projection and hash one bounded server result before
  * either storage engine admits it. Limited live windows grant no coverage. */
 export async function prepareNativeLiveWindow(schema:SQLiteTypedSchema,artifactHash:string,stream:string,scope:string,signature:string,ref:FunctionReference,frame:Exclude<SQLiteLiveQueryUpdate,{error:string}>){
-  sqlitePayloadBytes({stream,scope,signature},4096);sqlitePayloadBytes(frame,131072);if(!stream||stream.length>128||!scope||scope.length>512||!signature||signature.length>128||ref.kind!=='query'||ref.delivery!=='live'||!ref.live)throw new TypeError('Invalid generated live source');
+  sqlitePayloadBytes({stream,scope,signature},4096);nativeLivePayloadBytes(ref,frame);if(!stream||stream.length>128||!scope||scope.length>512||!signature||signature.length>128||ref.kind!=='query'||ref.delivery!=='live'||!ref.live)throw new TypeError('Invalid generated live source');
   const live=ref.live,table=schema[live.entity],cursor=frame.subscriptionRevision;if(!table||table.key!==live.key||!cursor||!cursor.epoch||cursor.epoch.length>256||!Number.isSafeInteger(cursor.sequence)||cursor.sequence<0||frame.replicaScope!==undefined&&frame.replicaScope!==scope)fail('FENCED','Live window differs from its admitted replica');
   const path=live.resultPath??[];if(path.length>16||path.some(part=>typeof part!=='string'||!part||part.length>256||['__proto__','constructor','prototype'].includes(part)))throw new TypeError('Invalid generated live result path');
   const projected=projection(frame.result,path),columns=new Set(live.plan.columns??Object.keys(table.fields));columns.add(live.key);
   const identities=new Map<string,string>();for(const row of projected.rows){const id=row[live.key];if(typeof id!=='string'||!id||id.length>1024||Object.keys(row).some(column=>!columns.has(column)||!Object.hasOwn(table.fields,column)))throw new TypeError('Live window contains an undeclared entity projection');const body=JSON.stringify(row);if(identities.has(id)&&identities.get(id)!==body)fail('INTENT_CONFLICT','Live window repeats an entity with different values');identities.set(id,body);}
-  const rows=JSON.stringify(projected.rows);if(rows.length*2>131072)fail('BUDGET','Encoded live window exceeds budget');for(const row of projected.rows)decodedJSONBytes(JSON.stringify(row),NATIVE_LIVE_DECODE_BYTES);const hash=await nativeLiveHash(rows);
+  const rows=JSON.stringify(projected.rows);for(const row of projected.rows)decodedJSONBytes(JSON.stringify(row),NATIVE_LIVE_DECODE_BYTES);const hash=await nativeLiveHash(rows);
   const header:SQLiteWindowHeader={signature,kind:'live',entity:live.entity,key:live.key,source:'server',completeness:'complete',cursor:{epoch:cursor.epoch,revision:cursor.sequence},subscriptionRevision:cursor,columns:[...columns],artifactHash:artifactHash,resultPath:[...path],resultSkeleton:projected.skeleton,scalar:projected.scalar,aggregateDigest:hash,...(frame.windowRevision!==undefined?{windowRevision:frame.windowRevision}:{})};sqlitePayloadBytes(header,16384);
   return {header,rows,values:projected.rows,hash,cursor};
 }

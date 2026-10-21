@@ -53,3 +53,31 @@ it('retains one decoded row without a second JSON string and shares unchanged ro
  expect(f.view.entity('tasks','large')).toBe(row);await vi.waitFor(()=>expect(f.ledger.bytes).toBe(before));
  release();f.view.close();expect(f.ledger.bytes).toBe(0);
 });
+
+it('hydrates byte-bounded continuations under one generation before publishing a mounted window',async()=>{
+ const ledger=new ByteLedger(),failures:unknown[]=[],calls:number[]=[];
+ const view=new SQLiteBrowserEntities(async(_entity,ids,expected,offset=0)=>{calls.push(offset);if(offset)expect(expected).toEqual({epoch:1,sequence:2});const take=Math.min(3,ids.length-offset);return {generation:{epoch:1,sequence:2},offset,nextOffset:offset+take<ids.length?offset+take:null,rows:ids.slice(offset,offset+take).map(id=>({id,value:{id,name:'wide'.repeat(500)}}))};},ledger,error=>failures.push(error));
+ const ids=Array.from({length:17},(_,n)=>String(n)),release=view.retain('tasks',ids);
+ await vi.waitFor(()=>expect(view.entity('tasks','16')).toBeDefined());expect(calls).toEqual([0,3,6,9,12,15]);expect(failures).toEqual([]);release();view.close();expect(ledger.bytes).toBe(0);
+});
+
+it('serves a known row during a stuck background refresh and retries its owned deadline',async()=>{
+ const f=fixture();const release=f.view.retain('tasks',['a']);await vi.waitFor(()=>expect(f.view.entity('tasks','a')).toEqual({id:'a',n:1}));
+ // Use a short clock for this deadline test, not a production timeout change.
+ (f.view as any).readTimeoutMs=10;let reads=0;
+ f.handler=async(_entity,ids)=>{if(++reads===1)return new Promise(()=>{});return {generation:{epoch:1,sequence:2},rows:ids.map(id=>({id,value:{id,n:2}}))};};
+ f.view.refresh();expect(f.view.entity('tasks','a')).toEqual({id:'a',n:1});
+ await vi.waitFor(()=>expect(f.view.entity('tasks','a')).toEqual({id:'a',n:2}));
+ await vi.waitFor(()=>expect((f.view as any).refreshing).toBeUndefined());expect(f.errors).toEqual([]);release();f.view.close();
+});
+
+it('coalesces dialog mounts into one entity read and reuses known rows for later consumers',async()=>{
+ const f=fixture(),releases=[];
+ for(const id of ['task','category','template','status','priority'])releases.push(f.view.retain('tasks',[id]));
+ releases.push(f.view.subscribe(()=>{},{entity:'tasks',ids:['task']}));
+ await vi.waitFor(()=>expect(f.view.entity('tasks','priority')).toBeDefined());
+ expect(f.calls).toHaveLength(1);expect(f.calls[0].ids).toEqual(['task','category','template','status','priority']);
+ releases.push(f.view.retain('tasks',['task']),f.view.subscribe(()=>{},{entity:'tasks',ids:['task']}));
+ await new Promise(resolve=>setTimeout(resolve,0));expect(f.calls).toHaveLength(1);
+ for(const release of releases)release();f.view.close();
+});

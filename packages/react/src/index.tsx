@@ -2019,8 +2019,8 @@ function useNativeLiveQueryState<T extends ReplicaRow>(client:SQLiteBrowserClien
  let parent:JsonValue=value;const path=ref.live?.resultPath??[];for(const segment of path.slice(0,-1)){if(!parent||typeof parent!=="object"||Array.isArray(parent))return emptyLiveQuery as LiveQueryResult<T>;parent=parent[segment]!;}
  const record=parent&&typeof parent==="object"&&!Array.isArray(parent)?parent as Record<string,JsonValue>:undefined,selected=path.length?record?.[path.at(-1)!]:value;
  if(!Array.isArray(selected))return emptyLiveQuery as LiveQueryResult<T>;
- const rows=selected as T[];
- return {rows,ids:rows.map(row=>String(row[ref.live?.key??"_id"]??row._id??row.id??"")),...(typeof record?.total==="number"?{total:record.total}:{}),...(typeof record?.offset==="number"?{offset:record.offset}:{}),...(typeof record?.limit==="number"?{limit:record.limit}:{}),source:"server",completeness:"complete",freshness:client.connectionState().isWebSocketConnected?"current":"offline"};
+ const rows=selected as T[];const membership=client.replicaWindowMembership(client.replicaSignature(ref,args));
+ return {rows,ids:rows.map(row=>String(row[ref.live?.key??"_id"]??row._id??row.id??"")),...(typeof record?.total==="number"?{total:record.total}:{}),...(typeof record?.offset==="number"?{offset:record.offset}:{}),...(typeof record?.limit==="number"?{limit:record.limit}:{}),...(membership?.supported===false?{supported:false,unsupportedOperator:membership.unsupportedOperator}:{}),source:membership?.source??"server",completeness:membership?.completeness??"complete",freshness:membership?.freshness??(client.connectionState().isWebSocketConnected?"current":"offline")};
 }
 
 /** Execute a read-only Query once. Queries never subscribe or rerun. */

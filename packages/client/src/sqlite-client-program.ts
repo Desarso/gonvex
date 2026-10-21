@@ -1,3 +1,4 @@
+import {nativeLivePayloadBytes} from './native-live-window-frame.js';
 import {lowerSQLiteLivePlan} from './sqlite-plan-lowering.js';
 import {GonvexClientError} from './client-error.js';
 import {SQLiteReducerPreparationRequiredError} from './sqlite-reducer-core.js';
@@ -225,7 +226,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
  }
  private receiveLive(connection:Connection,source:LiveSource,frame:SQLiteLiveQueryUpdate){
   if('error'in frame){source.error=frame.error;this.notify(connection);return;}
-  const stream=connection.liveStream,authVersion=connection.authVersion,admitted=this.admission(connection);if(!admitted)return;const release=this.transient.reserve(sqlitePayloadBytes(frame,131072)+262144);
+  const stream=connection.liveStream,authVersion=connection.authVersion,admitted=this.admission(connection);if(!admitted)return;let payloadBytes:number;try{payloadBytes=nativeLivePayloadBytes(source.ref,frame);}catch(error){source.error=error instanceof Error?error.message:'Invalid live result';this.notify(connection);return;}
   const current=()=>{if(connection.liveStream!==stream||connection.lives.get(source.signature)!==source||this.admission(connection)?.generation!==admitted.generation)fail('FENCED','Live window admission changed');};
   const run=()=>waitForSQLiteOwnerAdmission(()=>this.owner.runOwner(524288,()=>this.owner.database.withTransactionAsync(async()=>{
    if(connection.liveStream!==stream||connection.authVersion!==authVersion||connection.lives.get(source.signature)!==source||this.admission(connection)?.generation!==admitted.generation)fail('FENCED','Live query admission changed');
@@ -234,7 +235,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
    const progress=await this.owner.database.getFirstAsync<{applied:number;unclosed:number}>('SELECT applied,unclosed FROM gv_native_feed_progress WHERE scope=? AND epoch=?',admitted.scope,saved.directive.epoch);
    if(progress&&!progress.unclosed&&await this.liveWindows.pending(stream,admitted.scope,frame.subscriptionRevision.epoch,progress.applied))await this.reducer.core.rebase(admitted.scope,async()=>{await this.liveWindows.publish(stream,admitted.scope,frame.subscriptionRevision.epoch,progress.applied);});
   }),[admitted.scope]),current);
-  void (async()=>{const loaded=new Set<string>();for(;;){try{await run();return;}catch(error){if(!(error instanceof SQLiteReducerPreparationRequiredError))throw error;if(loaded.has(error.path)||loaded.size>=128)fail('BUDGET','Live rebase preparation exceeded budget');loaded.add(error.path);await this.reducer.core.prepare(error.path);current();}}})().then(()=>this.notify(connection),error=>{if(connection.liveStream===stream&&connection.lives.get(source.signature)===source)this.feedFailed(connection,error);}).finally(release);
+  void (async()=>{const release=await this.transient.acquire(payloadBytes+262144);try{const loaded=new Set<string>();for(;;){try{await run();return;}catch(error){if(!(error instanceof SQLiteReducerPreparationRequiredError))throw error;if(loaded.has(error.path)||loaded.size>=128)fail('BUDGET','Live rebase preparation exceeded budget');loaded.add(error.path);await this.reducer.core.prepare(error.path);current();}}}finally{release();}})().then(()=>this.notify(connection),error=>{if(connection.liveStream===stream&&connection.lives.get(source.signature)===source){source.error=error instanceof Error?error.message:'Live source failed';this.notify(connection);}});
  }
  private unwatchLive(connection:Connection,source:LiveSource,tab:string,lease?:string){const leases=source.leases.get(tab);if(!leases)return;if(lease===undefined){connection.liveBytes-=leases.size*192;leases.clear();}else if(leases.delete(lease))connection.liveBytes-=192;if(!leases.size){source.leases.delete(tab);source.tabs.delete(tab);}if(source.tabs.size)return;source.close();connection.lives.delete(source.signature);connection.liveBytes-=source.bytes;const stream=connection.liveStream;void this.owner.runOwner(0,()=>this.owner.database.withTransactionAsync(()=>this.liveWindows.retire(stream,source.signature))).catch(()=>{});}
  private async openSource(connection:Connection,source:Source){
@@ -286,7 +287,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
      const tabs=[...selected.tabs].filter(tab=>this.tabs.get(tab)===record.id);
      const sent=tabs.filter(tab=>this.owner.publishPreviewTab!(tab,preview));
      return ()=>{for(const tab of sent)if(current()&&this.tabs.get(tab)===record.id)this.owner.publishPreviewTab!(tab,{...preview,page:null});};
-    },freshSnapshot:async id=>{const source=[...record.sources.values()].find(source=>source.id===id);if(!source)fail('FENCED','Reset source detached');source!.forceSnapshot=true;await this.openSource(record,source!);},sourceReady:id=>{for(const source of record.sources.values())if(source.id===id)source.forceSnapshot=false;},windowsPending:(scope,epoch,revision)=>this.liveWindows.pending(record.liveStream,scope,epoch,revision),publishWindows:async(scope,epoch,revision)=>{await this.liveWindows.publish(record.liveStream,scope,epoch,revision);},reserve:bytes=>this.transient.reserve(bytes),acquire:bytes=>this.transient.acquire(bytes),prepare:path=>this.reducer.core.prepare(path),authority:(scope,mutate)=>this.reducer.core.rebase(scope,mutate).then(()=>{}),send:message=>record.client.sendOwnerMessage(message),advanceWatermark:revision=>{record.reconnectAttempts=0;record.failure=undefined;record.client.advanceOwnerWatermark(revision);this.notify(record);},failed:error=>this.feedFailed(record,error)});
+    },freshSnapshot:async id=>{const source=[...record.sources.values()].find(source=>source.id===id);if(!source)fail('FENCED','Reset source detached');source!.forceSnapshot=true;await this.openSource(record,source!);},sourceReady:id=>{for(const source of record.sources.values())if(source.id===id)source.forceSnapshot=false;},windowsPending:(scope,epoch,revision)=>this.liveWindows.pending(record.liveStream,scope,epoch,revision),publishWindows:async(scope,epoch,revision)=>{await this.liveWindows.publish(record.liveStream,scope,epoch,revision);},reserve:bytes=>this.transient.reserve(bytes),reserveSnapshot:bytes=>this.transient.hold(bytes),acquire:bytes=>this.transient.acquire(bytes),prepare:path=>this.reducer.core.prepare(path),authority:(scope,mutate)=>this.reducer.core.rebase(scope,mutate).then(()=>{}),send:message=>record.client.sendOwnerMessage(message),advanceWatermark:revision=>{record.reconnectAttempts=0;record.failure=undefined;record.client.advanceOwnerWatermark(revision);this.notify(record);},failed:error=>this.feedFailed(record,error)});
     const restore=(scope:string,generation:number)=>{
      const retiredStream=record.liveStream;record.liveStream=crypto.randomUUID();void this.owner.runOwner(0,()=>this.owner.database.withTransactionAsync(()=>this.liveWindows.retire(retiredStream))).catch(()=>{});feed.authenticating(scope,generation);record.rejections.length=0;if(controlOnly||publicClient){record.restoring=undefined;return;}record.restoreScope=scope;record.restoreGeneration=generation;
      const current=()=>!this.closed&&this.connections.get(id)===record&&record.restoreScope===scope&&record.restoreGeneration===generation;
@@ -383,7 +384,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
    case 'watchReplica':{if(connection.controlOnly||connection.public)fail('INVALID_ROW','This connection does not own tenant replica collections');const source=await this.addSource(connection,this.ref(input.path,'query'),input.args??{},caller.tabID,false,input.lease??'default');return {id:source.id,signature:source.signature};}
    case 'unwatchReplica':{text(input.signature,128);const source=connection.sources.get(input.signature);if(source){this.releaseSourceInterest(connection,source,caller.tabID,input.lease??'default');if(!source.tabs.size&&!source.eager)this.deferSourceClose(connection,source);}return null;}
    case 'entities':{
-    const admission=this.checkCaller(caller,connection);return this.readCommitted(connection,admission,caller,async()=>{this.checkCachedCaller(caller,connection,admission.readGeneration);const result=await this.owner.reader.entities({scope:admission.scope,entity:input.entity,ids:input.ids,expected:input.expected});this.checkCachedCaller(caller,connection,admission.readGeneration);return result;});
+    const admission=this.checkCaller(caller,connection);return this.readCommitted(connection,admission,caller,async()=>{this.checkCachedCaller(caller,connection,admission.readGeneration);const result=await this.owner.reader.entities({scope:admission.scope,entity:input.entity,ids:input.ids,offset:input.offset,expected:input.expected});this.checkCachedCaller(caller,connection,admission.readGeneration);return result;});
    }
    case 'replicaPendingPage':{
     text(input.signature,128);const source=connection.sources.get(input.signature);if(!source||!source.eager&&!source.tabs.has(caller.tabID))fail('FENCED','Tab does not own that source');const admitted=this.checkCaller(caller,connection),pending=await connection.feed.pendingSource(source.id);if(!pending)return null;
@@ -401,8 +402,10 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
    case 'subscriptionBudget':return {entries:connection.sources.size,bytes:connection.sourceBytes,maxEntries:256,maxBytes:262144,paths:[...connection.sources.values()].map(source=>({path:source.ref.path,refs:source.tabs.size,eager:source.eager,closing:!!source.closing,bytes:source.bytes}))};
    case 'prepareReducer':{const ref=this.ref(input.path,'reducer');if(ref.localExecution===1)await this.reducer.core.prepare(ref.path);if(caller.signal.aborted||this.tabs.get(caller.tabID)!==connection.id)fail('FENCED','Reducer preparation caller detached');return null;}
    case 'localLivePage':{
-    text(input.signature,128);const source=connection.sources.get(input.signature),ref=this.ref(input.path,'query');
-    if(!source?.tabs.has(caller.tabID)||!source.ref.replica||!ref.live?.plan||ref.live.entity!==source.ref.replica.table)fail('FENCED','Local query has no admitted collection');
+    const ref=this.ref(input.path,'query');if(input.signature!==undefined)text(input.signature,128);
+    const source=input.signature!==undefined?connection.sources.get(input.signature):[...connection.sources.values()].find(value=>{const replica=value.ref.replica;return !!replica&&(value.eager||value.tabs.has(caller.tabID))&&replica.table===ref.live?.entity&&!Object.keys(replica.equalFilters??{}).length&&!replica.excludeWhenSet?.length;});
+    if(!source){if(input.signature===undefined)return null;fail('FENCED','Local query has no admitted collection');}
+    if(!(source.eager||source.tabs.has(caller.tabID))||!source.ref.replica||!ref.live?.plan||ref.live.entity!==source.ref.replica.table)fail('FENCED','Local query has no admitted collection');
     const admitted=this.checkCaller(caller,connection);
     // Scoped local reads can demand generated reducer dependencies. These
     // stay on disk and never hydrate into the renderer. Network preparation
@@ -415,14 +418,15 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
      if(header.header.completeness!=='complete'||header.header.truncated)return {supported:false,reason:'truncatedReplica',generation:header.generation};
      const args=input.args??{};if(!args||typeof args!=='object'||Array.isArray(args))throw new TypeError('Local query arguments must be an object');
      const context=await this.context(admitted.scope),identity=admitted.identity;
-     const lowered=lowerSQLiteLivePlan(this.owner.engine.schema,ref.live!.plan!,args,{'member.id':identity.member?.id??null,'auth.account.id':identity.auth.account?.id??null},{textOrder:'binary'});
+     const lowered=lowerSQLiteLivePlan(this.owner.engine.schema,ref.live!.plan!,args,{'member.id':identity.member?.id??null,'auth.account.id':identity.auth.account?.id??null},{textOrder:'binary',offlineSearch:true});
      if(!lowered.supported)return {supported:false,reason:lowered.reason,generation:header.generation};
      if(lowered.offset)return {supported:false,reason:'offsetRequiresKeyset',generation:header.generation};
-     const {table:_table,membership:_membership,...options}=lowered.plan;options.limit=Math.min(128,options.limit);
+     if(input.generation!==undefined&&input.generation!==header.generation)fail('PAGE_CHANGED','Local query membership changed');
+     const {table:_table,membership:_membership,...options}=lowered.plan;options.limit=Math.min(128,options.limit);if(input.after!==undefined)options.after=input.after;
      const plan=sqliteCollectionPagePlan(source.ref,source.args,options,{signature:source.signature,generation:header.generation},new Set(Object.keys(context.coverage)));
-     const page=await this.reducer.predictions.page(admitted.scope,plan.plan,plan.allowLocalInserts);
+     const page=await this.reducer.predictions.page(admitted.scope,plan.plan,plan.allowLocalInserts);const total=input.after===undefined?await this.reducer.predictions.count(admitted.scope,plan.plan,plan.allowLocalInserts):undefined;
      this.checkCachedCaller(caller,connection,admitted.readGeneration);
-     return {...page,supported:true,complete:page.cursor===null,generation:header.generation};
+     return {...page,...(total!==undefined?{total}:{}),supported:true,partialSearch:!!lowered.partialSearch,complete:page.cursor===null,generation:header.generation};
     });
    }
    case 'collectionPage':{

@@ -232,6 +232,7 @@ it('evaluates an admitted generated local live plan in SQLite with the same opti
  expect(await read()).toMatchObject({supported:true,complete:true,rows:[{id:'a',n:1}]});socket.close();
  await f.call({method:'reducer',path:'tasks.increment',args:{},now:100},'one','local-scope-edit');
  expect(await read()).toMatchObject({supported:true,complete:true,rows:[{id:'a',n:2}]});
+ expect(await f.call({method:'localLivePage',path:ref.path,args:{floor:1,offset:0,limit:128}})).toMatchObject({supported:true,rows:[{id:'a',n:2}]});
  await expect(f.call({method:'localLivePage',signature:'foreign',path:ref.path,args:{}})).rejects.toMatchObject({code:'FENCED'});
  expect(await f.engine.integrity()).toBe('ok');
 });

@@ -1,3 +1,4 @@
+import type {FilterOperator} from './query-expression.js';
 import type {JsonValue} from '@gonvex/protocol';
 import type {SQLiteMembershipSource} from './sqlite-membership-plan.js';
 import { sqliteRowBodySQL } from './sqlite-typed-body.js';
@@ -9,6 +10,8 @@ export type SQLitePredicate =
   | { op: 'not'; child: SQLitePredicate }
   | { op: 'in'; field: string; values: readonly (SQLiteBinding | boolean)[] }
   | { op: 'arrayContains'; field:string; value:SQLiteBinding|boolean }
+  | { op:'structuredFilter'; field:string; operator:FilterOperator; value:string; valueTo?:string }
+  | { op: 'containsText'; columns:readonly string[]; value:string }
   | { op: 'jsonEq'; field:string; value:JsonValue }
   | { op: 'relation'; field: string; table: string; relatedField: string; where?: SQLitePredicate };
 export type SQLiteOrder = { field: string; direction: 'asc' | 'desc' };
@@ -65,6 +68,54 @@ export function compileSQLiteTypedPage(schema: SQLiteTypedSchema, scope: string,
     if (!input) return '1';
     if (input.op === 'and' || input.op === 'or') return '(' + (input.children.map(child => predicate(entity, alias, child)).join(input.op === 'and' ? ' AND ' : ' OR ') || (input.op === 'and' ? '1' : '0')) + ')';
     if (input.op === 'not') return `(NOT (${predicate(entity, alias, input.child)}))`;
+    if(input.op==='containsText'){
+      if(!input.columns.length||input.columns.length>128||input.value.length>512)throw new TypeError('Invalid offline search');
+      const table=schema[entity]!,term=input.value.toLowerCase(),pattern='*'+term.replace(/[\[\]*?]/g,char=>char==='['?'[[]':char===']'?'[]]':'['+char+']')+'*';
+      return '('+input.columns.map(name=>{
+        const column=field(entity,alias,name),index=table.search?.indexOf(name)??-1;
+        if(index>=0&&entity===plan.table){const match=q('s'+index)+' GLOB '+bind(pattern);return access==='ordered'||overlay&&overlay.root!=='canonical'?alias+'.'+match:alias+'.rid IN (SELECT rowid FROM '+q(sqliteSearchName(entity))+' WHERE '+match+')';}
+        return 'instr(gv_ingress_lower(CAST(coalesce('+column+",'') AS TEXT)),"+bind(term)+')>0';
+      }).join(' OR ')+')';
+    }
+    if(input.op==='structuredFilter'){
+      const column=field(entity,alias,input.field),shape=schema[entity]!.fields[input.field]!;
+      // Match the portable filter's String(value ?? '') contract, including booleans.
+      const text=shape.kind==='boolean'?`CASE WHEN ${column} IS NULL THEN '' WHEN ${column}=0 THEN 'false' ELSE 'true' END`:`coalesce(CAST(${column} AS TEXT),'')`;
+      const operator=input.operator,value=input.value;
+      if(value.length>65536||(input.valueTo?.length??0)>65536)throw new TypeError('Structured filter exceeds budget');
+      const equal=(value:string)=>{
+        if(shape.kind==='number'){
+          const n=Number(value);if(value==='' )return `${column} IS NULL`;
+          return Number.isFinite(n)&&String(n)===value?`${column}=${bind(n)}`:'0';
+        }
+        if(shape.kind==='text')return value===''?`(${column} IS NULL OR ${column}='')`:`${column}=${bind(value)}`;
+        return `${text}=${bind(value)}`;
+      };
+      if(operator==='equals')return equal(value);
+      if(operator==='notEquals')return `NOT coalesce((${equal(value)}),0)`;
+      if(operator==='oneOf'){
+        let choices:unknown;try{choices=JSON.parse(value);}catch{return '0';}
+        if(!Array.isArray(choices))return '0';if(choices.length>256)throw new RangeError('SQLite IN list exceeds budget');
+        return '('+(choices.map(choice=>equal(String(choice))).join(' OR ')||'0')+')';
+      }
+      if(operator==='empty'||operator==='notEmpty')return `${operator==='notEmpty'?'NOT ':''}(${column} IS NULL OR ${text}='')`;
+      if(['contains','notContains','startsWith','endsWith'].includes(operator)){
+        const folded=`gv_ingress_lower(${text})`,term=value.toLowerCase();
+        const match=operator==='startsWith'?`substr(${folded},1,length(${bind(term)}))=${bind(term)}`:operator==='endsWith'?term===''?'1':`substr(${folded},-length(${bind(term)}))=${bind(term)}`:`instr(${folded},${bind(term)})>0`;
+        return operator==='notContains'?`NOT (${match})`:match;
+      }
+      const compare=(op:string,raw:string)=>{
+        const operand=shape.kind==='number'?Number(raw):raw;
+        if(typeof operand==='number'&&!Number.isFinite(operand))return '0';
+        // The portable comparator sorts null before every non-null value.
+        const comparison=`${column}${op}${bind(operand)}`;
+        return op.startsWith('<')?`(${column} IS NULL OR ${comparison})`:`(${column} IS NOT NULL AND ${comparison})`;
+      };
+      if(operator==='inRange')return `(${compare('>=',value)} AND ${compare('<=',input.valueTo??'')})`;
+      const operators={lessThan:'<',lessThanOrEqual:'<=',greaterThan:'>',greaterThanOrEqual:'>='} as const;
+      if(!Object.hasOwn(operators,operator))throw new TypeError('Unknown structured filter');
+      return compare(operators[operator as keyof typeof operators],value);
+    }
     if (input.op === 'in') {
       if (!Array.isArray(input.values) || input.values.length > 256) throw new RangeError('SQLite IN list exceeds budget');
       const column = field(entity, alias, input.field), shape = schema[entity]!.fields[input.field]!;

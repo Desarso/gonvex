@@ -44,14 +44,14 @@ export class SQLiteNativeIngress {
  private disposed=false;
  private entries=0;
  private wireBytes=0;
- private refusals=0;
+ private refusals=0;private peakBytes=0;private peakEntries=0;
  private releaseBatch?:()=>void;
  private releasedBytes=0;
  constructor(private readonly options:Options){
   if(!options.scope||options.scope.length>512)throw new TypeError('Invalid snapshot connection scope');
   this.ledger.register('native-snapshot-queue',()=>this.stats());
  }
- stats(){return {name:'native-snapshot-queue',bytes:this.wireBytes+this.entries*metadataBytes,maxBytes:this.ledger.maxBytes,entries:this.entries,maxEntries:maxFrames,evictions:0,refusals:this.refusals,releasedBytes:this.releasedBytes};}
+ stats(){return {name:'native-snapshot-queue',peakBytes:this.peakBytes,peakEntries:this.peakEntries,bytes:this.wireBytes+this.entries*metadataBytes,maxBytes:this.ledger.maxBytes,entries:this.entries,maxEntries:maxFrames,evictions:0,refusals:this.refusals,releasedBytes:this.releasedBytes};}
  /** Snapshot bytes before queueing. Caller mutations cannot alter an admitted
   * frame; the caller retains its original buffer on success and refusal. */
  accept(buffer:ArrayBuffer,gate:Promise<void>=readyGate):Promise<SQLiteSnapshotReceipt>{
@@ -64,7 +64,7 @@ export class SQLiteNativeIngress {
   }
   let releaseReservation:(()=>void)|undefined;
   try{releaseReservation=this.options.reserve?.(bytes.byteLength+metadataBytes);bytes=copyOwnedSQLiteBytes(buffer);}catch(error){releaseReservation?.();return Promise.reject(error);}
-  this.entries++;this.wireBytes+=bytes.byteLength;
+  this.entries++;this.wireBytes+=bytes.byteLength;this.peakBytes=Math.max(this.peakBytes,this.wireBytes+this.entries*metadataBytes);this.peakEntries=Math.max(this.peakEntries,this.entries);
   let resolve!:(value:SQLiteSnapshotReceipt)=>void,reject!:(error:unknown)=>void;
   const result=new Promise<SQLiteSnapshotReceipt>((yes,no)=>{resolve=yes;reject=no;});
   const entry:Pending={bytes,releaseReservation,gate,gateReady:false,done:result,resolve,reject};

@@ -1,7 +1,8 @@
+import {assertSQLiteMembership} from './sqlite-membership-plan.js';
 import {sqlitePhysicalEntityScope,sqliteQueryEntityScopes} from './sqlite-entity-scope.js';
 import {readSQLiteOptimisticPage} from './sqlite-optimistic-query.js';
 import {readSQLiteTypedView} from './sqlite-native-view.js';
-import {compileSQLiteTypedPage,type SQLitePagePlan} from './sqlite-typed-query.js';
+import {compileSQLiteTypedPage,compileSQLiteOptimisticPage,type SQLitePagePlan} from './sqlite-typed-query.js';
 import type {LocalPatch} from '@gonvex/local-runtime';
 import type {ReadCoverage} from '@gonvex/local-runtime/read-view';
 import type {ReducerReadView} from '@gonvex/local-runtime/portable';
@@ -47,6 +48,13 @@ export class SQLitePredictions {
    const pending=await this.db.getFirstAsync('SELECT 1 FROM gv_prediction_members WHERE scope=? LIMIT 1',ownerScope);
    result=await readSQLiteOptimisticPage(this.db,this.tables,ownerScope,physicalScope,owned,generation.sequence,generation.predictionSequence,pending?{scope:physical(ownerScope),allowLocalInserts}:undefined,resolved.sources);
   });return result;
+ }
+ async count(ownerScope:string,plan:SQLitePagePlan,allowLocalInserts=false):Promise<number>{
+  scope(ownerScope);sqlitePayloadBytes({plan,allowLocalInserts},16384);await this.ready();let total=0;
+  await this.db.withTransactionAsync(async()=>{await this.generation(ownerScope);const {after:_,...all}=plan,resolved=await sqliteQueryEntityScopes(this.db,ownerScope,all),membership=await assertSQLiteMembership(this.db,this.tables,ownerScope,all),pending=await this.db.getFirstAsync('SELECT 1 FROM gv_prediction_members WHERE scope=? LIMIT 1',ownerScope);
+   const query=pending?compileSQLiteOptimisticPage(this.tables,resolved.physical,all,'ordered',true,ownerScope,{scope:physical(ownerScope),allowLocalInserts},resolved.sources,membership):compileSQLiteTypedPage(this.tables,resolved.physical,all,'ordered',true,ownerScope,undefined,resolved.sources,membership);
+   total=(await this.db.getFirstAsync<{n:number}>('SELECT count(*) n FROM ('+query.sql+')',...query.bindings))?.n??0;
+  });return total;
  }
  async viewPage(ownerScope:string,signature:string,plan:SQLitePagePlan,offset=0,allowLocalInserts=false){
   scope(ownerScope);sqlitePayloadBytes({signature,plan,offset,allowLocalInserts},16384);if(typeof signature!=='string'||!signature||signature.length>4096||!Number.isSafeInteger(offset)||offset<0||plan.limit>128||typeof allowLocalInserts!=='boolean')throw new TypeError('Invalid optimistic view page');const owned=structuredClone(plan);compileSQLiteTypedPage(this.tables,ownerScope,owned);await this.ready();

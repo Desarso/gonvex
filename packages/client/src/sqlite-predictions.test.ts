@@ -1,3 +1,5 @@
+import {lowerSQLiteLivePlan} from './sqlite-plan-lowering.js';
+import {runOfflineLiveQuery} from './query-expression.js';
 import {DatabaseSync} from 'node:sqlite';
 import {expect,it,vi} from 'vitest';
 import {memoryReadView,overlayReadView} from '@gonvex/local-runtime/read-view';
@@ -106,5 +108,46 @@ it('preserves newly received untouched fields while applying only intent-owned f
   await f.predictions.apply('s',3,[{entity:'tasks',rowId:'03',op:'patch',fields:{}}]);const fresh=[{id:'03',row:{id:'03',name:'New untouched server title',n:900,data:null}}];expect(await f.predictions.overlayRows('s','tasks',fresh)).toEqual(fresh);
   await f.db.runAsync('DELETE FROM gv_prediction_fields WHERE scope=? AND id=?','s','01');await expect(f.predictions.overlayRows('s','tasks',received)).rejects.toMatchObject({code:'PAGE_CHANGED'});
   await f.predictions.reset('s');expect(await f.predictions.overlayRows('s','tasks',received)).toEqual(received);expect(await f.db.getFirstAsync('SELECT count(*) n FROM gv_prediction_fields')).toEqual({n:0});
+ }finally{f.sql.close();}
+});
+
+it('matches IDB offline-column boolean search over canonical and newly predicted SQLite rows',async()=>{
+ const f=await fixture();try{
+  f.sql.function('gv_ingress_lower',(value:any)=>String(value??'').toLowerCase());
+  const predicted={id:'new',name:'Offline CAFÉ 東京',n:-1,data:null};await f.predictions.apply('s',1,[{entity:'tasks',rowId:'new',op:'insert',fields:predicted}]);
+  const source:any={table:'tasks',key:'id',columns:['id','name','n','data'],sort:{defaultColumn:'n',defaultDirection:'asc',allowedColumns:['n']},window:{offsetArgument:'offset',limitArgument:'limit',defaultLimit:128,maxLimit:128,count:'exact'},search:{argument:'search',booleanTerms:true,columns:[],offlineColumns:['id','name','n'],sources:[{table:'serverDocuments',key:'taskId',column:'searchText'}]}};
+  for(const search of ['offline','CAFÉ','東京','offline $and 東京','new $or Task 19','-1']){
+   const args={search,offset:0,limit:128},lowered=lowerSQLiteLivePlan(schema,source,args,{}, {textOrder:'binary',offlineSearch:true});expect(lowered.supported).toBe(true);if(!lowered.supported)throw Error(lowered.reason);
+   const actual=await f.predictions.page('s',lowered.plan),expected=runOfflineLiveQuery([...f.rows,predicted],source,args,'complete');
+   expect(actual.rows.map(row=>row.id)).toEqual(expected.rows.map(row=>row.id));expect(lowered.partialSearch).toBe(true);expect(expected.completeness).toBe('partial');
+  }
+ }finally{f.sql.close();}
+});
+
+it('filters a corpus larger than the page byte cap with keysets and SQL COUNT instead of hydrating it',async()=>{
+ const f=await fixture();try{
+  for(let offset=20;offset<100;offset+=5)await f.engine.apply('s',Array.from({length:5},(_,n)=>({table:'tasks',id:String(offset+n),version:1,row:{id:String(offset+n),name:'wide'.repeat(1200),n:offset+n,data:null}})));
+  const plan={table:'tasks',where:{field:'n',op:'gte' as const,value:20},order:[{field:'n',direction:'asc' as const}],limit:128};
+  const count=await f.predictions.count('s',plan);expect(count).toBe(80);let after:any;const ids:string[]=[];
+  for(;;){const page=await f.predictions.page('s',{...plan,...(after?{after}:{})});expect(page.rows.length).toBeLessThan(80);ids.push(...page.rows.map(row=>String(row.id)));if(!page.cursor)break;after=page.cursor;}
+  expect(ids).toEqual(Array.from({length:80},(_,n)=>String(n+20)));expect(new Set(ids).size).toBe(80);
+ }finally{f.sql.close();}
+});
+
+it('executes every portable task-grid structured filter with search and predicted rows on SQLite',async()=>{
+ const f=await fixture();try{
+  f.sql.function('gv_ingress_lower',(value:any)=>String(value??'').toLowerCase());
+  const predicted={id:'new',name:'Offline task',n:25,data:null};await f.predictions.apply('s',1,[{entity:'tasks',rowId:'new',op:'insert',fields:predicted}]);
+  const cases=[['name','contains','TASK'],['name','notContains','Task 1'],['name','equals','Task 1'],['name','notEquals','Task 1'],['name','startsWith','task 1'],['name','endsWith','19'],['name','empty',''],['name','notEmpty',''],['name','oneOf','["Task 1","Offline task"]'],['n','oneOf','[1,25]'],['n','lessThan','5'],['n','lessThanOrEqual','5'],['n','greaterThan','5'],['n','greaterThanOrEqual','5'],['n','inRange','4','7'],['n','equals','01'],['n','notEquals','01']];
+  const operators=[...new Set(cases.map(c=>c[1]))];
+  const source:any={table:'tasks',key:'id',columns:['id','name','n','data'],sort:{defaultColumn:'n',defaultDirection:'asc',allowedColumns:['n']},window:{offsetArgument:'offset',limitArgument:'limit',defaultLimit:128,maxLimit:128,count:'exact'},search:{argument:'search',columns:['name'],offlineColumns:['name']},filters:{argument:'filters',allowedColumns:['name','n'],allowedOperators:operators}};
+  for(const [column,operator,value,valueTo] of cases){
+   const args={search:'task',offset:0,limit:128,filters:[{column:column!,operator:operator!,value:value!,...(valueTo?{valueTo}:{})}]};
+   const lowered=lowerSQLiteLivePlan(schema,source,args,{}, {textOrder:'binary',offlineSearch:true});expect(lowered.supported,operator).toBe(true);if(!lowered.supported)throw Error(lowered.reason);
+   const actual=await f.predictions.page('s',lowered.plan),expected=runOfflineLiveQuery([...f.rows,predicted],source,args,'complete');
+   expect(actual.rows.map(row=>row.id),operator+' '+value).toEqual(expected.rows.map(row=>row.id));
+  }
+  const combined=lowerSQLiteLivePlan(schema,source,{search:'offline',filters:[{column:'n',operator:'oneOf',value:'[25]'},{column:'name',operator:'notEmpty',value:''}]},{},{textOrder:'binary',offlineSearch:true});
+  if(!combined.supported)throw Error(combined.reason);expect((await f.predictions.page('s',combined.plan)).rows.map(row=>row.id)).toEqual(['new']);
  }finally{f.sql.close();}
 });

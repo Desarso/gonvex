@@ -2536,3 +2536,21 @@ describe('native retained Live Query membership',()=>{
   expect(client.memoryCounters().replicaRows).toBe(0);expect(client.budgets().find(value=>value.name==='browser-live-memberships')?.bytes).toBe(0);client.close();
  });
 });
+
+it('renders a known native entity immediately while its background owner read is pending',async()=>{
+ const {SQLiteBrowserClient}=await import('@gonvex/client/sqlite/browser');
+ const row={_id:'cached-task',id:7,name:'Cached editable task'};let block=false;
+ const broker={subscribeChanges:()=>()=>{},stats:()=>({ownerEpoch:1}),close(){},async request(_op:string,input:any){
+  if(input.method==='connect')return {connection:'native',identityKey:'identity'};
+  if(input.method==='controls')return {tokens:[],status:{isWebSocketConnected:false},session:'restored',failure:null};
+  if(input.method==='entities'){if(block)return new Promise(()=>{});return {generation:{epoch:1,sequence:1},rows:input.ids.map((id:string)=>({id,value:row}))};}
+  return null;
+ }};
+ const client=new SQLiteBrowserClient('ws://private.test/ws',{broker:broker as any});
+ const wrapper=({children}:{children:ReactNode})=><GonvexProvider client={client}>{children}</GonvexProvider>;
+ const hook=renderHook(()=>useEntity('tasks',row._id),{wrapper});
+ await act(async()=>{await vi.waitFor(()=>expect(hook.result.current).toEqual(row));});
+ block=true;act(()=>client.localReplica.refresh());
+ expect(hook.result.current).toEqual(row);
+ hook.unmount();client.close();
+});

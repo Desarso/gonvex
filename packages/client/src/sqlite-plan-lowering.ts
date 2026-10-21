@@ -4,7 +4,7 @@ import { sqlitePayloadBytes } from './sqlite-typed-engine.js';
 import { compileSQLiteTypedPage, type SQLiteBinding, type SQLitePagePlan, type SQLitePredicate } from './sqlite-typed-query.js';
 import type { SQLiteTypedSchema } from './sqlite-typed-schema.js';
 
-type Lowered = { supported: true; plan: SQLitePagePlan; offset: number } | { supported: false; reason: string };
+type Lowered = { supported: true; plan: SQLitePagePlan; offset: number; partialSearch?:boolean } | { supported: false; reason: string };
 class Unsupported extends Error {}
 const unsupported: (reason: string) => never = (reason) => { throw new Unsupported(reason); };
 
@@ -14,7 +14,7 @@ const unsupported: (reason: string) => never = (reason) => { throw new Unsupport
  * The C/binary text contract must be supplied explicitly, since localeCompare
  * and an arbitrary PostgreSQL locale are not interchangeable with BINARY. */
 export function lowerSQLiteLivePlan(schema: SQLiteTypedSchema, source: LiveQueryPlan, args: Record<string, JsonValue>,
-  context: Readonly<Record<string, JsonValue>>, contract: { textOrder?: 'binary' } = {}): Lowered {
+  context: Readonly<Record<string, JsonValue>>, contract: { textOrder?: 'binary'; offlineSearch?:boolean } = {}): Lowered {
   sqlitePayloadBytes({ source, args, context, contract }, 65536);
   try {
     if (source.serverOnly) unsupported('serverOnly');
@@ -23,15 +23,19 @@ export function lowerSQLiteLivePlan(schema: SQLiteTypedSchema, source: LiveQuery
     if (!source.window || !source.sort) unsupported('unwindowedPlan');
     // These need generated materialized reference/search columns and matching
     // native predicate contracts; do not accidentally query a truncated corpus.
-    if (source.search?.sources?.length && String(args[source.search.argument]??'').trim()) unsupported('searchSources');
+    if (source.search?.sources?.length && String(args[source.search.argument]??'').trim()&&!contract.offlineSearch) unsupported('searchSources');
     const filters:SQLitePredicate[]=[];
     if(source.filters&&args[source.filters.argument]!=null&&args[source.filters.argument]!==''){
       const requested=args[source.filters.argument];if(!Array.isArray(requested))unsupported('structuredFilters');
       for(const item of requested as JsonValue[]){
         if(!item||typeof item!=='object'||Array.isArray(item))unsupported('structuredFilters');
         const filter=item as Record<string,JsonValue>,column=String(filter.column??''),operator=String(filter.operator??'');
-        if(!source.filters.allowedColumns.includes(column)||!['empty','notEmpty'].includes(operator))unsupported('structuredFilters');
+        if(!source.filters.allowedColumns.includes(column)||!source.filters.allowedOperators.includes(operator as any))unsupported('structuredFilters');
         const shape=table.fields[column];if(!shape)unsupported('structuredFilters');
+        if(!['empty','notEmpty'].includes(operator)){
+          if(typeof filter.value!=='string'||filter.valueTo!==undefined&&typeof filter.valueTo!=='string'||shape.kind==='json')unsupported('structuredFilters');
+          filters.push({op:'structuredFilter',field:column,operator:operator as import('./query-expression.js').FilterOperator,value:filter.value as string,...(filter.valueTo!==undefined?{valueTo:filter.valueTo as string}:{})});continue;
+        }
         const empty:SQLitePredicate=shape.kind==='text'?{op:'or',children:[{op:'eq',field:column,value:null},{op:'eq',field:column,value:''}]}:{op:'eq',field:column,value:null};
         filters.push(operator==='empty'?empty:{op:'not',child:empty});
       }
@@ -82,18 +86,19 @@ export function lowerSQLiteLivePlan(schema: SQLiteTypedSchema, source: LiveQuery
     if (fields.some(field => source.index?.referenceFields?.[field])) unsupported('referenceSortKeys');
     if (fields.some(field => table!.fields[field]?.kind === 'text') && contract.textOrder !== 'binary') unsupported('textOrderContract');
     const search = source.search ? String(args[source.search.argument] ?? '').trim() : '';
-    if (search && source.search?.booleanTerms) unsupported('booleanSearch');
+    if (search && source.search?.booleanTerms&&!contract.offlineSearch) unsupported('booleanSearch');
+    if(search&&contract.offlineSearch){const normalized=search.toLowerCase(),separator=source.search?.booleanTerms&&normalized.includes('$and')?'$and':source.search?.booleanTerms&&normalized.includes('$or')?'$or':'';const columns=source.search!.offlineColumns??source.search!.columns;filters.push({op:separator==='$or'?'or':'and',children:(separator?normalized.split(separator):[normalized]).map(term=>term.trim()).filter(Boolean).map(term=>({op:'containsText' as const,columns,value:term}))});}
     // Native search columns are a schema contract. Searching extra columns
     // would expose false positives even though visibility itself is unchanged.
-    if (search && JSON.stringify(source.search!.offlineColumns ?? source.search!.columns) !== JSON.stringify(table!.search)) unsupported('searchColumns');
+    if (search && !contract.offlineSearch && JSON.stringify(source.search!.offlineColumns ?? source.search!.columns) !== JSON.stringify(table!.search)) unsupported('searchColumns');
     const requestedLimit = liveQueryNonNegativeInteger(args[source.window!.limitArgument], source.window!.defaultLimit);
     const plan: SQLitePagePlan = { table: source.table,
       ...((source.where||filters.length)?{where:{op:'and' as const,children:[...(source.where?[expression(source.where)]:[]),...filters]}}:{}),
       order: fields.map(field => ({ field, direction })),
       limit: Math.min(requestedLimit || source.window!.defaultLimit, source.window!.maxLimit, 256),
-      ...(search ? { search } : {}), ...(source.columns ? { select: source.columns } : {}), ...contract };
+      ...(search&&!contract.offlineSearch ? { search } : {}), ...(source.columns ? { select: source.columns } : {}), ...(contract.textOrder?{textOrder:contract.textOrder}:{}) };
     compileSQLiteTypedPage(schema, 'lowering-validation', plan);
-    return { supported: true, plan, offset: liveQueryNonNegativeInteger(args[source.window!.offsetArgument], 0) };
+    return { supported: true, plan,...(search&&source.search?.sources?.length?{partialSearch:true}:{}), offset: liveQueryNonNegativeInteger(args[source.window!.offsetArgument], 0) };
   } catch (error) {
     if (error instanceof Unsupported) return { supported: false, reason: error.message };
     if (error instanceof TypeError || error instanceof RangeError) return { supported: false, reason: 'typedPlanMismatch' };

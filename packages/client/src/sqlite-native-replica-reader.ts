@@ -8,8 +8,8 @@ import {fail,pageBudgetError,sqlitePayloadBytes} from './sqlite-admission.js';
 export type SQLiteEntitySlot={id:string;value:ReplicaRow|null};
 export type SQLiteNativeWindowRead={scope:string;signature:string;generation?:string;offset?:number;limit?:number;expected?:SQLiteCanonicalGeneration};
 export type SQLiteNativeWindowResult={generation:SQLiteCanonicalGeneration;window:{generation:string;header:SQLiteWindowHeader;total:number};offset:number;nextOffset:number|null;rows:SQLiteEntitySlot[]};
-export type SQLiteNativeEntityRead={scope:string;entity:string;ids:readonly string[];expected?:SQLiteCanonicalGeneration};
-export type SQLiteNativeEntityResult={generation:SQLiteCanonicalGeneration;rows:SQLiteEntitySlot[]};
+export type SQLiteNativeEntityRead={scope:string;entity:string;ids:readonly string[];offset?:number;expected?:SQLiteCanonicalGeneration};
+export type SQLiteNativeEntityResult={generation:SQLiteCanonicalGeneration;rows:SQLiteEntitySlot[];offset?:number;nextOffset?:number|null};
 
 /** The owner reads membership and authoritative values under one transaction.
  * Only this bounded page crosses the broker. Tombstones retain their positions
@@ -37,10 +37,11 @@ export class SQLiteNativeReplicaReader {
  async entities(input:SQLiteNativeEntityRead):Promise<SQLiteNativeEntityResult>{
   sqlitePayloadBytes(input,32768);this.scope(input.scope);
   if(!Array.isArray(input.ids)||input.ids.length>128||input.ids.some(id=>typeof id!=='string'||!id||id.length>1024)||typeof input.entity!=='string'||!Object.hasOwn(this.engine.schema,input.entity))throw new TypeError('Invalid bounded entity request');
+  const offset=input.offset??0;if(!Number.isSafeInteger(offset)||offset<0||offset>input.ids.length||offset>0&&!input.expected)throw new TypeError('Entity continuation requires its generation');
   await this.ready();let result!:SQLiteNativeEntityResult;
   await this.db.withTransactionAsync(async()=>{
    const generation=await this.generation(input.expected);
-   result={generation,rows:await this.values(input.scope,input.entity,input.ids)};sqlitePayloadBytes(result,131072);
+   let take=input.ids.length-offset;for(;;){try{result={generation,offset,nextOffset:offset+take<input.ids.length?offset+take:null,rows:await this.values(input.scope,input.entity,input.ids.slice(offset,offset+take))};sqlitePayloadBytes(result,131072);break;}catch(error){if(take<=1||!pageBudgetError(error))throw error;take=Math.max(1,Math.floor(take/2));}}
   });return result;
  }
  async window(input:SQLiteNativeWindowRead):Promise<SQLiteNativeWindowResult|undefined>{

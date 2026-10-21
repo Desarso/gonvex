@@ -61,3 +61,12 @@ it('soaks wide staged generations without whole-page decode or retained old gene
  }
  expect(await f.engine.integrity()).toBe('ok');
 });
+
+it('chunks live updates larger than the parsed-payload cap while preserving atomic publication',async()=>{
+ const columns=Array.from({length:52},(_,n)=>'column_'+n),schema:SQLiteTypedSchema={tasks:{key:'id',fields:{id:{kind:'text'},...Object.fromEntries(columns.map(name=>[name,{kind:'text' as const}]))},indexes:[]}},source:FunctionReference={...ref,live:{...ref.live!,plan:{columns:['id',...columns]} as any}};
+ const rows=Array.from({length:80},(_,n)=>({id:String(n),...Object.fromEntries(columns.map(name=>[name,null]))}));
+ expect(()=>sqlitePayloadBytes({result:{page:rows,total:100000},subscriptionRevision:{epoch:'e',sequence:2}},131072)).toThrow('budget');
+ const f=await fixture(schema,source);await f.stage(2,rows);expect(await f.publish(2)).toBe(1);
+ const seen:string[]=[];let offset=0;let generation:string|undefined;for(;;){const page=await f.reader.window({scope:'visible',signature:'grid',limit:10,offset,...(generation?{generation}:{})});if(!page)throw Error('Missing committed live page');generation=page.window.generation;seen.push(...page.rows.map(row=>row.id));if(page.nextOffset===null)break;offset=page.nextOffset;}
+ expect(seen).toEqual(rows.map(row=>row.id));expect(await f.engine.integrity()).toBe('ok');
+});

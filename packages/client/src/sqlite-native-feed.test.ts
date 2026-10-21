@@ -519,3 +519,16 @@ it('soaks repeated reload-style control bursts beyond active slots without leaki
  }
  expect(budget.stats().refusals).toBe(0);budget.close();
 },30000);
+
+it('settles a mixed search-resubscription burst above300 controls while credited binary pages retain independent slots',async()=>{
+ const budget=new SQLiteTransientBudget(2097152,128);
+ const f=await fixture({reserve:bytes=>budget.reserve(bytes),reserveSnapshot:bytes=>budget.hold(bytes),acquire:bytes=>budget.acquire(bytes)});
+ await f.start();await f.append(rows,0,true);
+ for(let n=0;n<305;n++)f.feed.frame({type:'replica.watermark',revision:10},1);
+ await f.ready();await f.feed.assertReadable();
+ await vi.waitFor(()=>expect(budget.stats()).toMatchObject({bytes:0,entries:0,refusals:0}));
+ expect(f.failures).toEqual([]);expect(f.sends).toHaveLength(1);
+ expect(f.feed.stats().binaryFrames).toBe(1);expect(f.feed.stats().controlKinds['replica.watermark']).toBe(305);
+ expect((await f.canonical.loadEntityRows('visible','tasks',['a','b'])).map(row=>row.id)).toEqual(['a','b']);
+ budget.close();
+},30000);

@@ -18,6 +18,9 @@ type ControlBatch={state:State;frames:ServerMessage[];admissions:Promise<unknown
 type State={stream:string;generation:number;scope:string;epoch:string;cursorEpoch?:string;logicalScope:string;gate:Promise<void>;ingress:SQLiteNativeIngress;admission?:number;closed:boolean;watermark?:number};
 type Options={owner:SQLiteOwnerProgramContext;sessions:SQLiteWorkerSessions;connection:string;artifactHash:string;
  reserve?(bytes:number):()=>void;
+ /** Binary pages already own bounded protocol credit and must not consume
+  * active control slots needed to release their preceding gates. */
+ reserveSnapshot?(bytes:number):()=>void;
  acquire?(bytes:number):Promise<()=>void>;
  sourceReady?(id:string):void;
  previewStaging?(source:SQLiteFeedSource,snapshot:string):Promise<(()=>void)|undefined>;
@@ -42,6 +45,8 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
  private state?:State;
  private pendingControls?:ControlBatch;
  private activeControls?:{state:State;after:Map<string|symbol,()=>void>};
+ private readonly controlKinds=new Map<string,number>();private readonly sourceControlCounts=new Map<string,number>();private binaryFrames=0;
+ private countControl(message:ServerMessage){const kind=this.controlKinds.has(message.type)||this.controlKinds.size<32?message.type:'other';this.controlKinds.set(kind,(this.controlKinds.get(kind)??0)+1);const id=(message as any).id;if(typeof id==='string'&&this.sources.has(id))this.sourceControlCounts.set(id,(this.sourceControlCounts.get(id)??0)+1);}
  private registryPeakBytes=0;private registryPeakEntries=0;private closePeakBytes=0;
  private observeRegistry(){this.registryPeakBytes=Math.max(this.registryPeakBytes,this.sourceBytes+this.startBytes+this.closingBytes);this.registryPeakEntries=Math.max(this.registryPeakEntries,this.sources.size);this.closePeakBytes=Math.max(this.closePeakBytes,this.closingBytes);}
  private queued=0;private queuedBytes=0;private authorityDepth=0;
@@ -70,7 +75,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
   // durable cancellation record or later cancellation-GC transaction.
   if(await this.options.owner.database.getFirstAsync('SELECT 1 FROM gv_deferred_replica_frames WHERE scope=? AND signature=? LIMIT 1',scope,key))await this.deferred.cancel(scope,key);
  }
- private removeSource(id:string){const source=this.sources.get(id);if(!source)return;this.sources.delete(id);if(source.start)this.startBytes-=sqlitePayloadBytes(source.start,16384);if(source.closing){clearTimeout(source.closing.timer);this.closingBytes-=512;}this.sourceBytes-=source.bytes;const state=this.state;if(state)void this.initialized.then(()=>this.options.owner.runOwner(16384,()=>this.retireDeferred(state.scope,source.deferredKey))).catch(()=>{});}
+ private removeSource(id:string){const source=this.sources.get(id);if(!source)return;this.sources.delete(id);this.sourceControlCounts.delete(id);if(source.start)this.startBytes-=sqlitePayloadBytes(source.start,16384);if(source.closing){clearTimeout(source.closing.timer);this.closingBytes-=512;}this.sourceBytes-=source.bytes;const state=this.state;if(state)void this.initialized.then(()=>this.options.owner.runOwner(16384,()=>this.retireDeferred(state.scope,source.deferredKey))).catch(()=>{});}
  unregister(id:string){if(this.state&&!this.state.closed)fail('FENCED','Close an online source through its protocol acknowledgement');this.removeSource(id);}
  closeSource(id:string):Promise<void>{
   const source=this.source(id);if(source.closing)return source.closing.promise;const state=this.state;if(!state||state.closed){this.removeSource(id);return Promise.resolve();}this.check(state);
@@ -86,7 +91,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
   this.stop();if(!input.directive){await this.options.sessions.activate(this.options.connection,input,isCurrent);return;}
   if(input.capabilities.replicaNativeRows!==1)throw Object.assign(Error('Server requires the legacy replica adapter'),{code:'UNSUPPORTED'});
   const {owner}=this.options;let state!:State;
-  const ingress=new SQLiteNativeIngress({database:owner.database,snapshots:owner.snapshots,scope:input.directive.visibilityScope,reserve:this.options.reserve,
+  const ingress=new SQLiteNativeIngress({database:owner.database,snapshots:owner.snapshots,scope:input.directive.visibilityScope,reserve:this.options.reserveSnapshot??this.options.reserve,
    runOwner:async run=>{
     let prepared:Array<{source:Source;start:Start}>=[];
     const result=await this.run(state,524288,async()=>{
@@ -125,9 +130,9 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
   state={stream:crypto.randomUUID(),generation:input.connectionGeneration,scope:input.directive.visibilityScope,epoch:input.directive.epoch,logicalScope:input.directive.scope,gate:Promise.resolve(),ingress,closed:false};this.state=state;
   state.gate=(async()=>{await this.initialized;const admitted=await this.options.sessions.activate(this.options.connection,input,()=>this.state===state&&!state.closed&&isCurrent());if(!admitted)fail('FENCED','Native feed has no tenant admission');const current=this.options.sessions.frameAdmission(this.options.connection,state.generation);state.admission=current.token;this.check(state);})();void state.gate.catch(()=>{});await state.gate;
  }
- binary(frame:ArrayBuffer,generation:number){this.flushControls();const state=this.state;if(!state||state.generation!==generation||state.closed)fail('FENCED','Binary frame has no native session');void state.ingress.accept(frame,state.gate).catch(error=>this.reject(state,error));}
+ binary(frame:ArrayBuffer,generation:number){this.binaryFrames++;this.flushControls();const state=this.state;if(!state||state.generation!==generation||state.closed)fail('FENCED','Binary frame has no native session');void state.ingress.accept(frame,state.gate).catch(error=>this.reject(state,error));}
  frame(message:ServerMessage,generation:number){
-  if(!message.type.startsWith('replica.'))return false;
+  if(!message.type.startsWith('replica.'))return false;this.countControl(message);
   const state=this.state;if(!state||state.generation!==generation||state.closed)fail('FENCED','Control frame has no native session');
   const bytes=sqlitePayloadBytes(message,262144);// One certificate per admitted source plus bounded protocol controls.
   if(this.queued>=320||this.queuedBytes+bytes>2097152)fail('BUDGET','Native control queue exceeded budget');
@@ -362,5 +367,5 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
  disconnected(){this.stop();this.options.sessions.disconnected(this.options.connection);}
  failed(error:unknown){this.stop();this.options.failed(error);}
  close(){this.stop();this.sources.clear();this.sourceBytes=0;this.startBytes=0;this.closingBytes=0;}
- stats(){this.observeRegistry();return {registryPeakBytes:this.registryPeakBytes,registryPeakEntries:this.registryPeakEntries,closePeakBytes:this.closePeakBytes,sources:this.sources.size,opening:[...this.sources.values()].filter(source=>source.opening).length,watermark:this.state?.watermark,sourceBytes:this.sourceBytes+this.startBytes+this.closingBytes,queued:this.queued,queuedBytes:this.queuedBytes,ingress:this.state?.ingress.stats()};}
+ stats(){this.observeRegistry();return {binaryFrames:this.binaryFrames,controlKinds:Object.fromEntries(this.controlKinds),sourceControlCounts:[...this.sourceControlCounts].map(([id,frames])=>({path:this.sources.get(id)?.path,frames})),registryPeakBytes:this.registryPeakBytes,registryPeakEntries:this.registryPeakEntries,closePeakBytes:this.closePeakBytes,sources:this.sources.size,opening:[...this.sources.values()].filter(source=>source.opening).length,watermark:this.state?.watermark,sourceBytes:this.sourceBytes+this.startBytes+this.closingBytes,queued:this.queued,queuedBytes:this.queuedBytes,ingress:this.state?.ingress.stats()};}
 }

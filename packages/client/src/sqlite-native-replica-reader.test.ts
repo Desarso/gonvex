@@ -1,3 +1,4 @@
+import {sqlitePayloadBytes} from './sqlite-admission.js';
 import {DatabaseSync} from 'node:sqlite';
 import {expect,it} from 'vitest';
 import {SQLiteNativeReplicaReader} from './sqlite-native-replica-reader.js';
@@ -60,5 +61,15 @@ it('reads predicted replacements and tombstones through the same bounded window 
   expect((await f.reader.entities({scope:'s',entity:'tasks',ids:['local','1','0']})).rows).toEqual([{id:'local',value:{id:'local',name:'offline'}},{id:'1',value:null},{id:'0',value:{id:'0',name:'predicted'}}]);
   expect((await f.canonical.loadEntityRows('s','tasks',['0']))[0].row.name).toBe('value');
   await predictions.reset('s');expect((await f.reader.entities({scope:'s',entity:'tasks',ids:['0','1','local']})).rows.map(row=>row.value?.name??null)).toEqual(['value','value',null]);
+ }finally{f.sql.close();}
+});
+
+it('continues byte-bounded wide entity hydration without skipping IDs or losing its generation',async()=>{
+ const f=await fixture(128,'wide'.repeat(1500));try{
+  const ids=Array.from({length:128},(_,n)=>String(n)),seen:string[]=[];let offset=0,generation:any;
+  for(;;){const page=await f.reader.entities({scope:'s',entity:'tasks',ids,offset,...(generation?{expected:generation}:{})});generation??=page.generation;
+   expect(sqlitePayloadBytes(page,131072)).toBeLessThanOrEqual(131072);expect(page.rows.length).toBeLessThan(128);seen.push(...page.rows.map(row=>row.id));
+   if(page.nextOffset===null)break;expect(page.nextOffset).toBeGreaterThan(offset);offset=page.nextOffset!;
+  }expect(seen).toEqual(ids);expect(new Set(seen).size).toBe(128);
  }finally{f.sql.close();}
 });

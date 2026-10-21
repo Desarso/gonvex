@@ -522,3 +522,19 @@ it('surfaces refused replica admission instead of leaving its consumer silently 
  const watch=f.client.watchReplica({path:'taskResources.listTaskUsers'},{taskId:'task'}),stop=watch.onUpdate(()=>{});cleanup.push(()=>{stop();watch.close();});
  await vi.waitFor(()=>expect(()=>watch.localReplicaResult()).toThrow('Native subscription allowance exceeded'));
 });
+
+it('answers offline live search from SQLite predicted rows independently of a truncated renderer page',async()=>{
+ const f=fixture();const ref:any={kind:'query',path:'tasks.search',delivery:'live',live:{entity:'tasks',key:'id',resultPath:['page'],plan:{table:'tasks',key:'id',columns:['id','name'],window:{defaultLimit:50,maxLimit:128,limitArgument:'limit',count:'exact'},sort:{defaultColumn:'id',defaultDirection:'asc',allowedColumns:['id']}}}};
+ f.handler=async input=>{
+  if(input.method==='watchLive')return {signature:'disk-search'};
+  if(input.method==='localLivePage')return {supported:true,complete:true,generation:'disk',rows:[{id:'predicted',name:'offline-created'}],cursor:null,bytes:128,sequence:3};
+  if(input.method==='livePage')throw Error('Offline search must not wait for a server result');
+  if(input.method==='controls')return {tokens:[],status:{isWebSocketConnected:false},authentication:'unavailable',session:'restored',failure:null};
+  if(input.method==='unwatchLive')return null;
+ };
+ const watch=f.client.watchLiveQuery<any>(ref,{search:'offline-created',limit:50});const stop=watch.onUpdate(()=>{});
+ await vi.waitFor(()=>expect(watch.localLiveQueryResult()?.page).toEqual([{id:'predicted',name:'offline-created'}]));
+ expect(f.calls.some(call=>call.input.method==='livePage')).toBe(false);
+ expect(f.client.replicaWindowMembership(f.client.replicaSignature(ref,{search:'offline-created',limit:50}))?.source).toBe('cache');
+ stop();watch.close();
+});
