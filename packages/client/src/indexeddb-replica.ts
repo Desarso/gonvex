@@ -418,6 +418,28 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
       const record=await this.database.windows.get([scope,signature]);
       if(!record || record.deleted)return undefined;
       const window:ReplicaWindow=JSON.parse(record.value);
+      // Large replica windows otherwise issue one IndexedDB get per member.
+      // Scan getAll-backed pages in this same read transaction, retaining only
+      // exact window membership. Small/sparse live windows keep indexed gets.
+      if (window.kind === 'replica' && window.ids.length > 2048) {
+        const wanted = new Set(window.ids);
+        const found = new Map<string, ReplicaRow>();
+        let after: string | undefined;
+        while (found.size < wanted.size) {
+          const page = await this.database.entities.where('[scope+entity+id]')
+            .between(after === undefined ? [scope,window.entity] : [scope,window.entity,after],
+              [scope,window.entity,[]], after === undefined, false)
+            .limit(256).toArray();
+          if (!page.length) break;
+          for (const row of page) if (!row.deleted && wanted.has(row.id))
+            found.set(row.id, JSON.parse(row.value));
+          after = page[page.length - 1]!.id;
+        }
+        return {window,rows:window.ids.flatMap(id => {
+          const row = found.get(id);
+          return row ? [row] : [];
+        })};
+      }
       return {window,rows:(await this.loadEntityRows(scope,window.entity,window.ids)).map(entry=>entry.row)};
     });
   }
