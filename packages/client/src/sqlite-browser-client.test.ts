@@ -489,3 +489,31 @@ it('keeps certified offline rows usable after a transient source-close timeout w
  offline=true;await f.client.pollControls();
  await vi.waitFor(()=>expect(watch.localReplicaState()).toMatchObject({rows:[{id:'a',name:'Certified'}],completeness:'complete',freshness:'offline'}));
 });
+
+
+it('retries a follower storage read timeout without clearing its mounted rows or surfacing a render error',async()=>{
+ const f=fixture();let timeout=false,reads=0;
+ f.handler=async input=>{
+  if(input.method==='replicaPage'){
+   reads++;if(timeout){timeout=false;throw Object.assign(Error('Storage read timed out; retry the read'),{code:'TIMEOUT',outcome:'rejected'});}
+   return {generation:{epoch:1,sequence:reads},rows:[{id:'a',value:{id:'a',name:'Retained'}}],offset:0,nextOffset:null,window:{generation:'w',total:1,header:{completeness:'complete',truncated:false,source:'server'}}};
+  }
+ };
+ const watch=f.client.watchReplica({path:'workspaces.list'}),stop=watch.onUpdate(()=>{});cleanup.push(()=>{stop();watch.close();});
+ await vi.waitFor(()=>expect(watch.localReplicaResult()).toEqual([{id:'a',name:'Retained'}]));
+ timeout=true;f.change();await vi.waitFor(()=>expect(reads).toBeGreaterThanOrEqual(2));
+ expect(()=>watch.localReplicaResult()).not.toThrow();expect(watch.localReplicaResult()).toEqual([{id:'a',name:'Retained'}]);
+ await vi.waitFor(()=>expect(reads).toBeGreaterThanOrEqual(3));expect(watch.localReplicaState()).toMatchObject({completeness:'complete',rows:[{id:'a',name:'Retained'}]});
+});
+
+it('does not retry an unknown reducer commit outcome as though it were a read',async()=>{
+ const f=fixture();let calls=0;f.handler=async input=>{if(input.method==='reducer'){calls++;throw Object.assign(Error('unknown write'),{code:'TIMEOUT',outcome:'unknown'});}};
+ await expect(f.client.invokeReducer({path:'tasks.edit'},{},{commandId:'original',now:100})).rejects.toMatchObject({code:'TIMEOUT',outcome:'unknown'});expect(calls).toBe(1);
+});
+
+
+it('does not resend a completed token response when a retried controls read repeats the request',async()=>{
+ const f=fixture();await f.client.connect();await vi.waitFor(()=>expect(f.responses).toHaveLength(1));const completed=f.responses[0];let tries=0;
+ f.handler=async input=>{if(input.method==='controls'){if(tries++===0)throw Object.assign(Error('read timeout'),{code:'TIMEOUT',outcome:'rejected'});return {tokens:[{id:completed.id,connection:completed.connection,identityKey:completed.identityKey,forceRefreshToken:false}],status:{connected:true},session:'authenticated',failure:null};}};
+ await f.client.pollControls();await new Promise(resolve=>setTimeout(resolve,20));expect(tries).toBeGreaterThanOrEqual(2);expect(f.responses).toHaveLength(1);
+});
