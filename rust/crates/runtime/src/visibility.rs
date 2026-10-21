@@ -1093,6 +1093,26 @@ mod tests {
             &serde_json::json!({"id":"revoked-member"})
         ));
         tx.rollback().await.unwrap();
+
+        // Ordinary member reads still require a currently active row, even
+        // when the declared table visibility itself is public.
+        let public: VisibilityPlan = serde_json::from_value(serde_json::json!({
+            "table":"members", "key":"id", "where":{"operator":"public"}
+        }))
+        .unwrap();
+        let mut tx = control
+            .begin_tenant_transaction(&route, false)
+            .await
+            .unwrap();
+        let ordinary = resolve(&mut tx, &session, &public, 8).await.unwrap();
+        assert!(!ordinary.ephemeral_member);
+        assert_read_visibility(&mut tx, &public, &ordinary, true).await;
+        sqlx::query("UPDATE members SET status='revoked'")
+            .execute(&mut **tx.transaction())
+            .await
+            .unwrap();
+        assert_read_visibility(&mut tx, &public, &ordinary, false).await;
+        tx.rollback().await.unwrap();
         fixture.close().await;
         pools.close().await;
         sqlx::query(&format!(r#"DROP SCHEMA "{schema}" CASCADE"#))
@@ -1126,6 +1146,55 @@ mod tests {
                 vec![]
             },
             "compiled SQL visibility must match the admitted principal and row predicate"
+        );
+
+        assert_read_visibility(tx, plan, resolved, expected).await;
+    }
+
+    async fn assert_read_visibility(
+        tx: &mut TenantTransaction,
+        plan: &VisibilityPlan,
+        resolved: &ResolvedVisibility,
+        expected: bool,
+    ) {
+        let expected_rows = if expected {
+            vec![serde_json::json!({"id":"revoked-member"})]
+        } else {
+            vec![]
+        };
+        let replica = serde_json::from_value(serde_json::json!({
+            "table":"members", "key":"id", "columns":["id"],
+            "orderBy":"id", "orderDirection":"asc", "maxRows":5000
+        }))
+        .unwrap();
+        let (snapshot, truncated) =
+            crate::replica::query_rows(tx, &replica, plan, resolved, &serde_json::json!({}))
+                .await
+                .unwrap();
+        assert!(!truncated);
+        assert_eq!(
+            snapshot, expected_rows,
+            "replica snapshot must preserve verified support admission"
+        );
+
+        let query = serde_json::from_value(serde_json::json!({
+            "table":"members", "key":"id", "columns":["id"]
+        }))
+        .unwrap();
+        let result = crate::live_query::execute_in_transaction(
+            tx,
+            &query,
+            plan,
+            resolved,
+            &serde_json::Map::new(),
+            &BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result,
+            Value::Array(expected_rows),
+            "live query must preserve verified support admission"
         );
     }
 
