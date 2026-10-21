@@ -29,18 +29,18 @@ class Socket {
 }
 const sqlite=await initializePinnedSQLite(),cleanup:Array<()=>Promise<void>>=[];
 afterEach(async()=>{for(const close of cleanup.splice(0))await close();vi.unstubAllGlobals();vi.restoreAllMocks();});
-const typed={tasks:{key:'id',fields:{id:{kind:'text'},n:{kind:'number'}},indexes:[]}} as const;
+const typed={tasks:{key:'id',fields:{id:{kind:'text'},n:{kind:'number'}},indexes:[]},roles:{key:'id',fields:{id:{kind:'text'},n:{kind:'number'}},indexes:[]},taskViews:{key:'id',fields:{id:{kind:'text'},n:{kind:'number'}},indexes:[]}} as const;
 const identity={auth:{account:{id:'account'}},tenant:{id:'tenant'},member:{id:'member',accountId:'account',permissions:{}}};
 const refs:Array<FunctionReference&{localDependencyTables?:string}>=[{kind:'query',path:'__local.tasks',delivery:'replica',replica:{table:'tasks',key:'id',columns:['id','n'],maxRows:1000,maxBytes:1000000}},{kind:'reducer',path:'tasks.increment',localExecution:1,localDependencyTables:'["tasks"]'},{kind:'reducer',path:'tasks.addAll',localExecution:1}];
 const caller=(tabID:string,requestID=crypto.randomUUID()):SQLiteOwnerCaller=>({tabID,requestID,signal:new AbortController().signal});
 const connect={method:'connect',url:'ws://synthetic-private.test/ws',auth:{project:'project',tenant:'tenant',identity:{sub:'provider-account'}}};
 const rowDigest=async(row:{id:string;n:number})=>replicaSumDigest(await replicaRowsHashes([row],'id'));
-async function fixture(autoEager=true,background=false,extraReferences:FunctionReference[]=[]){
+async function fixture(autoEager=true,background=false,extraReferences:FunctionReference[]=[],dependencies?:string[]){
  vi.stubGlobal('indexedDB',new IDBFactory());vi.stubGlobal('IDBKeyRange',IDBKeyRange);vi.stubGlobal('WebSocket',Socket);vi.stubGlobal('postMessage',()=>{});Socket.instances=[];
  const raw=new sqlite.oo1.DB(':memory:'),host=officialSQLiteDatabase(sqlite,raw),db=sqliteOwnerTransactions(host.database),engine=new SQLiteTypedReplicaEngine(db,typed);await engine.open('program');const canonical=sqliteTypedReplicaStorage(db,typed);await canonical.ready();const fence=()=>engine.verifyOwner(),snapshots=new SQLiteSnapshotPages(db,fence,typed),activation=new SQLiteSnapshotActivator(db,canonical,fence,typed),reader=new SQLiteNativeReplicaReader(db,canonical,engine),pendingReader=new SQLitePendingSnapshotReader({database:db,canonical,snapshots,schema:typed,fence});
  let lane=Promise.resolve(),executions=0;const hints:string[]=[],owner={database:db,engine,canonical,snapshots,activation,reader,pendingReader,async notifyTab(tab:string){hints.push(tab);},runOwner<T>(_bytes:number,run:()=>Promise<T>){const next=lane.then(run);lane=next.then(()=>{},()=>{});return next;}} as SQLiteOwnerProgramContext;
  const runtime=new PortableReducerRuntime({schema:{tasks:{key:'id',columns:{id:{type:'text',nullable:false},n:{type:'bigint',nullable:false}}}},artifactHash:'artifact',reducers:{'tasks.increment':reducer({args:schema.any(),result:schema.any(),run:async ctx=>{executions++;const row=await getRow<{id:string;n:number}>(ctx.db,'tasks','id','a');await ctx.db.update('tasks','a',{n:row!.n+1});return row!.n+1;}}),'tasks.addAll':reducer({args:schema.any(),result:schema.any(),run:async ctx=>{const rows=await ctx.db.select<{id:string;n:number}>({table:'tasks'}),n=rows.reduce((total,row)=>total+row.n,0)+1;await ctx.db.update('tasks','a',{n});return n;}})}});
- const program=new SQLiteClientProgram(owner,{artifactHash:'artifact',runtime,references:[...(background?[...refs,{...refs[0]!,path:'__local.backgroundTasks'}]:refs),...extraReferences],collections:autoEager?background?['__local.backgroundTasks','__local.tasks']:['__local.tasks']:[],offlineMaxAgeMs:5000});cleanup.push(async()=>{program.close();await lane;await new Promise(resolve=>setTimeout(resolve,0));raw.close();});
+ const program=new SQLiteClientProgram(owner,{artifactHash:'artifact',runtime,references:[...(background?[...refs,{...refs[0]!,path:'__local.backgroundTasks'}]:refs).map(ref=>dependencies&&ref.path==='tasks.increment'?{...ref,localDependencyTables:JSON.stringify(dependencies)}:ref),...extraReferences],collections:autoEager?background?['__local.backgroundTasks','__local.tasks']:['__local.tasks']:[],offlineMaxAgeMs:5000});cleanup.push(async()=>{program.close();await lane;await new Promise(resolve=>setTimeout(resolve,0));raw.close();});
  const call=(input:unknown,tab='one',request?:string)=>program.call(input,caller(tab,request));
  async function authenticate(withholdFinal=false,setDigest=true,admissionEpoch='e'){
   const response=await call(connect);await call({method:'watchReplica',path:'__local.tasks',args:{}});if(background)await call({method:'watchReplica',path:'__local.backgroundTasks',args:{}});const socket=Socket.instances.at(-1)!;socket.open();await vi.waitFor(async()=>expect((await call({method:'controls'}) as any).tokens).toHaveLength(1));const request=(await call({method:'controls'}) as any).tokens[0];expect(hints).toContain('one');await call({method:'token',response:{...request,token:'opaque'}});await vi.waitFor(()=>expect(socket.sent.some(message=>message.type==='auth')).toBe(true));const auth=socket.sent.find(message=>message.type==='auth');socket.receive({type:'session.ready',capabilities:{replicaNativeRows:1,replicaWatermark:1,replicaResume:1,...(setDigest?{replicaSetDigest:1}:{})}});socket.receive({type:'auth.result',id:auth.id,result:{artifactHash:'artifact',localIdentity:identity,replica:{protocolVersion:1,scope:'tenant',visibilityScope:'visible',epoch:admissionEpoch}}});await vi.waitFor(()=>expect(socket.sent.some(message=>message.type==='replica.open')).toBe(true));
@@ -408,4 +408,24 @@ it('pushes an admission-fenced bounded first page before FULL commit and revokes
   release();await vi.waitFor(()=>expect(socket.sent.filter(message=>message.type==='replica.snapshotAck')).toHaveLength(2));
   expect(previews[1]).toMatchObject({id:previews[0].id,page:null});
  }finally{release();}
+});
+
+
+it('opens only the declared bounded reducer read-set and certifies empty required tables',async()=>{
+ const extra:FunctionReference[]=['roles','taskViews'].map(table=>({kind:'query',path:'__local.'+table,delivery:'replica',replica:{table,key:'id',columns:['id','n'],maxRows:100,maxBytes:65536}}));
+ const dependencies=['tasks','roles','taskViews'],f=await fixture(false,false,extra,dependencies),{socket}=await f.authenticate();
+ expect(socket.sent.filter(m=>m.type==='replica.open').map(m=>m.path)).not.toContain('__local.roles');
+ await f.call({method:'prepareReducer',path:'tasks.increment'});expect(socket.sent.filter(m=>m.type==='replica.open').map(m=>m.path)).not.toContain('__local.roles');
+ await f.call({method:'declareReducerReadSet',path:'tasks.increment'});
+ await vi.waitFor(()=>{for(const table of dependencies)expect(socket.sent.some(m=>m.type==='replica.open'&&m.path==='__local.'+table)).toBe(true);});
+ const empty=replicaSumDigest(await replicaRowsHashes([],'id'));
+ for(const table of ['roles','taskViews']){
+  const open=socket.sent.find(m=>m.type==='replica.open'&&m.path==='__local.'+table),snapshot='prepared-'+table;
+  socket.receive({type:'replica.snapshotStart',id:open.id,snapshotId:snapshot,scope:'tenant',visibilityScope:'visible',cursor:{epoch:'e',revision:1},key:'id',digest:empty,path:open.path});
+  socket.receive(new TextEncoder().encode(JSON.stringify({type:'replica.snapshotEncodedPage',id:open.id,snapshotId:snapshot,scope:'tenant',visibilityScope:'visible',cursor:{epoch:'e',revision:1},key:'id',sequence:0,last:true,canonicalRows:[],digest:empty,path:open.path})).buffer);
+  socket.receive({type:'replica.ready',id:open.id,cursor:{epoch:'e',revision:1},digest:empty});
+ }
+ socket.receive({type:'replica.watermark',revision:1});
+ await vi.waitFor(async()=>{const rows=await f.owner.runOwner(0,()=>f.db.getAllAsync<{entity:string}>("SELECT DISTINCT json_extract(g.header,'$.entity') entity FROM gv_windows w JOIN gv_window_generations g USING(scope,signature,generation) WHERE json_extract(g.header,'$.entityCoverage')='complete' AND json_extract(g.header,'$.completeness')='complete'"));expect(rows.map(r=>r.entity)).toEqual(expect.arrayContaining(dependencies));});
+ socket.close();const receipt:any=await f.call({method:'reducer',path:'tasks.increment',args:{},now:100},'one','prepared-offline');expect(receipt.queuedOnly).toBeUndefined();expect(receipt.result).toBe(2);
 });

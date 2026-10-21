@@ -2248,8 +2248,9 @@ export function useReducer(ref: FunctionReference, options: UseReducerOptions = 
   const client = useGonvexClient();
   useEffect(() => {
     // A mounted action must have its shared body available before link loss.
-    // Native preparation loads code only; it opens no replica subscriptions.
+    // Code loading stays separate from the mounted action's required replica set.
     if (client instanceof SQLiteBrowserClient && ref.localExecution !== 1) return;
+    if(client instanceof SQLiteBrowserClient)void client.declareReducerReadSet(ref).catch(() => undefined);
     void client.prepareReducer?.(ref)?.catch(() => undefined);
   }, [client, ref]);
   const refRef = useRef(ref);
