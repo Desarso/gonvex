@@ -266,3 +266,12 @@ it('forwards follower entity reads with their tab ownership and returns the comp
 it('reports whether a follower reaches the dedicated owner directly or through its page',()=>{
  const broker=client() as any;expect(broker.stats().route).toBe('broadcast-page');broker.port={};expect(broker.stats().route).toBe('shared-router-page');broker.direct={ready:false};expect(broker.stats().directPending).toBe(true);broker.direct.ready=true;expect(broker.stats().route).toBe('direct-worker');broker.generation={};expect(broker.stats().route).toBe('owner-local');
 });
+
+it('does not race a shared-host handshake or elect a page owner after host confirmation',()=>{
+ const broker=client() as any,lock=vi.fn(()=>new Promise(()=>{}));vi.stubGlobal('navigator',{locks:{request:lock}});broker.port={};broker.hubOwns=undefined;
+ try{broker.elect();expect(lock).not.toHaveBeenCalled();broker.hubOwns=true;broker.elect();expect(lock).not.toHaveBeenCalled();broker.hubOwns=false;broker.elect();expect(lock).toHaveBeenCalledOnce();}finally{broker.closed=true;broker.election?.abort();vi.unstubAllGlobals();}
+});
+it('supports broker election in a SharedWorker without a document',()=>{
+ class Channel{onmessage?:Function;postMessage(){}close(){}}const locks=vi.fn(()=>new Promise(()=>{}));vi.stubGlobal('BroadcastChannel',Channel);vi.stubGlobal('document',undefined);vi.stubGlobal('navigator',{locks:{request:locks}});vi.stubGlobal('addEventListener',()=>{});vi.stubGlobal('removeEventListener',()=>{});
+ const broker=new SQLiteReplicaBroker({schemaVersion:'a'.repeat(64),createWorker:()=>{throw Error('Not entered before lock grant');}});try{expect(locks).toHaveBeenCalledOnce();}finally{broker.close();vi.unstubAllGlobals();}
+});

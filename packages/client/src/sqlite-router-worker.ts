@@ -1,3 +1,4 @@
+import {SQLiteReplicaBroker,type SQLiteBrokerOptions} from './sqlite-broker.js';
 import {installSQLiteWasmByteCache} from './sqlite-wasm-bytes.js';
 import {sqliteWorkerProtocol as protocol} from './sqlite-worker-protocol.js';
 import {sqliteRequestBytes} from './sqlite-request-frame.js';
@@ -5,6 +6,12 @@ import {sqliteRequestBytes} from './sqlite-request-frame.js';
 // heartbeat timestamps and one SHA-verified public engine byte buffer. It never
 // imports SQLite, schema, rows or application code.
 installSQLiteWasmByteCache();
+let ownerHost:SQLiteReplicaBroker|undefined;
+/** The SharedWorker owns election and its dedicated OPFS child, independent of any page. */
+export function configureSQLiteRouterOwner(options:Pick<SQLiteBrokerOptions,'createWorker'|'schemaVersion'>){
+ if(ownerHost||!options.createWorker||typeof Worker!=='function'||!navigator.locks)return;
+ ownerHost=new SQLiteReplicaBroker({...options,createWorker:()=>{try{return options.createWorker!();}catch(error){ownerHost?.close();ownerHost=undefined;for(const peer of peers.values())post(peer.port,{type:'pong',ownerHost:false});throw error;}}});
+}
 const peers = new Map<string, { port: MessagePort; seen: number }>();
 const maxPeers = 64;
 let handshakes = 0;
@@ -20,16 +27,17 @@ shared.onconnect = ({ ports: [port] }) => {
     if (!id) {
       if (m?.type !== 'hello' || m.protocol !== protocol || typeof m.tab !== 'string' || m.tab.length > 128 || peers.size >= maxPeers && !peers.has(m.tab)) { finish(); port.close(); return; }
       id = m.tab; peers.get(id!)?.port.close(); peers.set(id!, { port, seen: Date.now() });
-      finish(); post(port, { type: 'pong' }); return;
+      finish(); post(port, { type: 'pong',ownerHost:!!ownerHost }); return;
     }
     const peer = peers.get(id);
     if (!peer || peer.port !== port) { port.close(); return; }
     peer.seen = Date.now();
     if (m?.type === 'bye') { peers.delete(id); port.close(); }
-    else if (m?.type === 'ping') post(port, { type: 'pong' });
+    else if (m?.type === 'ping') post(port, { type: 'pong',ownerHost:!!ownerHost });
     else if (m?.type === 'attach' && typeof m.to === 'string' && m.port === undefined) {
       const target = peers.get(m.to), attached = ports[0];
-      if (target && attached) target.port.postMessage({ type: 'attach', from: id, token: m.token }, [attached]);
+      if(attached&&ownerHost&&m.to===ownerHost.hostedOwnerID)ownerHost.attachHostedFollower(id!,m.token,attached);
+      else if (target && attached) target.port.postMessage({ type: 'attach', from: id, token: m.token }, [attached]);
       else attached?.close();
     }
     else if (m?.type === 'request' && m.protocol === protocol && typeof m.to === 'string') {
@@ -38,7 +46,8 @@ shared.onconnect = ({ ports: [port] }) => {
         sqliteRequestBytes(m.op,m.args,262144);
         const encoded=['bootstrapAppend','snapshotAppendEncoded'].includes(m.op)?m.args?.encoded:undefined;
         const transfer=encoded instanceof Uint8Array&&encoded.buffer instanceof ArrayBuffer?[encoded.buffer]:[];
-        if(target)target.port.postMessage({...m,from:id},transfer);
+        if(ownerHost&&m.to===ownerHost.hostedOwnerID)void ownerHost.routeHostedRequest({...m,from:id});
+        else if(target)target.port.postMessage({...m,from:id},transfer);
       } catch { /* Malformed or disconnected peers retry through the owner path. */ }
     } else if (m?.type === 'reply' && m.protocol === protocol && typeof m.to === 'string') {
       const target = peers.get(m.to); if (target) post(target.port, m);

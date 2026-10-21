@@ -64,6 +64,7 @@ export class SQLiteReplicaBroker {
   private hub?: SharedWorker;
   private port?: MessagePort;
   private lastHubReply = 0;
+  private hubOwns:boolean|undefined;
   private direct?: { port: MessagePort; token: string; ready: boolean; started: number; seen: number };
   private readonly timer: ReturnType<typeof setInterval>;
   private readonly onPageHide = () => this.handoff();
@@ -78,14 +79,17 @@ export class SQLiteReplicaBroker {
     this.connectHub();
     globalThis.addEventListener('pagehide', this.onPageHide);
     globalThis.addEventListener('pageshow', this.onPageShow);
-    document.addEventListener('freeze', this.onFreeze);
-    document.addEventListener('resume', this.onResume);
+    if(typeof document!=='undefined')document.addEventListener('freeze', this.onFreeze);
+    if(typeof document!=='undefined')document.addEventListener('resume', this.onResume);
     this.timer = setInterval(() => this.tick(), 1000);
     if (!navigator.locks) this.fail(error('UNSUPPORTED', 'Web Locks is unavailable'));
-    else {this.elect();this.broadcast({type:'probe'});}
+    else {if(!this.port)this.elect();this.broadcast({type:'probe'});}
   }
   get state() { return this.stateValue; }
-  stats() { return { route:this.generation?'owner-local':this.direct?.ready?'direct-worker':this.port?'shared-router-page':'broadcast-page',directPending:!!this.direct&&!this.direct.ready, state: this.stateValue, adapter:this.generation?.adapter??this.adapter, owner: this.owner?.id, ownerEpoch:this.owner?.epoch, ownsWorker: !!this.generation, pending: this.pending.size, pendingBytes: this.pendingBytes, ownerOperations: this.inflight.size, ownerBytes: this.inflightBytes, listeners:this.changeListeners.size,changeScopes:this.lastChanges.size,changeBytes:this.lastChangeBytes }; }
+  get hostedOwnerID(){return this.tabID;}
+  routeHostedRequest(message:unknown){return this.serve(message);}
+  attachHostedFollower(tab:string,token:string,port:MessagePort){const g=this.generation;if(!g?.ready||token!==g.token){port.close();return;}g.worker.postMessage({type:'attach',tab,token,port},[port]);}
+  stats() { return { ownerHost:typeof document==='undefined'||this.hubOwns?'shared-worker':'page',route:this.generation?'owner-local':this.direct?.ready?'direct-worker':this.port?'shared-router-page':'broadcast-page',directPending:!!this.direct&&!this.direct.ready, state: this.stateValue, adapter:this.generation?.adapter??this.adapter, owner: this.owner?.id, ownerEpoch:this.owner?.epoch, ownsWorker: !!this.generation, pending: this.pending.size, pendingBytes: this.pendingBytes, ownerOperations: this.inflight.size, ownerBytes: this.inflightBytes, listeners:this.changeListeners.size,changeScopes:this.lastChanges.size,changeBytes:this.lastChangeBytes }; }
   private setState(state: SQLiteBrokerState) {
     if (state === this.stateValue) return;
     this.stateValue = state;
@@ -99,7 +103,7 @@ export class SQLiteReplicaBroker {
       this.port = this.hub.port;
       this.port.onmessage = event => {
         const m = event.data;
-        if (m.type === 'pong') { this.lastHubReply = Date.now(); return; }
+        if (m.type === 'pong') {this.lastHubReply=Date.now();this.hubOwns=m.ownerHost===true;if(!this.hubOwns)this.elect();return;}
         if (m.type === 'attach' && event.ports[0]) {
           const g = this.generation;
           if (g?.ready && m.token === g.token) g.worker.postMessage({ type: 'attach', tab: m.from, token: g.token, port: event.ports[0] }, [event.ports[0]]);
@@ -109,7 +113,7 @@ export class SQLiteReplicaBroker {
       };
       this.port.start(); this.lastHubReply = Date.now();
       this.port.postMessage({ type: 'hello', tab: this.tabID, protocol });
-      this.hub.onerror = () => { this.port?.close(); this.port = undefined; };
+      this.hub.onerror = () => {this.port?.close();this.port=undefined;this.hubOwns=false;this.elect();};
     } catch { this.port = undefined; }
   }
   private broadcast(message: object) { if (!this.closed) this.control.postMessage({ ...message, protocol }); }
@@ -208,7 +212,7 @@ export class SQLiteReplicaBroker {
     if(!this.owner&&!this.generation)this.broadcast({type:'probe'});
     this.sendHeartbeat();
     if (this.port) {
-      if (Date.now() - this.lastHubReply > 6000) { this.port.close(); this.port = undefined; }
+      if (Date.now() - this.lastHubReply > 6000) { this.port.close(); this.port = undefined;this.hubOwns=false;this.elect(); }
       else this.port.postMessage({ type: 'ping' });
     }
     if (this.generation) {
@@ -220,7 +224,7 @@ export class SQLiteReplicaBroker {
     for (const call of this.pending.values()) if (Date.now() - call.lastSent > 2000) this.send(call);
   }
   private elect(steal = false) {
-    if (this.closed || this.failed || this.election && !steal) return;
+    if ((this.port&&this.hubOwns!==false)||this.closed || this.failed || this.election && !steal) return;
     this.election?.abort();
     const controller = this.election = new AbortController();
     const options: LockOptions = steal ? { mode: 'exclusive', steal: true } : { mode: 'exclusive', signal: controller.signal };
@@ -415,7 +419,7 @@ export class SQLiteReplicaBroker {
     this.direct?.port.postMessage({ type: 'bye' }); this.direct?.port.close();
     this.port?.postMessage({ type: 'bye' }); this.port?.close(); this.control.close(); this.replies.close();
     globalThis.removeEventListener('pagehide', this.onPageHide); globalThis.removeEventListener('pageshow', this.onPageShow);
-    document.removeEventListener('freeze', this.onFreeze); document.removeEventListener('resume', this.onResume);
+    if(typeof document!=='undefined'){document.removeEventListener('freeze', this.onFreeze);document.removeEventListener('resume', this.onResume);}
     this.setState('closed');
   }
 }
