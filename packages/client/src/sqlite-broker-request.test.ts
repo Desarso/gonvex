@@ -5,7 +5,7 @@ import { SQLiteReplicaBroker } from './sqlite-broker.js';
 // replaced at its boundary; real multi-tab tests cover the actual transports.
 function client() {
   const broker = Object.assign(Object.create(SQLiteReplicaBroker.prototype), {
-    closed: false, failed: false,cooldown:0,tenantAdmission:false,admittedPeers:new Set(), changeListeners:new Set(),lastChanges:new Map(),lastChangeBytes:0, pending: new Map(), inflight: new Map(), inflightBytes: 0, pendingBytes: 0, serial: 0, tabID: 'test',
+    closed: false, failed: false,cooldown:0,handoffTimeline:{},options:{},broadcast:vi.fn(),tenantAdmission:false,admittedPeers:new Set(), changeListeners:new Set(),lastChanges:new Map(),lastChangeBytes:0, pending: new Map(), inflight: new Map(), inflightBytes: 0, pendingBytes: 0, serial: 0, tabID: 'test',
     send: vi.fn((call: any) => {
       clearTimeout(call.timer); broker.pending.delete(call.id); broker.pendingBytes -= call.bytes;
       call.resolve({ accepted: call.op, args: call.args });
