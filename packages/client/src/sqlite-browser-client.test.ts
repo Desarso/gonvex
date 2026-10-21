@@ -460,3 +460,19 @@ it('publishes a fenced partial page while the canonical RPC is blocked and revok
  release({generation:{epoch:1,sequence:2},rows:[{id:'a',value:{id:'a',name:'Committed'}}],nextOffset:null,window:{total:1,generation:'g',header:{source:'server',completeness:'complete',truncated:false}}});
  await vi.waitFor(()=>expect(watch.localReplicaState()).toMatchObject({rows:[{name:'Committed'}],completeness:'complete',isUpToDate:true}));
 });
+
+
+it('revokes complete empty collection status when owner admission fails and restores it only after recovery',async()=>{
+ const f=fixture();let refused=false;
+ f.handler=async input=>{
+  if(input.method==='controls')return {tokens:[],status:{connected:true},session:'authenticated',failure:refused?{code:'BUDGET',message:'Native source header registry exceeded budget'}:null};
+  if(input.method==='replicaPage')return {generation:{epoch:1,sequence:1},rows:[],offset:0,nextOffset:null,window:{generation:'empty',total:0,header:{completeness:'complete',truncated:false,source:'server'}}};
+ };
+ const watch=f.client.watchReplica({path:'workspaces.list'}),stop=watch.onUpdate(()=>{});cleanup.push(()=>{stop();watch.close();});
+ await vi.waitFor(()=>expect(watch.localReplicaState()).toMatchObject({rows:[],completeness:'complete',isUpToDate:true}));
+ refused=true;await f.client.pollControls();
+ await vi.waitFor(()=>expect(watch.localReplicaState()).toMatchObject({rows:[],completeness:'partial',isUpToDate:false}));
+ expect(f.client.replicaCollectionState({path:'workspaces.list'})).toMatchObject({completeness:'partial',isUpToDate:false});
+ refused=false;await f.client.pollControls();
+ await vi.waitFor(()=>expect(watch.localReplicaState()).toMatchObject({rows:[],completeness:'complete',isUpToDate:true}));
+});
