@@ -55,7 +55,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
  private readonly references=new Map<string,NativeFunctionReference>();private readonly connections=new Map<string,Connection>();private readonly tabs=new Map<string,string>();
  private readonly maintenance:SQLiteOwnerMaintenance;private readonly legacy:SQLiteLegacyBootstrap;
  private readonly ledger=new ByteLedger(21495808);private readonly transient=new SQLiteTransientBudget();private readonly transport=new SQLiteTransientBudget(2097152,256);private readonly transportAuth=new SQLiteTransientBudget(524288,8);private readonly catalogBytes:number;
- private readonly entityReadTimings:Array<{id:string;entity:string;count:number;received:number;sqlStart?:number;sqlEnd?:number;reply?:number}>=[];
+ private readonly entityReadTimings:Array<{id:string;entity:string;ids:string[];count:number;received:number;sqlStart?:number;sqlEnd?:number;reply?:number}>=[];
  private connecting=Promise.resolve();private closed=false;
  constructor(private readonly owner:SQLiteOwnerProgramContext,private readonly binding:Binding){
   text(binding.artifactHash,256);sqlitePayloadBytes(binding.clientContract??{},65536);this.catalogBytes=sqlitePayloadBytes({references:binding.references,collections:binding.collections},2097152)+binding.references.length*64;if(this.catalogBytes>2097152)fail('BUDGET','Generated native function catalog exceeds its metadata allowance');if(binding.references.length>4096||binding.collections.length>4096)fail('BUDGET','Generated native function catalog exceeds budget');
@@ -385,7 +385,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
    case 'watchReplica':{if(connection.controlOnly||connection.public)fail('INVALID_ROW','This connection does not own tenant replica collections');const source=await this.addSource(connection,this.ref(input.path,'query'),input.args??{},caller.tabID,false,input.lease??'default');return {id:source.id,signature:source.signature};}
    case 'unwatchReplica':{text(input.signature,128);const source=connection.sources.get(input.signature);if(source){this.releaseSourceInterest(connection,source,caller.tabID,input.lease??'default');if(!source.tabs.size&&!source.eager)this.deferSourceClose(connection,source);}return null;}
    case 'entities':{
-    const timing={id:caller.requestID,entity:input.entity,count:input.ids.length,received:Date.now(),sqlStart:undefined as number|undefined,sqlEnd:undefined as number|undefined,reply:undefined as number|undefined};this.entityReadTimings.push(timing);if(this.entityReadTimings.length>64)this.entityReadTimings.shift();
+    const timing={id:caller.requestID,entity:input.entity,ids:[...input.ids],count:input.ids.length,received:Date.now(),sqlStart:undefined as number|undefined,sqlEnd:undefined as number|undefined,reply:undefined as number|undefined};this.entityReadTimings.push(timing);if(this.entityReadTimings.length>64)this.entityReadTimings.shift();
     const admission=this.checkCaller(caller,connection);try{return await this.readCommitted(connection,admission,caller,async()=>{timing.sqlStart=Date.now();this.checkCachedCaller(caller,connection,admission.readGeneration);const result=await this.owner.reader.entities({scope:admission.scope,entity:input.entity,ids:input.ids,offset:input.offset,expected:input.expected});timing.sqlEnd=Date.now();this.checkCachedCaller(caller,connection,admission.readGeneration);return result;});}finally{timing.reply=Date.now();}
    }
    case 'replicaPendingPage':{
