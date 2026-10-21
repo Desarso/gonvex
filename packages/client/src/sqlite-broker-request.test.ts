@@ -251,3 +251,14 @@ it('delivers repeated credited preview hints at one committed generation without
  expect(calls).toEqual(['@preview','@preview']);
  broker.receiveControl({...hint,scope:'tasks',sequence:5,notification:3});expect(calls).toEqual(['@preview','@preview','tasks']);
 });
+
+it('forwards follower entity reads with their tab ownership and returns the complete row',async()=>{
+ const broker=client() as any,forwarded:any[]=[],row={id:'task',name:'Follower task'};
+ broker.generation={ready:true,token:'owner',worker:{postMessage(message:any){forwarded.push(message);queueMicrotask(()=>{const pending=broker.workerCalls.get(message.id);broker.workerCalls.delete(message.id);pending.resolve({generation:{epoch:1,sequence:3},rows:[{id:'task',value:row}]});});}}};
+ broker.workerCalls=new Map();broker.reply=vi.fn();
+ for(let n=0;n<5;n++)await broker.serve({type:'request',protocol:2,token:'owner',from:'follower',id:'follower:r:'+n,op:'clientCall',args:{method:'entities',entity:'tasks',ids:['task']}});
+ expect(forwarded).toHaveLength(5);expect(forwarded.every(message=>message.tabID==='follower')).toBe(true);
+ expect(new Set(forwarded.map(message=>message.requestID)).size).toBe(5);
+ expect(broker.reply).toHaveBeenCalledTimes(5);
+ for(const call of broker.reply.mock.calls)expect(call[1]).toEqual({generation:{epoch:1,sequence:3},rows:[{id:'task',value:row}]});
+});
