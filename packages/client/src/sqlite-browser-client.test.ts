@@ -517,3 +517,8 @@ it('does not resend a completed token response when a retried controls read repe
  f.handler=async input=>{if(input.method==='controls'){if(tries++===0)throw Object.assign(Error('read timeout'),{code:'TIMEOUT',outcome:'rejected'});return {tokens:[{id:completed.id,connection:completed.connection,identityKey:completed.identityKey,forceRefreshToken:false}],status:{connected:true},session:'authenticated',failure:null};}};
  await f.client.pollControls();await new Promise(resolve=>setTimeout(resolve,20));expect(tries).toBeGreaterThanOrEqual(2);expect(f.responses).toHaveLength(1);
 });
+it('surfaces refused replica admission instead of leaving its consumer silently loading',async()=>{
+ const f=fixture();f.handler=async input=>{if(input.method==='watchReplica')throw Object.assign(Error('Native subscription allowance exceeded'),{code:'BUDGET'});};
+ const watch=f.client.watchReplica({path:'taskResources.listTaskUsers'},{taskId:'task'}),stop=watch.onUpdate(()=>{});cleanup.push(()=>{stop();watch.close();});
+ await vi.waitFor(()=>expect(()=>watch.localReplicaResult()).toThrow('Native subscription allowance exceeded'));
+});

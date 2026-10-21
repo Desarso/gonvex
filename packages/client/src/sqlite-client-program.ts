@@ -188,7 +188,11 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
   if(tab&&this.tabs.get(tab)!==connection.id)fail('FENCED','Native source caller detached');
   if(source?.retireTimer){clearTimeout(source.retireTimer);source.retireTimer=undefined;}
   if(!source){
-   const bytes=sqlitePayloadBytes({path:ref.path,args},16384)+1024;if(connection.sources.size>=256||connection.sourceBytes+bytes+(tab?192:0)>262144)fail('BUDGET','Native subscription allowance exceeded');
+   // Charge the retained source record. The generated ref/path is shared with
+   // the catalog; lease/tab entries are charged separately below. The old
+   // per-source 1KiB reserve double-counted shared catalog/descriptor state.
+   const bytes=sqlitePayloadBytes({id:'source:'+signature,signature,args,tabs:[],leases:[],eager},16384);
+   if(connection.sources.size>=256||connection.sourceBytes+bytes+(tab?192:0)>262144)fail('BUDGET',`Native subscription allowance exceeded (sources=${connection.sources.size}, bytes=${connection.sourceBytes}, eager=${[...connection.sources.values()].filter(source=>source.eager).length}); inspect subscriptionBudget for live paths`);
    source={id:'source:'+signature,signature,ref,args:JSON.parse(encoded),tabs:new Set(),leases:new Map(),eager,bytes};
    const completeEntity=!Object.keys(ref.replica.equalFilters??{}).length&&!ref.replica.excludeWhenSet?.length;
    connection.feed.register({id:source.id,signature,entity:ref.replica.table,key:ref.replica.key,path:ref.path,...(completeEntity?{completeEntity:true}:{}),...(ref.replica.columns?{columns:ref.replica.columns}:{})});
@@ -394,6 +398,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
     if(!connection.requiredReducers.has(ref.path)){const bytes=ref.path.length*2+64;if(connection.requiredReducers.size>=128||connection.requiredReducerBytes+bytes>32768)fail('BUDGET','Required reducer metadata allowance exceeded');connection.requiredReducers.add(ref.path);connection.requiredReducerBytes+=bytes;}
     await connection.restoring;if(this.admission(connection))await this.demandReducerDependencies(connection,ref);return null;
    }
+   case 'subscriptionBudget':return {entries:connection.sources.size,bytes:connection.sourceBytes,maxEntries:256,maxBytes:262144,paths:[...connection.sources.values()].map(source=>({path:source.ref.path,refs:source.tabs.size,eager:source.eager,closing:!!source.closing,bytes:source.bytes}))};
    case 'prepareReducer':{const ref=this.ref(input.path,'reducer');if(ref.localExecution===1)await this.reducer.core.prepare(ref.path);if(caller.signal.aborted||this.tabs.get(caller.tabID)!==connection.id)fail('FENCED','Reducer preparation caller detached');return null;}
    case 'localLivePage':{
     text(input.signature,128);const source=connection.sources.get(input.signature),ref=this.ref(input.path,'query');
@@ -439,7 +444,11 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
  detachTab(tabID:string){const id=this.tabs.get(tabID);if(!id)return;this.tabs.delete(tabID);this.sessions.detachTab(tabID);const connection=this.connections.get(id);if(!connection)return;connection.tabs.delete(tabID);connection.rejectionCursors.delete(tabID);connection.supportCursors.delete(tabID);connection.developer?.acked.delete(tabID);this.tokens.detachTab(tabID);
   for(const source of [...connection.lives.values()])this.unwatchLive(connection,source,tabID);
   for(const source of [...connection.controls.values()])this.unwatchControl(connection,source,tabID);
-  for(const source of connection.sources.values())if(source.tabs.has(tabID)){this.releaseSourceInterest(connection,source,tabID);if(!source.tabs.size&&!source.eager)void this.closeSource(connection,source).catch(()=>{});}
+  // A surviving follower needs acknowledged per-source cancellation. The
+  // final tab instead closes the transport/feed below, which releases all
+  // source state at once. Do not allocate hundreds of redundant close waiters
+  // immediately before disconnecting their socket.
+  if(connection.tabs.size)for(const source of connection.sources.values())if(source.tabs.has(tabID)){this.releaseSourceInterest(connection,source,tabID);if(!source.tabs.size&&!source.eager)void this.closeSource(connection,source).catch(()=>{});}
   if(!connection.tabs.size){for(const source of connection.sources.values())clearTimeout(source.retireTimer);if(connection.lastScope)void this.maintenance.retire(connection.lastScope,[...connection.sources.values()].map(source=>source.id)).catch(()=>{});if(connection.timer)clearTimeout(connection.timer);clearTimeout(connection.reconnectTimer);clearTimeout(connection.migrationTimer);this.tokens.invalidate(id);connection.delivery.close();connection.client.dispose();connection.feed.close();this.sessions.close(id);this.connections.delete(id);}
  }
  async diagnostics(){return {feeds:[...this.connections.values()].map(connection=>({...connection.feed.stats(),...connection.client.diagnostics(),restoring:!!connection.restoring,recovering:!!connection.recovering,recovered:!!connection.recovered})),progress:await this.owner.database.getAllAsync('SELECT observed,applied,unclosed FROM gv_native_feed_progress LIMIT 8')};}

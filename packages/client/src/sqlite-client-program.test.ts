@@ -446,3 +446,36 @@ it('moves cold incomplete data to certified online coverage and preserves it for
  expect(reply.queuedOnly).toBeUndefined();expect(reply.result).toBe(2);
  expect((await f.call({method:'entities',entity:'tasks',ids:['a']}) as any).rows[0].value.n).toBe(2);
 });
+it('notifies followers when a late scoped empty collection becomes ready at the existing watermark',async()=>{
+ const ref:FunctionReference={kind:'query',path:'taskResources.listTaskUsers',delivery:'replica',replica:{table:'roles',key:'id',columns:['id','n'],equalFilters:{taskId:'n'},maxRows:100,maxBytes:10000}};
+ const f=await fixture(true,false,[ref]),{socket}=await f.authenticate();
+ await vi.waitFor(async()=>expect((await f.call({method:'replicaPage',signature:(await f.call({method:'watchReplica',path:'__local.tasks',args:{}}) as any).signature,limit:10}) as any)?.rows).toHaveLength(1));
+ const source:any=await f.call({method:'watchReplica',path:ref.path,args:{taskId:99}});
+ const open=socket.sent.find(message=>message.type==='replica.open'&&message.path===ref.path),empty=replicaSumDigest(await replicaRowsHashes([],'id'));
+ expect(open).toBeDefined();const before=f.hints.length;
+ socket.receive({type:'replica.snapshotStart',id:open.id,snapshotId:'late-empty',scope:'tenant',visibilityScope:'visible',cursor:{epoch:'e',revision:1},key:'id',digest:empty,path:ref.path});
+ socket.receive(new TextEncoder().encode(JSON.stringify({type:'replica.snapshotEncodedPage',id:open.id,snapshotId:'late-empty',scope:'tenant',visibilityScope:'visible',cursor:{epoch:'e',revision:1},key:'id',sequence:0,last:true,canonicalRows:[],digest:empty,path:ref.path})).buffer);
+ socket.receive({type:'replica.ready',id:open.id,cursor:{epoch:'e',revision:1},digest:empty});
+ await vi.waitFor(async()=>expect((await f.call({method:'replicaPage',signature:source.signature,limit:10}) as any)?.window.header.completeness).toBe('complete'));
+ expect(f.hints.length).toBeGreaterThan(before);
+ const page:any=await f.call({method:'replicaPage',signature:source.signature,limit:10});expect(page.rows).toEqual([]);expect(page.window.header.entityCoverage).not.toBe('complete');
+});
+it('accounts retained subscriptions within the same cap and returns dialog leases after repeated closes',async()=>{
+ const extra:FunctionReference[]=Array.from({length:245},(_,i)=>({kind:'query',path:'fixture.collection'+i,delivery:'replica',replica:{table:'roles',key:'id',columns:['id','n'],equalFilters:{taskId:'n'},maxRows:100,maxBytes:10000}}));
+ const f=await fixture(true,false,extra),{socket}=await f.authenticate();
+ const send=socket.send.bind(socket);socket.send=text=>{send(text);const frame=JSON.parse(text);if(frame.type==='replica.close')queueMicrotask(()=>socket.receive({type:'replica.closed',id:frame.id}));};
+ // 136 retained windows observed on the matched IDB workspace +106 dependency
+ // sources. Keep the original256-source/256KiB limits while adding dialog pivots.
+ for(let i=0;i<242;i++)await f.call({method:'watchReplica',path:extra[i].path,args:{taskId:1}});
+ const baseline:any=await f.call({method:'subscriptionBudget'});expect(baseline.entries).toBe(243);expect(baseline.bytes).toBeLessThan(baseline.maxBytes);
+ for(let n=0;n<12;n++){
+  const dialogs=[];for(let i=242;i<245;i++)dialogs.push(await f.call({method:'watchReplica',path:extra[i].path,args:{taskId:n}}));
+  for(const dialog of dialogs as any[])await f.call({method:'unwatchReplica',signature:dialog.signature});
+  await vi.waitFor(async()=>expect((await f.call({method:'subscriptionBudget'}) as any).entries).toBe(baseline.entries));
+  expect((await f.call({method:'subscriptionBudget'}) as any).bytes).toBe(baseline.bytes);
+ }
+ const closes=socket.sent.filter(frame=>frame.type==='replica.close').length;
+ expect(()=>f.program.detachTab('one')).not.toThrow();expect(socket.readyState).toBe(3);
+ expect(socket.sent.filter(frame=>frame.type==='replica.close')).toHaveLength(closes);
+ expect(f.program.budgets().find(row=>row.name==='native-source-interests')?.entries).toBe(0);
+});
