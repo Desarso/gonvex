@@ -47,7 +47,7 @@ it('prepares lazy reducer chunks outside the owner queue and fences a changed ta
  const dispose=installSQLiteOwner({schema,createProgram(ctx){
   owner=ctx;void ctx.runOwner(0,()=>ctx.canonical.applyTransaction({cursor:{epoch:'e',revision:1},changes:[{entity:'records',id:'a',operation:'insert',newValue:{id:'a',n:1}}]},{entities:{},liveQueries:{}},'s').then(()=>{}));
   endpoint=new SQLiteReducerOwner(ctx,{runtime,artifactHash:'artifact',async persistIntent(){if(persistence){persistence.entered();await persistence.wait;}},resolveTab(){return {scope:'s',generation};},async context(){return {intentScope:'s',identity:{auth:{account:{id:'account'}},tenant:{id:'tenant'},member:{id:'member',accountId:'account',permissions:{}}},coverage:{records:{key:'id',complete:true}}};}});
-  return {call(args:any,caller){return endpoint.invoke(args,caller);}};
+  return {call(args:any,caller){if(args.method==='testEntityRead')return ctx.runOwner(128,()=>ctx.reader.entities({scope:'s',entity:'records',ids:['a']}));return endpoint.invoke(args,caller);}};
  }});interval.mockRestore();
  const request=(op:string,args:any={},requestID='command-'+(++serial))=>new Promise<any>(resolve=>{const id='transport-'+(++serial);awaiting.set(id,resolve);(globalThis as any).onmessage({data:{id,requestID,tabID:'tab',op,args}});});
  try{
@@ -59,6 +59,10 @@ it('prepares lazy reducer chunks outside the owner queue and fences a changed ta
   const replies=await Promise.all([request('clientCall',invocation,'same-command'),request('clientCall',invocation,'same-command')]);expect(replies[0].value).toEqual(replies[1].value);expect(replies[0].value.result).toBe(2);expect(executions).toBe(1);expect(loads).toBe(1);
   expect((await owner.runOwner(0,()=>owner.engine.page('s',{table:'records',order:[{field:'n',direction:'asc'}],limit:1}))).rows[0].n).toBe(1);
   expect((await owner.runOwner(0,()=>owner.reader.entities({scope:'s',entity:'records',ids:['a','missing']}))).rows).toEqual([{id:'a',value:{id:'a',n:2}},{id:'missing',value:null}]);
+  const {SQLiteTaskYield}=await import('./sqlite-task-yield.js');const backgroundTasks=new SQLiteTaskYield();let appliedChunks=0;await owner.runOwner(0,()=>owner.database.execAsync('CREATE TABLE background_apply(n INTEGER)'));
+  const background=(async()=>{for(let n=0;n<100;n++){await owner.runOwner(128,()=>owner.database.withTransactionAsync(async()=>{await owner.database.runAsync('INSERT INTO background_apply(n) VALUES(?)',n);}));appliedChunks++;await backgroundTasks.yield();}})();
+  try{const began=performance.now();const read=await request('clientCall',{method:'testEntityRead'});expect(read.value.rows[0].value.n).toBe(2);expect(performance.now()-began).toBeLessThan(50);expect(appliedChunks).toBeLessThan(100);await background;}finally{backgroundTasks.close();}
+
   for(const operation of ['page','nativeEntityPage','nativeWindowPage','canonicalCall','canonicalRead','canonicalGeneration','apply','snapshotActivate','snapshotRead','snapshotAppend','snapshotAppendEncoded','snapshotDiscard','windowBegin','windowAppend','windowPublish','windowPage','windowHashes','windowCollect','bootstrapBegin','bootstrapAppend','bootstrapFinish','outbox','acknowledge','count'])expect((await request(operation,{scope:'other-identity'})).error.code).toBe('OPERATION');
   let persisted!:()=>void,resume!:()=>void;const entered=new Promise<void>(resolve=>{persisted=resolve;});persistence={entered:persisted,wait:new Promise<void>(resolve=>{resume=resolve;})};
   const pendingCommit=request('clientCall',{...invocation,now:101},'fenced-during-persistence');await entered;generation='session-three';resume();expect((await pendingCommit).error.code).toBe('FENCED');expect((await endpoint.journal.summary('s')).count).toBe(1);expect((await endpoint.predictions.entities('s','records',['a']))[0].row.n).toBe(2);expect(sql.prepare('SELECT 1 FROM gv_reducer_invocations WHERE command_id=?').get('fenced-during-persistence')).toBeUndefined();

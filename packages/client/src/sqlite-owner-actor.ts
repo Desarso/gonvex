@@ -55,6 +55,9 @@ let canonical:SQLiteCanonicalDispatcher|undefined;
 let nativeReader:SQLiteNativeReplicaReader|undefined,pendingReader:SQLitePendingSnapshotReader|undefined;
 let snapshots:SQLiteSnapshotPages|undefined,activation:SQLiteSnapshotActivator|undefined;
 const queueTimings:Array<{label:string;finishedAt:number;waitMs:number;runMs:number;bytes:number}>=[];let maxQueueWaitMs=0,maxOwnerRunMs=0;
+const capacityWaiters:Array<()=>void>=[];
+const waitForCapacity=(size:number)=>queuedOperations<64&&queuedBytes+size<=2097152?Promise.resolve():new Promise<void>(resolve=>{capacityWaiters.push(resolve);});
+const releaseCapacity=()=>{capacityWaiters.shift()?.();};
 let lane = Promise.resolve(), operations = 0, bytes = 0,queuedOperations=0,queuedBytes=0,closed=false;
 let program:SQLiteOwnerProgram|undefined,ownerToken='';const workerLease=new OriginStorageWorkerLease();let originEpoch:number|undefined;
 const wireGeneration=(generation:{epoch:number;sequence:number})=>({...generation,epoch:originEpoch??generation.epoch});
@@ -82,7 +85,7 @@ function schedule<T>(size:number,run:()=>Promise<T>,label='operation'):Promise<T
  // The worker lifetime lock protects the connection through every disk phase.
  // SQLite's durable owner epoch fences reads and writes without a second DB.
  const queuedAt=performance.now();queuedOperations++;queuedBytes+=size;const operation=lane.then(async()=>{const started=performance.now();maxQueueWaitMs=Math.max(maxQueueWaitMs,started-queuedAt);try{if(closed)throw Object.assign(Error('Storage owner is closed'),{code:'FENCED'});if(ownerToken&&!workerLease.stats().held)throw Object.assign(Error('Storage worker lease was released'),{code:'FENCED'});if(engine)await engine.verifyOwner();return await run();}finally{const runMs=performance.now()-started;maxOwnerRunMs=Math.max(maxOwnerRunMs,runMs);queueTimings.push({label,finishedAt:Date.now(),waitMs:started-queuedAt,runMs,bytes:size});if(queueTimings.length>64)queueTimings.shift();}});
- lane=operation.then(()=>undefined,()=>undefined);void operation.then(()=>{queuedOperations--;queuedBytes-=size;},()=>{queuedOperations--;queuedBytes-=size;});return operation;
+ lane=operation.then(()=>undefined,()=>undefined);void operation.then(()=>{queuedOperations--;queuedBytes-=size;releaseCapacity();},()=>{queuedOperations--;queuedBytes-=size;releaseCapacity();});return operation;
 }
 async function execute(op: string, args: any, requestID:string) {
   if (op === 'open') {
@@ -106,7 +109,7 @@ async function execute(op: string, args: any, requestID:string) {
       program=binding.createProgram?.({database,engine,notifyPreviewTab:tabID=>tabs.hintPending(tabID),publishPreviewTab:(tabID,value)=>tabs.preview(tabID,value),notifyTab:tabID=>schedule(0,async()=>{if(typeof tabID!=='string'||!tabID||tabID.length>128)throw new TypeError('Invalid control recipient');tabs.notify(tabID,wireGeneration(await engine!.verifyOwner()));}),reader:nativeReader,pendingReader,canonical:storage,snapshots,activation,
        runOwner:async(size,run,scopes=[],label='operation')=>{
         if(!Array.isArray(scopes)||scopes.length>8||scopes.some(value=>typeof value!=='string'||!value||value.length>512))throw new TypeError('Invalid owner publication scope');
-        return waitForSQLiteOwnerAdmission(()=>schedule(size,async()=>{const before=await engine!.verifyOwner();const value=await run();const after=await engine!.verifyOwner();if(after.sequence!==before.sequence)for(const selected of scopes)publish(selected,after);return value;},label),()=>{if(closed)throw Object.assign(Error('Storage owner is closed'),{code:'FENCED'});});
+        return waitForSQLiteOwnerAdmission(()=>schedule(size,async()=>{const before=await engine!.verifyOwner();const value=await run();const after=await engine!.verifyOwner();if(after.sequence!==before.sequence)for(const selected of scopes)publish(selected,after);return value;},label),()=>{if(closed)throw Object.assign(Error('Storage owner is closed'),{code:'FENCED'});},()=>waitForCapacity(size));
        }});
       if(program&&typeof program.call!=='function')throw new TypeError('Owner program factories must return synchronously; queue initialization through runOwner');
       globalThis.postMessage({type:'progress',stage:'created-program',sentAt:Date.now()});return { epoch:originEpoch??epoch, wasmBytes: host.memoryBytes() };
@@ -243,7 +246,7 @@ globalThis.onmessage = ({ data }) => {
 
 let disposal:Promise<void>|undefined;
 return ()=>disposal??=(async()=>{
- closed=true;workerLease.cancelPending();clearInterval(timer);globalThis.onmessage=null;
+ closed=true;for(const resume of capacityWaiters.splice(0))resume();workerLease.cancelPending();clearInterval(timer);globalThis.onmessage=null;
  tabs.close();for(const peer of ports.values())peer.port.close();ports.clear();
  try{await program?.close?.();await lane;}finally{pendingReader?.close();host?.close();await workerLease.close();installed=false;}
 })();

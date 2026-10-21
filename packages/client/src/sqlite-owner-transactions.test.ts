@@ -65,3 +65,9 @@ it('waits only for pre-execution owner admission and never retries an unknown SQ
  attempts=0;await expect(waitForSQLiteOwnerAdmission(async()=>{attempts++;throw Object.assign(Error('late storage BUSY'),{code:'BUSY'});},()=>{})).rejects.toThrow('late storage BUSY');expect(attempts).toBe(1);
  let current=true;await expect(waitForSQLiteOwnerAdmission(async()=>{current=false;throw new SQLiteOwnerQueueBusyError();},()=>{if(!current)throw Object.assign(Error('admission changed'),{code:'FENCED'});})).rejects.toMatchObject({code:'FENCED'});
 });
+
+it('waits for an owner capacity signal instead of spinning a retry task loop',async()=>{
+ const {SQLiteOwnerQueueBusyError,waitForSQLiteOwnerAdmission}=await import('./sqlite-owner-transactions.js');let attempts=0,available=false,wake!:()=>void;
+ const result=waitForSQLiteOwnerAdmission(async()=>{attempts++;if(!available)throw new SQLiteOwnerQueueBusyError();return 'read';},()=>{},()=>new Promise<void>(resolve=>{wake=resolve;}));
+ await Promise.resolve();await Promise.resolve();expect(attempts).toBe(1);available=true;wake();expect(await result).toBe('read');expect(attempts).toBe(2);
+});

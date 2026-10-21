@@ -62,6 +62,6 @@ export class SQLiteOwnerQueueBusyError extends Error {
 }
 /** Callers already own bounded ingress/intent slots. Wait outside the FIFO
  * rather than closing their socket when another connection uses its credits. */
-export async function waitForSQLiteOwnerAdmission<T>(submit:()=>Promise<T>,assertCurrent:()=>void):Promise<T>{
- for(;;){assertCurrent();try{return await submit();}catch(error){if(!(error instanceof SQLiteOwnerQueueBusyError))throw error;await yieldSQLiteTask();}}
+export async function waitForSQLiteOwnerAdmission<T>(submit:()=>Promise<T>,assertCurrent:()=>void,waitForCapacity:()=>Promise<void>=yieldSQLiteTask):Promise<T>{
+ for(;;){assertCurrent();try{return await submit();}catch(error){if(!(error instanceof SQLiteOwnerQueueBusyError))throw error;await waitForCapacity();}}
 }
