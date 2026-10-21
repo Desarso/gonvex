@@ -429,3 +429,20 @@ it('opens only the declared bounded reducer read-set and certifies empty require
  await vi.waitFor(async()=>{const rows=await f.owner.runOwner(0,()=>f.db.getAllAsync<{entity:string}>("SELECT DISTINCT json_extract(g.header,'$.entity') entity FROM gv_windows w JOIN gv_window_generations g USING(scope,signature,generation) WHERE json_extract(g.header,'$.entityCoverage')='complete' AND json_extract(g.header,'$.completeness')='complete'"));expect(rows.map(r=>r.entity)).toEqual(expect.arrayContaining(dependencies));});
  socket.close();const receipt:any=await f.call({method:'reducer',path:'tasks.increment',args:{},now:100},'one','prepared-offline');expect(receipt.queuedOnly).toBeUndefined();expect(receipt.result).toBe(2);
 });
+
+it('moves cold incomplete data to certified online coverage and preserves it for a warm offline reconnect edit',async()=>{
+ const f=await fixture(false),{socket,open}=await f.authenticate(true);
+ const complete=()=>f.owner.runOwner(0,()=>f.db.getAllAsync<{entity:string}>("SELECT json_extract(g.header,'$.entity') entity FROM gv_windows w JOIN gv_window_generations g USING(scope,signature,generation) WHERE json_extract(g.header,'$.entityCoverage')='complete' AND json_extract(g.header,'$.completeness')='complete'"));
+ expect((await complete()).some(row=>row.entity==='tasks')).toBe(false);
+ const digest=await rowDigest({id:'a',n:1});
+ socket.receive(new TextEncoder().encode(JSON.stringify({type:'replica.snapshotEncodedPage',id:open.id,snapshotId:'base',scope:'tenant',visibilityScope:'visible',cursor:{epoch:'e',revision:1},key:'id',sequence:1,last:true,canonicalRows:[],digest,path:'__local.tasks'})).buffer);
+ socket.receive({type:'replica.ready',id:open.id,cursor:{epoch:'e',revision:1},digest});socket.receive({type:'replica.watermark',revision:1});
+ await vi.waitFor(async()=>expect((await complete()).map(row=>row.entity)).toContain('tasks'));
+ await f.call({method:'prepareReducer',path:'tasks.increment'});
+ socket.close();f.program.detachTab('one');await f.call(connect);
+ expect(await f.call({method:'restoreSession'})).toBe(true);
+ expect((await complete()).map(row=>row.entity)).toContain('tasks');
+ const reply:any=await f.call({method:'reducer',path:'tasks.increment',args:{},now:100},'one','warm-offline-edit');
+ expect(reply.queuedOnly).toBeUndefined();expect(reply.result).toBe(2);
+ expect((await f.call({method:'entities',entity:'tasks',ids:['a']}) as any).rows[0].value.n).toBe(2);
+});
