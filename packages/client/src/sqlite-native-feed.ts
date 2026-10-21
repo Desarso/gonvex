@@ -10,7 +10,7 @@ import {decodeSQLiteNativeDelta,decodeSQLiteNativeTransaction} from './sqlite-na
 import {waitForSQLiteOwnerAdmission,markSQLiteStagingCommit} from './sqlite-owner-transactions.js';
 import {SQLiteReducerPreparationRequiredError} from './sqlite-reducer-core.js';
 import {fail,sqlitePayloadBytes} from './sqlite-admission.js';
-type Start=Extract<ServerMessage,{type:'replica.snapshotStart'}>;
+type Start=Pick<Extract<ServerMessage,{type:'replica.snapshotStart'}>,'snapshotId'|'cursor'|'mode'|'truncated'>;
 type Delta=Extract<ServerMessage,{type:'replica.delta'}>;
 export type SQLiteFeedSource={id:string;signature:string;entity:string;key:string;path:string;completeEntity?:true;columns?:readonly string[]};
 type Source=SQLiteFeedSource&{deferredKey:string;bytes:number;start?:Start;preparedStart?:Start;deferActivation?:boolean;opening:boolean;closing?:{promise:Promise<void>;resolve():void;reject(error:unknown):void;timer:ReturnType<typeof setTimeout>}};
@@ -248,7 +248,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
    case 'replica.snapshotStart':{
     const source=this.source(message.id);this.cursor(state,message.cursor);
     if(message.visibilityScope!==state.scope||message.scope!==state.logicalScope||message.key!==source.key||message.path!==undefined&&message.path!==source.path||!message.snapshotId||message.snapshotId.length>128)fail('INVALID_ROW','Native start differs from generated source');
-    if(source.start)fail('PAGE_CHANGED','Native source received overlapping snapshots');const startBytes=sqlitePayloadBytes(message,16384);if(this.sourceBytes+this.startBytes+this.closingBytes+startBytes>262144)fail('BUDGET','Native source header registry exceeded budget');
+    if(source.start)fail('PAGE_CHANGED','Native source received overlapping snapshots');const retained:Start={snapshotId:message.snapshotId,cursor:{...message.cursor},...(message.mode?{mode:message.mode}:{}),...(message.truncated===undefined?{}:{truncated:message.truncated})};const startBytes=sqlitePayloadBytes(retained,16384);if(this.sourceBytes+this.startBytes+this.closingBytes+startBytes>262144)fail('BUDGET','Native source header registry exceeded budget');
     const priorWindow=()=>owner.database.getFirstAsync<{generation:string}>("SELECT generation FROM gv_window_generations WHERE scope=? AND signature=? AND generation<>coalesce((SELECT generation FROM gv_windows WHERE scope=? AND signature=?),'') LIMIT 1",state.scope,source.signature,state.scope,source.signature);
     const priorStage=()=>owner.database.getFirstAsync<{snapshot:string}>('SELECT snapshot FROM gv_snapshot_stages WHERE scope=? AND subscription=? AND snapshot<>? LIMIT 1',state.scope,source.id,message.snapshotId);
     const prepare=async()=>{return {defer:!!await owner.database.getFirstAsync('SELECT 1 FROM gv_native_feed_progress WHERE scope=? AND epoch=? AND applied>0',state.scope,state.epoch)};};
@@ -261,7 +261,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
      for(;;){const more=await this.run(state,16384,async()=>{const prior=await priorWindow();if(!prior)return false;await this.windows.collect(state.scope,source.signature,prior.generation);return true;});if(!more)break;}
      for(;;){const more=await this.run(state,16384,async()=>{const prior=await priorStage();if(!prior)return false;await owner.snapshots.discard(state.scope,source.id,prior.snapshot);return true;});if(!more)break;}
     }
-    source.deferActivation=(prepared??await this.run(state,16384,prepare)).defer;source.start=message;this.startBytes+=startBytes;source.opening=true;return;
+    source.deferActivation=(prepared??await this.run(state,16384,prepare)).defer;source.start=retained;this.startBytes+=startBytes;source.opening=true;return;
    }
    case 'replica.closed':{
     const source=this.source(message.id),closing=source.closing;if(!closing)fail('INVALID_ROW','Unexpected native source close acknowledgement');

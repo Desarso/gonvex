@@ -205,18 +205,17 @@ it('reapplies owner capacity after failover and preserves queued single-shot dis
  }finally{for(const call of [...broker.pending.values()]){clearTimeout(call.timer);call.reject(Error('test cleanup'));}broker.pending.clear();await settled;}
 });
 
-it('starts the WASM resource hint only after this tab acquires ownership, before creating its dedicated worker',async()=>{
+it('starts the elected worker without an unused document WASM preload',async()=>{
  const previousNavigator=globalThis.navigator,previousDocument=globalThis.document,links:any[]=[];
  let acquired:(()=>Promise<void>)|undefined;
  vi.stubGlobal('navigator',{locks:{request:vi.fn((_name,_options,run)=>{acquired=run;return Promise.resolve();})}});
  vi.stubGlobal('document',{head:{appendChild:(link:unknown)=>links.push(link)},createElement:()=>({})});
- const broker=client() as any;broker.options={createWorker:()=>{expect(links).toHaveLength(1);throw Error('stop before worker starts');}};
+ const broker=client() as any;broker.options={createWorker:()=>{expect(links).toHaveLength(0);throw Error('stop before worker starts');}};
  try{
   broker.elect();expect(links).toEqual([]);expect(acquired).toBeTypeOf('function');
   await expect(acquired!()).rejects.toThrow('stop before worker starts');
-  expect(links[0]).toMatchObject({rel:'preload',as:'fetch',type:'application/wasm',crossOrigin:'anonymous'});
-  expect(links[0].href).toMatch(/\/vendor\/sqlite3\.wasm$/);
-  await expect(acquired!()).rejects.toThrow('stop before worker starts');expect(links).toHaveLength(1);
+  expect(links).toEqual([]);
+  await expect(acquired!()).rejects.toThrow('stop before worker starts');expect(links).toHaveLength(0);
  }finally{broker.closed=true;broker.election?.abort();vi.stubGlobal('navigator',previousNavigator);vi.stubGlobal('document',previousDocument);}
 });
 

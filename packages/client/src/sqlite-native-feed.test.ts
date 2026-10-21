@@ -478,3 +478,17 @@ it('keeps a small forty-control cold burst in one FULL commit within existing by
  expect(f.host.takeProfile().commits).toBe(2);
  expect((await new SQLiteWindowStore(f.db,()=>f.engine.verifyOwner()).header('visible','tasks-all'))?.header.cursor).toEqual(cursor(50));
 });
+
+
+it('keeps simultaneous admitted snapshot headers inside the existing registry budget',async()=>{
+ const f=await fixture(),certificate=await digest([]);
+ for(let n=0;n<190;n++){
+  const id='ref-'+n+'x'.repeat(90),path='refs/'+n+'y'.repeat(90);
+  f.feed.register({id,signature:'signature-'+n,entity:'tasks',key:'id',path});
+  f.feed.frame({type:'replica.snapshotStart',id,path,snapshotId:'snapshot-'+n+'z'.repeat(75),scope:'tenant',visibilityScope:'visible',cursor:cursor(10),key:'id',digest:certificate},1);
+ }
+ await f.feed.assertReadable();
+ expect(f.failures).toEqual([]);
+ expect(f.feed.stats().sources).toBe(191);
+ expect(f.feed.stats().sourceBytes).toBeLessThanOrEqual(262144);
+});
