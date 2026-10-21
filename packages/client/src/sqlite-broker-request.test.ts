@@ -301,3 +301,9 @@ it('visibility and foreground claims do not drain a signed-out authentication ow
  broker.broadcast=vi.fn();broker.setVisibilityAdmission(true);broker.visibilityChanged();expect(broker.drainForVisibleOwner).toHaveBeenCalledOnce();
  vi.unstubAllGlobals();
 });
+
+it('yields a visible but unfocused owner to an admitted focused tab',()=>{
+ vi.stubGlobal('document',{visibilityState:'visible',hasFocus:()=>false});const broker=client() as any;broker.tenantAdmission=true;broker.generation={ready:true};broker.drainForVisibleOwner=vi.fn();
+ broker.receiveControl({protocol:2,type:'visible-owner-request',tab:'focused',focused:true});expect(broker.drainForVisibleOwner).toHaveBeenCalledOnce();
+ vi.unstubAllGlobals();
+});

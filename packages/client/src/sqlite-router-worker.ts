@@ -7,7 +7,7 @@ import {sqliteRequestBytes} from './sqlite-request-frame.js';
 // imports SQLite, schema, rows or application code.
 installSQLiteWasmByteCache();
 let ownerHost:SQLiteReplicaBroker|undefined;
-let ownerCapability={nestedWorker:typeof Worker==='function',webLocks:!!navigator.locks,reason:'not-configured'};
+let ownerCapability={nestedWorker:typeof Worker==='function',webLocks:!!navigator.locks,reason:typeof Worker==='function'?'not-configured':'nested-worker-unavailable'};
 /** The SharedWorker owns election and its dedicated OPFS child, independent of any page. */
 export function configureSQLiteRouterOwner(options:Pick<SQLiteBrokerOptions,'createWorker'|'schemaVersion'>){
  ownerCapability={nestedWorker:typeof Worker==='function',webLocks:!!navigator.locks,reason:typeof Worker!=='function'?'nested-worker-unavailable':!navigator.locks?'web-locks-unavailable':'shared-owner'};
