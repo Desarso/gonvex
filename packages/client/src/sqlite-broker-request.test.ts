@@ -5,7 +5,7 @@ import { SQLiteReplicaBroker } from './sqlite-broker.js';
 // replaced at its boundary; real multi-tab tests cover the actual transports.
 function client() {
   const broker = Object.assign(Object.create(SQLiteReplicaBroker.prototype), {
-    closed: false, failed: false, changeListeners:new Set(),lastChanges:new Map(),lastChangeBytes:0, pending: new Map(), inflight: new Map(), inflightBytes: 0, pendingBytes: 0, serial: 0, tabID: 'test',
+    closed: false, failed: false,cooldown:0, changeListeners:new Set(),lastChanges:new Map(),lastChangeBytes:0, pending: new Map(), inflight: new Map(), inflightBytes: 0, pendingBytes: 0, serial: 0, tabID: 'test',
     send: vi.fn((call: any) => {
       clearTimeout(call.timer); broker.pending.delete(call.id); broker.pendingBytes -= call.bytes;
       call.resolve({ accepted: call.op, args: call.args });
@@ -274,4 +274,22 @@ it('does not race a shared-host handshake or elect a page owner after host confi
 it('supports broker election in a SharedWorker without a document',()=>{
  class Channel{onmessage?:Function;postMessage(){}close(){}}const locks=vi.fn(()=>new Promise(()=>{}));vi.stubGlobal('BroadcastChannel',Channel);vi.stubGlobal('document',undefined);vi.stubGlobal('navigator',{locks:{request:locks}});vi.stubGlobal('addEventListener',()=>{});vi.stubGlobal('removeEventListener',()=>{});
  const broker=new SQLiteReplicaBroker({schemaVersion:'a'.repeat(64),createWorker:()=>{throw Error('Not entered before lock grant');}});try{expect(locks).toHaveBeenCalledOnce();}finally{broker.close();vi.unstubAllGlobals();}
+});
+
+it('hands a hidden owner to a visible claimant only after the actor drains accepted reads and writes',async()=>{
+ vi.stubGlobal('document',{visibilityState:'hidden'});
+ const broker=client() as any,posts:any[]=[];const g={ready:true,token:'old',worker:{postMessage:(m:any)=>posts.push(m)},release:vi.fn()};
+ broker.generation=g;broker.owner={id:'test',token:'old'};broker.setState=vi.fn();broker.broadcast=vi.fn();broker.workerCalls=new Map();
+ broker.receiveControl({protocol:2,type:'visible-owner-request',tab:'foreground'});
+ expect(posts).toEqual([{type:'drain-owner',token:'old'}]);expect(g.release).not.toHaveBeenCalled();
+ expect(broker.generation).toBe(g);expect(g).toMatchObject({draining:true});
+ broker.reply=vi.fn();await broker.serve({protocol:2,from:'follower',token:'old',id:'intent',op:'canonicalCall',args:{}});
+ expect(broker.reply).not.toHaveBeenCalled();expect(broker.inflight.size).toBe(0);
+ broker.receiveControl({protocol:2,type:'visible-owner-request',tab:'foreground'});expect(posts).toHaveLength(1);
+ vi.unstubAllGlobals();
+});
+it('a visible owner keeps ownership and a hidden boot can elect without a visible claimant',()=>{
+ vi.stubGlobal('document',{visibilityState:'visible'});const broker=client() as any;broker.generation={ready:true};broker.drainForVisibleOwner=vi.fn();
+ broker.receiveControl({protocol:2,type:'visible-owner-request',tab:'other'});expect(broker.drainForVisibleOwner).not.toHaveBeenCalled();
+ vi.unstubAllGlobals();
 });

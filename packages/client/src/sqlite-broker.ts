@@ -20,8 +20,8 @@ export type SQLiteBrokerOptions = {
   onState?(state: SQLiteBrokerState): void;
   onChange?(scope: string, sequence: number,reset?:boolean): void;
 };
-type Owner = { id: string; token: string; epoch: number; seen: number; opening?: boolean };
-type Generation = { token: string; worker: Worker; adapter:'sqlite';ready: boolean; epoch: number; release(): void; channel: BroadcastChannel; lastProgress: number;announced?:boolean };
+type Owner = { id: string; token: string; epoch: number; seen: number; opening?: boolean;visible?:boolean };
+type Generation = { token: string; worker: Worker; adapter:'sqlite';ready: boolean; epoch: number; release(): void; channel: BroadcastChannel; lastProgress: number;announced?:boolean;draining?:boolean;drainStarted?:number };
 type Call = { promise?:Promise<any>;id: string; op: string; args: unknown; bytes: number; lastSent: number; busy?:boolean; replay:boolean;sentToken?:string; timer: ReturnType<typeof setTimeout>; resolve(value: any): void; reject(error: unknown): void };
 type WorkerCall = { generation: Generation; resolve(value: any): void; reject(error: unknown): void };
 export class SQLiteBrokerError extends Error {
@@ -65,6 +65,11 @@ export class SQLiteReplicaBroker {
   private port?: MessagePort;
   private lastHubReply = 0;
   private hubOwns:boolean|undefined;
+  private ownerCapability:unknown;
+  private lastHandoffMs:number|undefined;
+  private readonly onVisibility=()=>{const g=this.generation;if(g?.ready)this.announce(g,true);if(this.visible())this.claimVisible();else if(g&&typeof document!=='undefined')void this.drainForVisibleOwner(g,false);};
+  private visible(){return typeof document!=='undefined'&&document.visibilityState==='visible';}
+  private claimVisible(){if(!this.visible()||this.hubOwns||this.closed)return;this.cooldown=0;this.broadcast({type:'visible-owner-request',tab:this.tabID});this.elect();}
   private direct?: { port: MessagePort; token: string; ready: boolean; started: number; seen: number };
   private readonly timer: ReturnType<typeof setInterval>;
   private readonly onPageHide = () => this.handoff();
@@ -79,6 +84,8 @@ export class SQLiteReplicaBroker {
     this.connectHub();
     globalThis.addEventListener('pagehide', this.onPageHide);
     globalThis.addEventListener('pageshow', this.onPageShow);
+    globalThis.addEventListener('focus',this.onVisibility);
+    if(typeof document!=='undefined')document.addEventListener('visibilitychange',this.onVisibility);
     if(typeof document!=='undefined')document.addEventListener('freeze', this.onFreeze);
     if(typeof document!=='undefined')document.addEventListener('resume', this.onResume);
     this.timer = setInterval(() => this.tick(), 1000);
@@ -89,7 +96,7 @@ export class SQLiteReplicaBroker {
   get hostedOwnerID(){return this.tabID;}
   routeHostedRequest(message:unknown){return this.serve(message);}
   attachHostedFollower(tab:string,token:string,port:MessagePort){const g=this.generation;if(!g?.ready||token!==g.token){port.close();return;}g.worker.postMessage({type:'attach',tab,token,port},[port]);}
-  stats() { return { ownerHost:typeof document==='undefined'||this.hubOwns?'shared-worker':'page',route:this.generation?'owner-local':this.direct?.ready?'direct-worker':this.port?'shared-router-page':'broadcast-page',directPending:!!this.direct&&!this.direct.ready, state: this.stateValue, adapter:this.generation?.adapter??this.adapter, owner: this.owner?.id, ownerEpoch:this.owner?.epoch, ownsWorker: !!this.generation, pending: this.pending.size, pendingBytes: this.pendingBytes, ownerOperations: this.inflight.size, ownerBytes: this.inflightBytes, listeners:this.changeListeners.size,changeScopes:this.lastChanges.size,changeBytes:this.lastChangeBytes }; }
+  stats() { return { ownerCapability:this.ownerCapability,ownerVisible:this.owner?.visible,visible:this.visible(),handoffMs:this.lastHandoffMs,ownerHost:typeof document==='undefined'||this.hubOwns?'shared-worker':'page',route:this.generation?'owner-local':this.direct?.ready?'direct-worker':this.port?'shared-router-page':'broadcast-page',directPending:!!this.direct&&!this.direct.ready, state: this.stateValue, adapter:this.generation?.adapter??this.adapter, owner: this.owner?.id, ownerEpoch:this.owner?.epoch, ownsWorker: !!this.generation, pending: this.pending.size, pendingBytes: this.pendingBytes, ownerOperations: this.inflight.size, ownerBytes: this.inflightBytes, listeners:this.changeListeners.size,changeScopes:this.lastChanges.size,changeBytes:this.lastChangeBytes }; }
   private setState(state: SQLiteBrokerState) {
     if (state === this.stateValue) return;
     this.stateValue = state;
@@ -103,7 +110,7 @@ export class SQLiteReplicaBroker {
       this.port = this.hub.port;
       this.port.onmessage = event => {
         const m = event.data;
-        if (m.type === 'pong') {this.lastHubReply=Date.now();this.hubOwns=m.ownerHost===true;if(!this.hubOwns)this.elect();return;}
+        if (m.type === 'pong') {this.lastHubReply=Date.now();this.hubOwns=m.ownerHost===true;this.ownerCapability=m.ownerCapability;if(!this.hubOwns){this.elect();this.claimVisible();}return;}
         if (m.type === 'attach' && event.ports[0]) {
           const g = this.generation;
           if (g?.ready && m.token === g.token) g.worker.postMessage({ type: 'attach', tab: m.from, token: g.token, port: event.ports[0] }, [event.ports[0]]);
@@ -120,6 +127,7 @@ export class SQLiteReplicaBroker {
   private receiveControl(m: any) {
     if(this.closed)return;
     if(m?.protocol!==protocol){if(m?.type==='owner'&&m?.owner)this.fail(error('PROTOCOL','Storage worker protocol changed; reload this client'));return;}
+    if(m.type==='visible-owner-request'&&typeof m.tab==='string'&&m.tab!==this.tabID&&!this.visible()&&typeof document!=='undefined'){this.cooldown=Date.now()+5000;if(this.generation)void this.drainForVisibleOwner(this.generation);else{this.election?.abort();this.election=undefined;}return;}
     if (m.type === 'owner' && m.owner?.id !== this.tabID) {
       const o = m.owner as Owner;
       if (!Number.isSafeInteger(o.epoch) || o.epoch < 0 || typeof o.id !== 'string' ||!o.id||o.id.length>128|| typeof o.token !== 'string'||!o.token||o.token.length>128 || !Number.isFinite(o.seen)) return;
@@ -127,10 +135,10 @@ export class SQLiteReplicaBroker {
         const changed=this.owner?.token!==o.token;if(changed){if(this.owner)this.fenceSingleShots(this.owner.token);this.heartbeatToken=undefined;}
         this.owner = { ...o, seen: Math.min(Date.now(), o.seen) };
         if (!o.opening) this.setState('ready');
-        this.connectDirect();if(changed)this.sendHeartbeat(); this.resend();
+        this.connectDirect();if(changed)this.sendHeartbeat(); this.resend();if(o.visible===false)this.claimVisible();
       }
     }
-    if (m.type === 'gone' && this.owner?.token === m.token) { this.fenceSingleShots(m.token);this.owner = undefined; this.setState('pending'); this.resend(); }
+    if (m.type === 'gone' && this.owner?.token === m.token) { this.fenceSingleShots(m.token);this.owner = undefined; this.setState('pending'); this.resend();this.elect(); }
     if (m.type === 'probe' && this.generation?.ready) void this.pulse(true);
     if(['tab-heartbeat','tab-bye','change-ack'].includes(m.type)&&this.generation?.ready&&m.token===this.generation.token&&typeof m.tab==='string'&&m.tab.length<=128)this.generation.worker.postMessage(m);
     if(m.type==='change'&&m.to!==undefined&&m.to!==this.tabID)return;
@@ -188,8 +196,8 @@ export class SQLiteReplicaBroker {
     this.port.postMessage({ type: 'attach', to: this.owner.id, token: this.owner.token }, [channel.port2]);
   }
   private announce(g: Generation,force=false) {
-    if (this.generation !== g || !g.ready) return;
-    this.owner = { id: this.tabID, token: g.token, epoch: g.epoch, seen: g.lastProgress };
+    if (this.generation !== g || !g.ready||g.draining) return;
+    this.owner = { id: this.tabID, token: g.token, epoch: g.epoch, seen: g.lastProgress,visible:typeof document==='undefined'||this.visible() };
     this.setState('ready');if(force||!g.announced){g.announced=true;this.broadcast({ type: 'owner', owner: this.owner });}
   }
   private progress(g: Generation, sentAt: unknown) {
@@ -224,7 +232,7 @@ export class SQLiteReplicaBroker {
     for (const call of this.pending.values()) if (Date.now() - call.lastSent > 2000) this.send(call);
   }
   private elect(steal = false) {
-    if ((this.port&&this.hubOwns!==false)||this.closed || this.failed || this.election && !steal) return;
+    if (Date.now()<this.cooldown||(this.port&&this.hubOwns!==false)||this.closed || this.failed || this.election && !steal) return;
     this.election?.abort();
     const controller = this.election = new AbortController();
     const options: LockOptions = steal ? { mode: 'exclusive', steal: true } : { mode: 'exclusive', signal: controller.signal };
@@ -240,6 +248,7 @@ export class SQLiteReplicaBroker {
       worker.onmessage = event => {
         if (this.generation !== g) return;
         const m = event.data;
+        if(m.type==='drained'){this.lastHandoffMs=Date.now()-(g.drainStarted??Date.now());this.stop(g);return;}
         if (m.type === 'progress') { this.progress(g, m.sentAt); return; }
         if(m.type==='change'||m.type==='tab-pong'){this.progress(g,m.sentAt);this.routeWorkerEvent(m);return;}
         if (m.type === 'storage-fault') { this.cooldown = Date.now() + 1000; this.setState('pending'); this.stop(g); return; }
@@ -304,6 +313,12 @@ export class SQLiteReplicaBroker {
     if (this.owner?.token === g.token) this.owner = undefined;
     g.release();
   }
+  private async drainForVisibleOwner(g:Generation,claimed=true){
+    if(this.generation!==g||g.draining)return;g.draining=true;g.drainStarted=Date.now();this.cooldown=Date.now()+(claimed?5000:100);this.setState('pending');
+    // The actor drains accepted calls, commits FULL, checkpoints and closes
+    // SAH handles before acknowledging. Only then may the Web Lock release.
+    g.worker.postMessage({type:'drain-owner',token:g.token});
+  }
   handoff() {
     this.cooldown = Date.now() + 5000;
     this.election?.abort();
@@ -341,7 +356,7 @@ export class SQLiteReplicaBroker {
   }
   private async serve(m: any) {
     const g = this.generation;
-    if (!g?.ready || m?.protocol !== protocol || m.token !== g.token || typeof m.from !== 'string' ||!m.from||m.from.length>128|| typeof m.id !== 'string' || m.id.length > 256 || !publicOperations.has(m.op)) return;
+    if (!g?.ready ||g.draining|| m?.protocol !== protocol || m.token !== g.token || typeof m.from !== 'string' ||!m.from||m.from.length>128|| typeof m.id !== 'string' || m.id.length > 256 || !publicOperations.has(m.op)) return;
     const key = m.from + ':' + m.id;
     if (this.inflight.has(key)) return;
     let bytes: number;
@@ -418,7 +433,8 @@ export class SQLiteReplicaBroker {
     this.closed = true; this.changeListeners.clear();this.lastChanges.clear();this.lastChangeBytes=0; clearInterval(this.timer);
     this.direct?.port.postMessage({ type: 'bye' }); this.direct?.port.close();
     this.port?.postMessage({ type: 'bye' }); this.port?.close(); this.control.close(); this.replies.close();
-    globalThis.removeEventListener('pagehide', this.onPageHide); globalThis.removeEventListener('pageshow', this.onPageShow);
+    globalThis.removeEventListener('pagehide', this.onPageHide); globalThis.removeEventListener('pageshow', this.onPageShow);globalThis.removeEventListener('focus',this.onVisibility);
+    if(typeof document!=='undefined')document.removeEventListener('visibilitychange',this.onVisibility);
     if(typeof document!=='undefined'){document.removeEventListener('freeze', this.onFreeze);document.removeEventListener('resume', this.onResume);}
     this.setState('closed');
   }

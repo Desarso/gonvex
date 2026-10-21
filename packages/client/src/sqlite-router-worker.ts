@@ -7,10 +7,12 @@ import {sqliteRequestBytes} from './sqlite-request-frame.js';
 // imports SQLite, schema, rows or application code.
 installSQLiteWasmByteCache();
 let ownerHost:SQLiteReplicaBroker|undefined;
+let ownerCapability={nestedWorker:typeof Worker==='function',webLocks:!!navigator.locks,reason:'not-configured'};
 /** The SharedWorker owns election and its dedicated OPFS child, independent of any page. */
 export function configureSQLiteRouterOwner(options:Pick<SQLiteBrokerOptions,'createWorker'|'schemaVersion'>){
+ ownerCapability={nestedWorker:typeof Worker==='function',webLocks:!!navigator.locks,reason:typeof Worker!=='function'?'nested-worker-unavailable':!navigator.locks?'web-locks-unavailable':'shared-owner'};
  if(ownerHost||!options.createWorker||typeof Worker!=='function'||!navigator.locks)return;
- ownerHost=new SQLiteReplicaBroker({...options,createWorker:()=>{try{return options.createWorker!();}catch(error){ownerHost?.close();ownerHost=undefined;for(const peer of peers.values())post(peer.port,{type:'pong',ownerHost:false});throw error;}}});
+ ownerHost=new SQLiteReplicaBroker({...options,createWorker:()=>{try{return options.createWorker!();}catch(error){ownerCapability.reason='nested-worker-construction-failed';ownerHost?.close();ownerHost=undefined;for(const peer of peers.values())post(peer.port,{type:'pong',ownerHost:false,ownerCapability});throw error;}}});
 }
 const peers = new Map<string, { port: MessagePort; seen: number }>();
 const maxPeers = 64;
@@ -27,13 +29,13 @@ shared.onconnect = ({ ports: [port] }) => {
     if (!id) {
       if (m?.type !== 'hello' || m.protocol !== protocol || typeof m.tab !== 'string' || m.tab.length > 128 || peers.size >= maxPeers && !peers.has(m.tab)) { finish(); port.close(); return; }
       id = m.tab; peers.get(id!)?.port.close(); peers.set(id!, { port, seen: Date.now() });
-      finish(); post(port, { type: 'pong',ownerHost:!!ownerHost }); return;
+      finish(); post(port, { type: 'pong',ownerHost:!!ownerHost,ownerCapability }); return;
     }
     const peer = peers.get(id);
     if (!peer || peer.port !== port) { port.close(); return; }
     peer.seen = Date.now();
     if (m?.type === 'bye') { peers.delete(id); port.close(); }
-    else if (m?.type === 'ping') post(port, { type: 'pong',ownerHost:!!ownerHost });
+    else if (m?.type === 'ping') post(port, { type: 'pong',ownerHost:!!ownerHost,ownerCapability });
     else if (m?.type === 'attach' && typeof m.to === 'string' && m.port === undefined) {
       const target = peers.get(m.to), attached = ports[0];
       if(attached&&ownerHost&&m.to===ownerHost.hostedOwnerID)ownerHost.attachHostedFollower(id!,m.token,attached);
