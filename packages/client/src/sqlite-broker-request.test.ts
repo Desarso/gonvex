@@ -262,3 +262,7 @@ it('forwards follower entity reads with their tab ownership and returns the comp
  expect(broker.reply).toHaveBeenCalledTimes(5);
  for(const call of broker.reply.mock.calls)expect(call[1]).toEqual({generation:{epoch:1,sequence:3},rows:[{id:'task',value:row}]});
 });
+
+it('reports whether a follower reaches the dedicated owner directly or through its page',()=>{
+ const broker=client() as any;expect(broker.stats().route).toBe('broadcast-page');broker.port={};expect(broker.stats().route).toBe('shared-router-page');broker.direct={ready:false};expect(broker.stats().directPending).toBe(true);broker.direct.ready=true;expect(broker.stats().route).toBe('direct-worker');broker.generation={};expect(broker.stats().route).toBe('owner-local');
+});
