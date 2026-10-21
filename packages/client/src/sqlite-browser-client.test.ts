@@ -562,3 +562,12 @@ it('does not spend the authentication deadline while the transport is disconnect
  await vi.advanceTimersByTimeAsync(31000);expect(done).not.toHaveBeenCalled();online=true;f.control();await vi.advanceTimersByTimeAsync(10);await auth;expect(done).toHaveBeenCalledOnce();
  }finally{f.client.close();vi.useRealTimers();}
 });
+
+it('shares identical in-flight entity batches and releases them after settlement',async()=>{
+ const f=fixture();let resolve!:(value:any)=>void;const pending=new Promise(resolvePending=>{resolve=resolvePending;});
+ f.handler=input=>input.method==='entities'?pending:undefined;
+ const first=f.client.entities('tasks',['a']),second=f.client.entities('tasks',['a']);expect(second).toBe(first);
+ await vi.waitFor(()=>expect(f.calls.filter(call=>call.input.method==='entities')).toHaveLength(1));
+ resolve({generation:{epoch:1,sequence:1},rows:[{id:'a',value:{id:'a'}}]});await first;
+ await f.client.entities('tasks',['a']);expect(f.calls.filter(call=>call.input.method==='entities')).toHaveLength(2);
+});

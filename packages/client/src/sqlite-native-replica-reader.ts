@@ -16,6 +16,8 @@ export type SQLiteNativeEntityResult={generation:SQLiteCanonicalGeneration;rows:
  * as null slots, so paging cannot skip or duplicate a following member. */
 export class SQLiteNativeReplicaReader {
  private readonly windows:SQLiteWindowStore;
+ private readonly timings:Array<{entity:string;count:number;start:number;readyMs:number;sqlMs:number;end:number}>=[];
+ readTimings(){return this.timings.slice();}
  private predictions?:Pick<SQLitePredictions,'entities'|'ready'>;
  /** Installed by the generated owner program before admitting UI reads. */
  usePredictions(predictions:Pick<SQLitePredictions,'entities'|'ready'>){if(this.predictions&&this.predictions!==predictions)throw Error('Native reader already has its prediction store');this.predictions=predictions;}
@@ -38,11 +40,11 @@ export class SQLiteNativeReplicaReader {
   sqlitePayloadBytes(input,32768);this.scope(input.scope);
   if(!Array.isArray(input.ids)||input.ids.length>128||input.ids.some(id=>typeof id!=='string'||!id||id.length>1024)||typeof input.entity!=='string'||!Object.hasOwn(this.engine.schema,input.entity))throw new TypeError('Invalid bounded entity request');
   const offset=input.offset??0;if(!Number.isSafeInteger(offset)||offset<0||offset>input.ids.length||offset>0&&!input.expected)throw new TypeError('Entity continuation requires its generation');
-  await this.ready();let result!:SQLiteNativeEntityResult;
+  const start=Date.now();await this.ready();const sqlStart=Date.now();let result!:SQLiteNativeEntityResult;
   await this.db.withTransactionAsync(async()=>{
    const generation=await this.generation(input.expected);
    let take=input.ids.length-offset;for(;;){try{result={generation,offset,nextOffset:offset+take<input.ids.length?offset+take:null,rows:await this.values(input.scope,input.entity,input.ids.slice(offset,offset+take))};sqlitePayloadBytes(result,131072);break;}catch(error){if(take<=1||!pageBudgetError(error))throw error;take=Math.max(1,Math.floor(take/2));}}
-  });return result;
+  });this.timings.push({entity:input.entity,count:input.ids.length,start,readyMs:sqlStart-start,sqlMs:Date.now()-sqlStart,end:Date.now()});if(this.timings.length>64)this.timings.shift();return result;
  }
  async window(input:SQLiteNativeWindowRead):Promise<SQLiteNativeWindowResult|undefined>{
   sqlitePayloadBytes(input,32768);this.scope(input.scope);
