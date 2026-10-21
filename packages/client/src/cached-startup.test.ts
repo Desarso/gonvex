@@ -73,7 +73,7 @@ describe("cached session startup", () => {
     unsubscribe();
   });
 
-  it("finishes accepted auth when a refresh callback is attached during hydration", async () => {
+  it("keeps local readiness unavailable during hydration even when admission accepts and refresh attaches", async () => {
     const { client, storage } = await fixture({ ...auth, tenant: "new-tenant" });
     await client.localSessionReady;
     let release: () => void = () => undefined;
@@ -82,23 +82,33 @@ describe("cached session startup", () => {
     const socket = socketFor(client);
     socket.receive({ type: "auth.result", id: socket.sent[0].id, result: { replica: directive, localIdentity: identity } });
     await vi.waitFor(() => expect(storage.loadWorkingSet).toHaveBeenCalledTimes(1));
+    expect(client.localSessionState()).toBe("unavailable");
+    expect(client.localReplica.entityCompleteness("tasks")).toBe("partial");
     client.setAuth({ fetchToken: async () => "opaque-session" });
+    expect(client.localSessionState()).toBe("unavailable");
     release();
     await accepted;
-    expect(client.localSessionState()).toBe("authenticated");
+    await vi.waitFor(() => expect(client.localSessionState()).toBe("authenticated"));
   });
 
-  it("starts normally without a saved session and persists read-only sessions after acceptance", async () => {
+  it("admits without a saved session but certifies readiness and persists only after local recovery", async () => {
     const { client, storage } = await fixture({ ...auth, tenant: "new-tenant" });
     await expect(client.localSessionReady).resolves.toBe(false);
+    let release!: () => void;
+    storage.loadWorkingSet.mockImplementationOnce(() => new Promise(resolve => { release = () => resolve(undefined); }));
     const pending = client.authenticate({ ...auth, tenant: "new-tenant" });
     const socket = socketFor(client);
     socket.receive({ type: "auth.result", id: socket.sent[0].id, result: { replica: { ...directive, visibilityScope: "new-visible" }, localIdentity: identity } });
     await pending;
-    expect(client.localSessionState()).toBe("authenticated");
+    // Accepted identity is not a readable/complete cached workspace certificate.
+    expect(client.localSessionState()).toBe("unavailable");
+    expect(client.localReplica.entityCompleteness("tasks")).toBe("partial");
+    expect(await storage.loadSession(owner.replace("\u0000tenant\u0000", "\u0000new-tenant\u0000"))).toBeUndefined();
+    release();
+    await vi.waitFor(() => expect(client.localSessionState()).toBe("authenticated"));
     expect(storage.loadWorkingSet.mock.calls.map(([scope]) => scope)).toEqual(["new-visible"]);
     const nextOwner = owner.replace("\u0000tenant\u0000", "\u0000new-tenant\u0000");
-    expect(await storage.loadSession(nextOwner)).toBeDefined();
+    await vi.waitFor(async () => expect(await storage.loadSession(nextOwner)).toBeDefined());
   });
 
   it("quarantines the replica and forgets restored authority after a server rejection", async () => {
@@ -404,5 +414,35 @@ describe('server tenant admission display signal', () => {
       else client.close();
       expect(client.tenantAdmission()).toBeUndefined();
     }
+  });
+});
+
+describe('admission independent of working-set hydration', () => {
+  it('accepts the server session while row hydration remains blocked', async () => {
+    const { client, storage } = await fixture({ ...auth, tenant: 'new-tenant' });
+    await client.localSessionReady;
+    let release!: () => void;
+    storage.loadWorkingSet.mockImplementationOnce(() => new Promise(resolve => { release = () => resolve(undefined); }));
+    const accepted = client.authenticate({ ...auth, tenant: 'new-tenant' });
+    const socket = socketFor(client);
+    socket.receive({ type: 'auth.result', id: socket.sent[0].id, result: { replica: directive, localIdentity: identity } });
+    await expect(accepted).resolves.toBeUndefined();
+    expect(client.tenantAdmission()).toBeDefined();
+    expect(client.localSessionState()).not.toBe('authenticated');
+    expect(client.localReplica.entity('tasks', 'task')).toBeUndefined();
+    let recoveryFinished = false;
+    void (client as any).outboxReady.then(() => { recoveryFinished = true; });
+    await Promise.resolve(); expect(recoveryFinished).toBe(false);
+    const direct = client.reducer({ kind: 'reducer', path: 'tasks.edit' }, {}).catch(() => undefined);
+    (client as any).serverCapabilities.reducerBatch = 1;
+    const batch = client.reducerMany([{ ref: { kind: 'reducer', path: 'tasks.editMany' }, args: {} }]).catch(() => undefined);
+    await Promise.resolve(); await Promise.resolve();
+    expect(socket.sent.some(message => message.type === 'reducer.call' || message.type === 'reducer.callMany')).toBe(false);
+    release();
+    await vi.waitFor(() => expect(client.localSessionState()).toBe('authenticated'));
+    expect(recoveryFinished).toBe(true);
+    await vi.waitFor(() => expect(socket.sent.some(message => message.type === 'reducer.call')).toBe(true));
+    await vi.waitFor(() => expect(socket.sent.some(message => message.type === 'reducer.callMany')).toBe(true));
+    client.close(); await direct; await batch;
   });
 });
