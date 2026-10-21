@@ -5,7 +5,7 @@ import { SQLiteReplicaBroker } from './sqlite-broker.js';
 // replaced at its boundary; real multi-tab tests cover the actual transports.
 function client() {
   const broker = Object.assign(Object.create(SQLiteReplicaBroker.prototype), {
-    closed: false, failed: false,cooldown:0, changeListeners:new Set(),lastChanges:new Map(),lastChangeBytes:0, pending: new Map(), inflight: new Map(), inflightBytes: 0, pendingBytes: 0, serial: 0, tabID: 'test',
+    closed: false, failed: false,cooldown:0,tenantAdmission:false,admittedPeers:new Set(), changeListeners:new Set(),lastChanges:new Map(),lastChangeBytes:0, pending: new Map(), inflight: new Map(), inflightBytes: 0, pendingBytes: 0, serial: 0, tabID: 'test',
     send: vi.fn((call: any) => {
       clearTimeout(call.timer); broker.pending.delete(call.id); broker.pendingBytes -= call.bytes;
       call.resolve({ accepted: call.op, args: call.args });
@@ -279,7 +279,7 @@ it('supports broker election in a SharedWorker without a document',()=>{
 it('hands a hidden owner to a visible claimant only after the actor drains accepted reads and writes',async()=>{
  vi.stubGlobal('document',{visibilityState:'hidden'});
  const broker=client() as any,posts:any[]=[];const g={ready:true,token:'old',worker:{postMessage:(m:any)=>posts.push(m)},release:vi.fn()};
- broker.generation=g;broker.owner={id:'test',token:'old'};broker.setState=vi.fn();broker.broadcast=vi.fn();broker.workerCalls=new Map();
+ broker.tenantAdmission=true;broker.generation=g;broker.owner={id:'test',token:'old'};broker.setState=vi.fn();broker.broadcast=vi.fn();broker.workerCalls=new Map();
  broker.receiveControl({protocol:2,type:'visible-owner-request',tab:'foreground'});
  expect(posts).toEqual([{type:'drain-owner',token:'old'}]);expect(g.release).not.toHaveBeenCalled();
  expect(broker.generation).toBe(g);expect(g).toMatchObject({draining:true});
@@ -291,5 +291,13 @@ it('hands a hidden owner to a visible claimant only after the actor drains accep
 it('a visible owner keeps ownership and a hidden boot can elect without a visible claimant',()=>{
  vi.stubGlobal('document',{visibilityState:'visible'});const broker=client() as any;broker.generation={ready:true};broker.drainForVisibleOwner=vi.fn();
  broker.receiveControl({protocol:2,type:'visible-owner-request',tab:'other'});expect(broker.drainForVisibleOwner).not.toHaveBeenCalled();
+ vi.unstubAllGlobals();
+});
+
+it('visibility and foreground claims do not drain a signed-out authentication owner',()=>{
+ vi.stubGlobal('document',{visibilityState:'hidden'});const broker=client() as any;broker.generation={ready:true};broker.announce=vi.fn();broker.drainForVisibleOwner=vi.fn();broker.claimVisible=vi.fn();
+ broker.visibilityChanged();broker.receiveControl({protocol:2,type:'visible-owner-request',tab:'other'});
+ expect(broker.drainForVisibleOwner).not.toHaveBeenCalled();expect(broker.announce).not.toHaveBeenCalled();
+ broker.broadcast=vi.fn();broker.setVisibilityAdmission(true);broker.visibilityChanged();expect(broker.drainForVisibleOwner).toHaveBeenCalledOnce();
  vi.unstubAllGlobals();
 });

@@ -67,9 +67,14 @@ export class SQLiteReplicaBroker {
   private hubOwns:boolean|undefined;
   private ownerCapability:unknown;
   private lastHandoffMs:number|undefined;
-  private readonly onVisibility=()=>{const g=this.generation;if(g?.ready)this.announce(g,true);if(this.visible())this.claimVisible();else if(g&&typeof document!=='undefined')void this.drainForVisibleOwner(g,false);};
+  private tenantAdmission=false;
+  private readonly admittedPeers=new Set<string>();
+  setVisibilityAdmission(admitted:boolean){if(this.tenantAdmission===admitted)return;this.tenantAdmission=admitted;this.broadcast({type:'tenant-admission',tab:this.tabID,admitted});if(admitted)this.claimVisible();}
+  private hasTenant(){return this.tenantAdmission||this.admittedPeers.size>0;}
+  private readonly onVisibility=()=>this.visibilityChanged();
+  private visibilityChanged(){if(!this.hasTenant())return;const g=this.generation;if(g?.ready)this.announce(g,true);if(this.visible())this.claimVisible();else if(g&&typeof document!=='undefined')void this.drainForVisibleOwner(g,false);};
   private visible(){return typeof document!=='undefined'&&document.visibilityState==='visible';}
-  private claimVisible(){if(!this.visible()||this.hubOwns||this.closed)return;this.cooldown=0;this.broadcast({type:'visible-owner-request',tab:this.tabID});this.elect();}
+  private claimVisible(){if(!this.tenantAdmission||!this.visible()||this.hubOwns||this.closed)return;this.cooldown=0;this.broadcast({type:'visible-owner-request',tab:this.tabID});this.elect();}
   private direct?: { port: MessagePort; token: string; ready: boolean; started: number; seen: number };
   private readonly timer: ReturnType<typeof setInterval>;
   private readonly onPageHide = () => this.handoff();
@@ -96,7 +101,7 @@ export class SQLiteReplicaBroker {
   get hostedOwnerID(){return this.tabID;}
   routeHostedRequest(message:unknown){return this.serve(message);}
   attachHostedFollower(tab:string,token:string,port:MessagePort){const g=this.generation;if(!g?.ready||token!==g.token){port.close();return;}g.worker.postMessage({type:'attach',tab,token,port},[port]);}
-  stats() { return { ownerCapability:this.ownerCapability,ownerVisible:this.owner?.visible,visible:this.visible(),handoffMs:this.lastHandoffMs,ownerHost:typeof document==='undefined'||this.hubOwns?'shared-worker':'page',route:this.generation?'owner-local':this.direct?.ready?'direct-worker':this.port?'shared-router-page':'broadcast-page',directPending:!!this.direct&&!this.direct.ready, state: this.stateValue, adapter:this.generation?.adapter??this.adapter, owner: this.owner?.id, ownerEpoch:this.owner?.epoch, ownsWorker: !!this.generation, pending: this.pending.size, pendingBytes: this.pendingBytes, ownerOperations: this.inflight.size, ownerBytes: this.inflightBytes, listeners:this.changeListeners.size,changeScopes:this.lastChanges.size,changeBytes:this.lastChangeBytes }; }
+  stats() { return { tenantAdmitted:this.tenantAdmission,ownerCapability:this.ownerCapability,ownerVisible:this.owner?.visible,visible:this.visible(),handoffMs:this.lastHandoffMs,ownerHost:typeof document==='undefined'||this.hubOwns?'shared-worker':'page',route:this.generation?'owner-local':this.direct?.ready?'direct-worker':this.port?'shared-router-page':'broadcast-page',directPending:!!this.direct&&!this.direct.ready, state: this.stateValue, adapter:this.generation?.adapter??this.adapter, owner: this.owner?.id, ownerEpoch:this.owner?.epoch, ownsWorker: !!this.generation, pending: this.pending.size, pendingBytes: this.pendingBytes, ownerOperations: this.inflight.size, ownerBytes: this.inflightBytes, listeners:this.changeListeners.size,changeScopes:this.lastChanges.size,changeBytes:this.lastChangeBytes }; }
   private setState(state: SQLiteBrokerState) {
     if (state === this.stateValue) return;
     this.stateValue = state;
@@ -127,7 +132,8 @@ export class SQLiteReplicaBroker {
   private receiveControl(m: any) {
     if(this.closed)return;
     if(m?.protocol!==protocol){if(m?.type==='owner'&&m?.owner)this.fail(error('PROTOCOL','Storage worker protocol changed; reload this client'));return;}
-    if(m.type==='visible-owner-request'&&typeof m.tab==='string'&&m.tab!==this.tabID&&!this.visible()&&typeof document!=='undefined'){this.cooldown=Date.now()+5000;if(this.generation)void this.drainForVisibleOwner(this.generation);else{this.election?.abort();this.election=undefined;}return;}
+    if(m.type==='tenant-admission'&&typeof m.tab==='string'&&m.tab.length<=128){if(m.admitted===true&&this.admittedPeers.size<64)this.admittedPeers.add(m.tab);else if(m.admitted===false)this.admittedPeers.delete(m.tab);return;}
+    if(m.type==='visible-owner-request'&&typeof m.tab==='string'&&m.tab!==this.tabID&&this.hasTenant()&&!this.visible()&&typeof document!=='undefined'){this.cooldown=Date.now()+5000;if(this.generation)void this.drainForVisibleOwner(this.generation);else{this.election?.abort();this.election=undefined;}return;}
     if (m.type === 'owner' && m.owner?.id !== this.tabID) {
       const o = m.owner as Owner;
       if (!Number.isSafeInteger(o.epoch) || o.epoch < 0 || typeof o.id !== 'string' ||!o.id||o.id.length>128|| typeof o.token !== 'string'||!o.token||o.token.length>128 || !Number.isFinite(o.seen)) return;
@@ -428,7 +434,7 @@ export class SQLiteReplicaBroker {
   }
   close() {
     if (this.closed) return;
-    this.sendBye();this.fail(error('CLOSED', 'Storage broker closed', 'unknown'));
+    this.setVisibilityAdmission(false);this.sendBye();this.fail(error('CLOSED', 'Storage broker closed', 'unknown'));
     this.election?.abort(); if (this.generation) this.stop(this.generation);
     this.closed = true; this.changeListeners.clear();this.lastChanges.clear();this.lastChangeBytes=0; clearInterval(this.timer);
     this.direct?.port.postMessage({ type: 'bye' }); this.direct?.port.close();
