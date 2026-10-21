@@ -183,8 +183,8 @@ export class SQLiteBrowserClient {
  private readonly completedTokenRequests=new Set<string>();
  private async storageCall<T>(input:any,commandID?:string):Promise<T>{
   const revision=this.revision,readOnly=new Set(['controls','status','entities','replicaPage','collectionPage','localLivePage','livePage','replicaPendingPage','livePendingPage','controlState']).has(input?.method);let retries=0;
-  for(;;){this.current(revision);try{return await this.options.broker.request<T>('clientCall',input,90000,commandID);}catch(error){
-   if(!readOnly||(error as any)?.code!=='TIMEOUT'||(error as any)?.outcome!=='rejected')throw error;
+  for(;;){this.current(revision);try{return await this.options.broker.request<T>('clientCall',input,readOnly?2000:90000,commandID);}catch(error){
+   if(!readOnly||(error as any)?.code!=='TIMEOUT'||(error as any)?.outcome!=='rejected'||retries>=2)throw error;
    // A timed-out read has no durable side effects. Keep its mounted snapshot
    // and one request reservation while the owner/router recovers; never apply
    // this policy to an unknown write outcome or an admission failure.

@@ -538,3 +538,19 @@ it('answers offline live search from SQLite predicted rows independently of a tr
  expect(f.client.replicaWindowMembership(f.client.replicaSignature(ref,{search:'offline-created',limit:50}))?.source).toBe('cache');
  stop();watch.close();
 });
+
+it('starts a fresh boot without inherited admission or mounted refresh ownership',async()=>{
+ const first=fixture();await first.client.connect();first.admit('same-scope-artifact-hash');await vi.waitFor(()=>expect((first.client as any).admissionKey).toBe('same-scope-artifact-hash'));
+ first.client.close();const next=fixture();expect((next.client as any).admissionKey).toBeUndefined();
+ expect(next.client.localReplica.readDiagnostics()).toEqual({refreshOwner:null,reads:[],retryScheduled:false});
+ expect(next.client.memoryCounters().replicaRows).toBe(0);
+});
+
+it('uses two-second local-read attempts and surfaces exhaustion after bounded retries',async()=>{
+ const f=fixture();await f.client.connect();
+ const request=vi.spyOn((f.client as any).options.broker,'request');
+ f.handler=input=>{if(input.method==='entities')throw Object.assign(Error('Storage read timed out'),{code:'TIMEOUT',outcome:'rejected'});};
+ await expect(f.client.entities('tasks',['missing'])).rejects.toMatchObject({code:'TIMEOUT',outcome:'rejected'});
+ const reads=request.mock.calls.filter(call=>(call[1] as any)?.method==='entities');
+ expect(reads).toHaveLength(3);expect(reads.every(call=>call[2]===2000)).toBe(true);
+});
