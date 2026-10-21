@@ -1724,6 +1724,7 @@ mod tests {
             "table":"routing", "key":"id", "where":{"operator":"eqContext","column":"owner","context":"member.id"}
         })).unwrap();
         let resolved = ResolvedVisibility {
+            ephemeral_member: false,
             revision: 1,
             direct: BTreeMap::from([("member.id".to_owned(), "member-a".to_owned())]),
             role: "member".to_owned(),
@@ -2044,6 +2045,7 @@ mod tests {
                 }))
                 .unwrap();
                 let resolved = ResolvedVisibility {
+                    ephemeral_member: false,
                     revision: 1,
                     direct: context.clone(),
                     role: "member".into(),

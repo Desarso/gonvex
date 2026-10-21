@@ -2327,6 +2327,7 @@ mod tests {
                 },
             },
             ResolvedVisibility {
+                ephemeral_member: false,
                 revision: 1,
                 direct: BTreeMap::new(),
                 role: String::new(),
@@ -2536,6 +2537,7 @@ mod tests {
             },
         };
         let resolved = ResolvedVisibility {
+            ephemeral_member: false,
             revision: 1,
             direct: BTreeMap::new(),
             role: String::new(),
