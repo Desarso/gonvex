@@ -542,7 +542,7 @@ it('answers offline live search from SQLite predicted rows independently of a tr
 it('starts a fresh boot without inherited admission or mounted refresh ownership',async()=>{
  const first=fixture();await first.client.connect();first.admit('same-scope-artifact-hash');await vi.waitFor(()=>expect((first.client as any).admissionKey).toBe('same-scope-artifact-hash'));
  first.client.close();const next=fixture();expect((next.client as any).admissionKey).toBeUndefined();
- expect(next.client.localReplica.readDiagnostics()).toEqual({refreshOwner:null,reads:[],retryScheduled:false});
+ expect(next.client.localReplica.readDiagnostics()).toEqual({refreshOwner:null,reads:[],retryScheduled:false,discarded:{counts:{},recent:[]}});
  expect(next.client.memoryCounters().replicaRows).toBe(0);
 });
 

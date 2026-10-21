@@ -86,7 +86,7 @@ it('settles a missing ID in a batch and clears all refresh ownership',async()=>{
  const f=fixture();f.handler=async(_entity,ids)=>({generation:{epoch:1,sequence:1},rows:ids.map(id=>({id,value:id==='missing'?null:{id,n:1}}))});
  const release=f.view.retain('tasks',['present','missing']);
  await vi.waitFor(()=>expect(f.view.entity('tasks','present')).toBeDefined());
- await vi.waitFor(()=>expect(f.view.readDiagnostics()).toEqual({refreshOwner:null,reads:[],retryScheduled:false}));
+ await vi.waitFor(()=>expect(f.view.readDiagnostics()).toEqual({refreshOwner:null,reads:[],retryScheduled:false,discarded:{counts:{},recent:[]}}));
  expect(f.view.entity('tasks','missing')).toBeUndefined();expect(f.calls).toHaveLength(1);release();f.view.close();
 });
 it('releases the timed-out request identity before scheduling a replacement',async()=>{
@@ -94,4 +94,14 @@ it('releases the timed-out request identity before scheduling a replacement',asy
  await vi.waitFor(()=>expect(f.view.readDiagnostics().retryScheduled).toBe(true));
  expect(f.view.readDiagnostics().refreshOwner).toBeNull();expect(f.view.readDiagnostics().reads).toEqual([]);
  release();f.view.close();
+});
+
+it('publishes an in-flight row to a replacement subscriber for the same mounted ID',async()=>{
+ const f=fixture();let finish!:(value:SQLiteNativeEntityResult)=>void;
+ f.handler=async()=>new Promise(resolve=>{finish=resolve;});
+ const first=f.view.subscribe(()=>{},{entity:'tasks',ids:['a']});await vi.waitFor(()=>expect(f.calls).toHaveLength(1));
+ first();const second=f.view.subscribe(()=>{},{entity:'tasks',ids:['a']});
+ finish({generation:{epoch:1,sequence:1},rows:[{id:'a',value:{id:'a',n:2}}]});
+ await vi.waitFor(()=>expect(f.view.entity('tasks','a')).toEqual({id:'a',n:2}));
+ expect(f.view.readDiagnostics().discarded.counts).toEqual({});second();f.view.close();
 });
