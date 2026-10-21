@@ -1,3 +1,4 @@
+import {sqliteCurrentDiagnostics} from './sqlite-current-diagnostics.js';
 import type {SQLitePrecommitDisplay} from './sqlite-precommit-display.js';
 import {OriginStorageWorkerLease} from './origin-storage-worker-lease.js';
 import type {ByteBudgetSnapshot} from './byte-budget.js';
@@ -135,7 +136,7 @@ async function execute(op: string, args: any, requestID:string) {
     case 'canonicalRead': return canonical!.read(args);
     case 'canonicalGeneration': return canonical!.generation(scope(args.scope),args.expected);
     case 'ping': return { ready: true };
-    case 'stats': return { ...engine.stats(),originEpoch,persistence:host.persistence,workerLease:workerLease.stats(),startupMemory,...snapshots!.stats(),ingressNativeHash:Number(!!host.database.ingressNativeHash), wasmBytes: host.memoryBytes(),sqliteMemory:host.memoryStats?.(),statementBytes:host.statementBytes?.(), clients: ports.size,queuedOperations,queuedBytes,ownerQueue:{maxQueueWaitMs,maxOwnerRunMs,recent:queueTimings.slice()},transactions:sqliteOwnerTransactionStats(),requests:operations,requestBytes:bytes,delivery:tabs.stats(),nativeProfile:host.takeProfile?.(),pendingPages:pendingReader?.budgets()??[],program:program?.budgets?.()??[],programDiagnostics:await program?.diagnostics?.() };
+    case 'stats': if(args.current)return sqliteCurrentDiagnostics({originEpoch,persistence:host.persistence,wasmBytes:host.memoryBytes(),sqliteMemory:host.memoryStats?.(),statementBytes:host.statementBytes?.(),clients:ports.size,queuedOperations,queuedBytes,requests:operations,requestBytes:bytes,program:program?.budgets?.()??[],pendingPages:pendingReader?.budgets()??[],workerLease:workerLease.stats(),delivery:tabs.stats(),ownerQueue:{maxQueueWaitMs,maxOwnerRunMs},transactions:sqliteOwnerTransactionStats()});return { ...engine.stats(),originEpoch,persistence:host.persistence,workerLease:workerLease.stats(),startupMemory,...snapshots!.stats(),ingressNativeHash:Number(!!host.database.ingressNativeHash), wasmBytes: host.memoryBytes(),sqliteMemory:host.memoryStats?.(),statementBytes:host.statementBytes?.(), clients: ports.size,queuedOperations,queuedBytes,ownerQueue:{maxQueueWaitMs,maxOwnerRunMs,recent:queueTimings.slice()},transactions:sqliteOwnerTransactionStats(),requests:operations,requestBytes:bytes,delivery:tabs.stats(),nativeProfile:host.takeProfile?.(),pendingPages:pendingReader?.budgets()??[],program:program?.budgets?.()??[],programDiagnostics:await program?.diagnostics?.() };
     case 'integrity': return engine.integrity();
     case 'page': return engine.page(scope(args.scope), args.plan as SQLitePagePlan);
     case 'viewPage': return engine.viewPage(scope(args.scope), args.signature, args.plan as SQLitePagePlan, args.offset);
