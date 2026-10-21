@@ -345,6 +345,7 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
   }
 
   readonly ownsWorkingSetRows = true;
+  readonly ownsHydratedRows = true;
 
   async loadWorkingSet(scope:string,budget:{maxRows:number;maxBytes:number;preferredWindows?:readonly string[]}):Promise<ReplicaSnapshot|undefined> {
     await this.initialize();
@@ -422,23 +423,26 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
       // Scan getAll-backed pages in this same read transaction, retaining only
       // exact window membership. Small/sparse live windows keep indexed gets.
       if (window.kind === 'replica' && window.ids.length > 2048) {
-        const wanted = new Set(window.ids);
-        const found = new Map<string, ReplicaRow>();
+        const positions = new Map(window.ids.map((id,index) => [id,index]));
+        const rows = new Array<ReplicaRow | undefined>(window.ids.length);
+        let count = 0;
         let after: string | undefined;
-        while (found.size < wanted.size) {
+        while (count < positions.size) {
           const page = await this.database.entities.where('[scope+entity+id]')
             .between(after === undefined ? [scope,window.entity] : [scope,window.entity,after],
               [scope,window.entity,[]], after === undefined, false)
             .limit(256).toArray();
           if (!page.length) break;
-          for (const row of page) if (!row.deleted && wanted.has(row.id))
-            found.set(row.id, JSON.parse(row.value));
+          for (const row of page) {
+            const index = positions.get(row.id);
+            if (!row.deleted && index !== undefined) {
+              rows[index] = JSON.parse(row.value);
+              count++;
+            }
+          }
           after = page[page.length - 1]!.id;
         }
-        return {window,rows:window.ids.flatMap(id => {
-          const row = found.get(id);
-          return row ? [row] : [];
-        })};
+        return {window,rows:rows.filter((row): row is ReplicaRow => row !== undefined)};
       }
       return {window,rows:(await this.loadEntityRows(scope,window.entity,window.ids)).map(entry=>entry.row)};
     });
