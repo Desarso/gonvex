@@ -351,10 +351,17 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
     return this.database.transaction('r',this.database.entities,this.database.windows,this.database.meta,async()=>{
       const entities:ReplicaSnapshot['entities']={},liveQueries:ReplicaSnapshot['liveQueries']={},partial=new Set<string>();
       let bytes=0,count=0,hasRows=false,full=false;
-      for (const signature of budget.preferredWindows ?? []) {
-        const record = await this.database.windows.get([scope,signature]);
-        if (!record || record.deleted) continue;
-        const window: ReplicaWindow = JSON.parse(record.value);
+      // Membership metadata is small compared with row values. Recover exact
+      // retained/live windows before an alphabetical scan of unrelated tables.
+      await visitRecords(this.database.windows.where('scope').equals(scope),record=>{
+        if(!record.deleted)liveQueries[record.signature]=JSON.parse(record.value);
+      });
+      const live = Object.values(liveQueries).filter(window=>window.kind==='live')
+        .sort((a,b)=>(b.cursor?.revision??0)-(a.cursor?.revision??0));
+      const preferred=[...new Set([...(budget.preferredWindows??[]),...live.map(window=>window.signature)])];
+      for (const signature of preferred) {
+        const window=liveQueries[signature];
+        if(!window)continue;
         for (let offset = 0; offset < window.ids.length && !full; offset += 256) {
           const records = await this.database.entities.bulkGet(window.ids.slice(offset,offset+256).map(id => [scope,window.entity,id]) as [string,string,string][]);
           for (const row of records) {
@@ -385,11 +392,8 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
         const last = page[page.length - 1]!;
         after = [last.scope, last.entity, last.id];
       }
-      await visitRecords(this.database.windows.where('scope').equals(scope),record=>{
-        if(record.deleted)return;
-        const window:ReplicaWindow=JSON.parse(record.value);liveQueries[record.signature]=window;
+      for(const window of Object.values(liveQueries))
         if(window.ids.some(id=>!entities[window.entity]?.[id]))partial.add(window.entity);
-      });
       const cursor=await this.database.meta.get([scope,'cursor']);
       if(!hasRows && !Object.keys(liveQueries).length && !cursor)return undefined;
       return {entities,liveQueries,residentPartialTables:[...partial],cursor:cursor?JSON.parse(cursor.value):undefined,storageSequence:Number((await this.database.meta.get([scope,'sequence']))?.value??0)};

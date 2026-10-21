@@ -526,7 +526,13 @@ export class LocalReplica implements LocalReplicaView {
       // a same-scope activation cannot load a snapshot from before its commit.
       await this.persistence;
       const snapshot = !restoreFromStorage ? undefined : this.storage?.loadWorkingSet
-        ? await this.storage.loadWorkingSet(nextScope,{...this.residencyBudget,preferredWindows:[...this.retainedWindows.keys()]})
+        ? await this.storage.loadWorkingSet(nextScope,{
+          // Bootstrap only a bounded page plus references. Retained windows and
+          // entity leases recover additional rows through indexed reads later.
+          maxRows:Math.min(this.residencyBudget.maxRows,2048),
+          maxBytes:Math.min(this.residencyBudget.maxBytes,4*1024*1024),
+          preferredWindows:[...this.retainedWindows.keys()],
+        })
         : await this.storage?.load(nextScope);
       if (generation !== this.scopeActivationGeneration) return;
       this.scopeValue = nextScope;
