@@ -16,8 +16,13 @@ it('closes resources and rejects pending and future work', async () => {
   const pending = expect(tasks.yield()).rejects.toThrow('scheduler closed'); tasks.close();
   await pending; await expect(tasks.yield()).rejects.toThrow('scheduler closed'); tasks.close();
 });
-it('keeps a real timer fallback when MessageChannel is unavailable', async () => {
+it('uses a microtask fallback without background-clamped timers when MessageChannel is unavailable', async () => {
   vi.stubGlobal('MessageChannel', undefined); const tasks = new SQLiteTaskYield();
   try { let complete = false; const pending = tasks.yield().then(() => { complete = true; }); await Promise.resolve(); expect(complete).toBe(false); await pending; }
   finally { tasks.close(); vi.unstubAllGlobals(); }
+});
+
+it('continues yielding when background timers cannot fire',async()=>{
+ const tasks=new SQLiteTaskYield();const timer=vi.spyOn(globalThis,'setTimeout').mockImplementation(()=>{throw Error('Background timer used');});
+ try{for(let n=0;n<12;n++)await tasks.yield();}finally{timer.mockRestore();tasks.close();}
 });

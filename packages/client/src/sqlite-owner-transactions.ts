@@ -1,3 +1,4 @@
+import {yieldSQLiteTask} from './sqlite-task-yield.js';
 import type { SQLiteReplicaDatabase } from './sqlite-replica-storage.js';
 
 const transactionTimings:Array<{finishedAt:number;durationMs:number}>=[];let longestTransactionMs=0,transactionCount=0;export const sqliteOwnerTransactionStats=()=>({longestTransactionMs,transactionCount,recent:transactionTimings.slice()});
@@ -62,5 +63,5 @@ export class SQLiteOwnerQueueBusyError extends Error {
 /** Callers already own bounded ingress/intent slots. Wait outside the FIFO
  * rather than closing their socket when another connection uses its credits. */
 export async function waitForSQLiteOwnerAdmission<T>(submit:()=>Promise<T>,assertCurrent:()=>void):Promise<T>{
- for(;;){assertCurrent();try{return await submit();}catch(error){if(!(error instanceof SQLiteOwnerQueueBusyError))throw error;await new Promise<void>(resolve=>setTimeout(resolve,5));}}
+ for(;;){assertCurrent();try{return await submit();}catch(error){if(!(error instanceof SQLiteOwnerQueueBusyError))throw error;await yieldSQLiteTask();}}
 }

@@ -4,10 +4,10 @@ type RefPort = MessagePort & { ref?(): void; unref?(): void };
 export class SQLiteTaskYield {
   private channel?: MessageChannel;
   private pending?: { promise: Promise<void>; resolve(): void; reject(error: Error): void };
-  private timer?: ReturnType<typeof setTimeout>;
+  
   private closed = false;
   private readonly complete = () => {
-    const pending = this.pending; this.pending = undefined; this.timer = undefined;
+    const pending = this.pending; this.pending = undefined;
     (this.channel?.port1 as RefPort | undefined)?.unref?.(); pending?.resolve();
   };
   yield(): Promise<void> {
@@ -22,12 +22,12 @@ export class SQLiteTaskYield {
         (this.channel.port2 as RefPort).unref?.();
       }
       (this.channel.port1 as RefPort).ref?.(); this.channel.port2.postMessage(0);
-    } else this.timer = setTimeout(this.complete, 0);
+    } else queueMicrotask(this.complete);
     return promise;
   }
   close() {
     if (this.closed) return;
-    this.closed = true; if (this.timer !== undefined) clearTimeout(this.timer);
+    this.closed = true;
     this.channel?.port1.close(); this.channel?.port2.close(); this.channel = undefined;
     const pending = this.pending; this.pending = undefined;
     pending?.reject(new Error('SQLite task scheduler closed'));

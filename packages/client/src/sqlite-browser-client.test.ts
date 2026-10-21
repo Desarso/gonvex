@@ -571,3 +571,8 @@ it('shares identical in-flight entity batches and releases them after settlement
  resolve({generation:{epoch:1,sequence:1},rows:[{id:'a',value:{id:'a'}}]});await first;
  await f.client.entities('tasks',['a']);expect(f.calls.filter(call=>call.input.method==='entities')).toHaveLength(2);
 });
+
+it('attaches owner timing to diagnostics without exposing it in entity values',async()=>{
+ const f=fixture(),owner={received:10,sqlStart:11,sqlEnd:12,reply:13};f.handler=input=>input.method==='entities'?{generation:{epoch:1,sequence:1},rows:[{id:'a',value:{id:'a'}}],_sqliteReadTiming:owner}:undefined;
+ const result=await f.client.entities('tasks',['a']);expect(result).not.toHaveProperty('_sqliteReadTiming');expect(f.client.entityReadDiagnostics().at(-1)?.owner).toEqual(owner);
+});

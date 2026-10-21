@@ -1,3 +1,4 @@
+import {yieldSQLiteTask} from './sqlite-task-yield.js';
 import type {ClientMessage,ReplicaCursor,ServerMessage} from '@gonvex/protocol';
 import type {SQLiteOwnerProgramContext} from './sqlite-owner-actor.js';
 import type {SQLiteTransportHost,SQLiteTransportSession} from './sqlite-transport-host.js';
@@ -156,9 +157,9 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
     // Global queue count/bytes and this group's existing byte credit bound
     // tiny controls too. A separate sixteen-frame cap fragmented a byte-small
     // startup burst into multiple FULL commits before the coalescing turn.
-    // The existing ingress queue waits four ms for adjacent network tasks.
-    // Use the same bounded window for certificates and feed controls.
-    batch.timer=setTimeout(()=>this.flushControls(),4);
+    // Coalesce controls within the current turn without timer throttling.
+    // Binary ingress retains its independent task scheduler.
+    queueMicrotask(()=>this.flushControls());
    }
    batch.admissions.push(admitted);batch.frames.push(owned);batch.bytes+=bytes;next=batch.promise;
    if(batch.bytes>=262144)this.flushControls();
@@ -175,7 +176,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
  }
  private committed(key:string|symbol,effect:()=>void){if(this.activeControls)this.activeControls.after.set(key,effect);else effect();}
  private async processControls(batch:ControlBatch){
-  await Promise.all(batch.admissions);const state=batch.state;if(state.catchup)this.catchupMaxControlBatchFrames=Math.max(this.catchupMaxControlBatchFrames,batch.frames.length);if(state.catchup)await new Promise<void>(resolve=>setTimeout(resolve,0));let after=new Map<string|symbol,()=>void>();
+  await Promise.all(batch.admissions);const state=batch.state;if(state.catchup)this.catchupMaxControlBatchFrames=Math.max(this.catchupMaxControlBatchFrames,batch.frames.length);if(state.catchup)await yieldSQLiteTask();let after=new Map<string|symbol,()=>void>();
   await this.run(state,Math.max(262144,batch.bytes),async()=>{
    const saved=[...this.sources.values()].map(source=>({source,start:source.start,preparedStart:source.preparedStart,opening:source.opening,deferActivation:source.deferActivation})),startBytes=this.startBytes,watermark=state.watermark,cursorEpoch=state.cursorEpoch;
    const active={state,after:new Map<string|symbol,()=>void>()};this.activeControls=active;
