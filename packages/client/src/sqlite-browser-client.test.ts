@@ -476,3 +476,16 @@ it('revokes complete empty collection status when owner admission fails and rest
  refused=false;await f.client.pollControls();
  await vi.waitFor(()=>expect(watch.localReplicaState()).toMatchObject({rows:[],completeness:'complete',isUpToDate:true}));
 });
+
+
+it('keeps certified offline rows usable after a transient source-close timeout without granting online freshness',async()=>{
+ const f=fixture();let offline=false;
+ f.handler=async input=>{
+  if(input.method==='controls')return {tokens:[],status:{isWebSocketConnected:!offline,hasEverConnected:true},session:offline?'restored':'authenticated',failure:offline?{code:'PAGE_CHANGED',message:'Native source close acknowledgement timed out'}:null};
+  if(input.method==='replicaPage')return {generation:{epoch:1,sequence:1},rows:[{id:'a',value:{id:'a',name:'Certified'}}],offset:0,nextOffset:null,window:{generation:'cached',total:1,header:{completeness:'complete',truncated:false,source:'server'}}};
+ };
+ const watch=f.client.watchReplica({path:'tasks.all'}),stop=watch.onUpdate(()=>{});cleanup.push(()=>{stop();watch.close();});
+ await vi.waitFor(()=>expect(watch.localReplicaState()).toMatchObject({rows:[{id:'a',name:'Certified'}],completeness:'complete'}));
+ offline=true;await f.client.pollControls();
+ await vi.waitFor(()=>expect(watch.localReplicaState()).toMatchObject({rows:[{id:'a',name:'Certified'}],completeness:'complete',freshness:'offline'}));
+});
