@@ -1,3 +1,6 @@
+import {IDBFactory, IDBKeyRange} from 'fake-indexeddb';
+import {Dexie} from 'dexie';
+import {IndexedDBLocalReplicaStorage} from './indexeddb-replica.js';
 import {DatabaseSync} from 'node:sqlite';
 import {expect,it,vi} from 'vitest';
 import {reducer,schema,getRow} from '@gonvex/module-sdk';
@@ -275,4 +278,25 @@ it('retains an offline-created prediction and merges its authoritative row witho
   expect((await f.predictions.entities('s','tasks',[rowId]))[0].row.n).toBe(10);
   expect((await f.journal.summary('s')).count).toBe(0);
  }finally{f.sql.close();}
+});
+
+it('matches IDB prediction for actual reads on the same partial replica without requiring unused tables',async()=>{
+ const f=await fixture();Object.assign(globalThis,{indexedDB:new IDBFactory(),IDBKeyRange});Dexie.dependencies.indexedDB=globalThis.indexedDB;Dexie.dependencies.IDBKeyRange=IDBKeyRange;
+ const idb=new IndexedDBLocalReplicaStorage('native-parity-'+crypto.randomUUID());
+ try{
+  await idb.replaceSnapshot({entities:{tasks:{a:{id:'a',n:1}}},liveQueries:{}},'s');
+  const coverage={tasks:{key:'id',complete:false}};
+  const execution={scope:'s',commandId:'parity',now:100,artifactHash:'artifact',identity};
+  const run=(path:string,view:Parameters<typeof f.options.runtime.execute>[2])=>f.options.runtime.execute(path,{id:'a'},view,execution);
+  const expected=await idb.withReadView('s',coverage,view=>run('increment',view));
+  const actual=await f.predictions.withReadView('s',coverage,view=>run('increment',view));
+  expect(actual).toEqual(expected);expect(actual.result).toMatchObject({id:'a',n:2});
+  // A scan is still incomplete in both adapters. Never invent absence from a partial table.
+  await expect(idb.withReadView('s',coverage,view=>run('scan',view))).rejects.toMatchObject({name:'IncompleteReplicaError'});
+  await expect(f.predictions.withReadView('s',coverage,view=>run('scan',view))).rejects.toMatchObject({name:'IncompleteReplicaError'});
+  // A certified narrow slice is sufficient for the scan actually executed.
+  const scoped={tasks:{key:'id',complete:false,completeWhere:[{column:'id',op:'eq' as const,value:'a'}]}};
+  const select=(view:Parameters<typeof f.options.runtime.execute>[2])=>view.select({table:'tasks',where:{column:'id',op:'eq',value:'a'}});
+  expect(await f.predictions.withReadView('s',scoped,select)).toEqual(await idb.withReadView('s',scoped,select));
+ }finally{idb.close();f.sql.close();}
 });
