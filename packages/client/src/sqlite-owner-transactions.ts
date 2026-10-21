@@ -1,5 +1,7 @@
 import type { SQLiteReplicaDatabase } from './sqlite-replica-storage.js';
 
+const transactionTimings:Array<{finishedAt:number;durationMs:number}>=[];let longestTransactionMs=0,transactionCount=0;export const sqliteOwnerTransactionStats=()=>({longestTransactionMs,transactionCount,recent:transactionTimings.slice()});
+
 /** Internal owner-actor host. Only the actor's FIFO may call it: a nested
  * adapter transaction belongs to the already admitted operation. The official
  * host itself still rejects concurrent transactions. No transport exposes SQL. */
@@ -26,7 +28,7 @@ export function sqliteOwnerTransactions(database: SQLiteReplicaDatabase): SQLite
       checkPoison();
       if(depth>=8)throw new RangeError('SQLite owner transaction nesting exceeds budget');
       if(!depth){
-        await database.withTransactionAsync(async()=>{depth++;poison=undefined;try{await run();checkPoison();}finally{depth--;poison=undefined;}});
+        const started=performance.now();try{await database.withTransactionAsync(async()=>{depth++;poison=undefined;try{await run();checkPoison();}finally{depth--;poison=undefined;}});}finally{transactionCount++;const durationMs=performance.now()-started;longestTransactionMs=Math.max(longestTransactionMs,durationMs);transactionTimings.push({finishedAt:Date.now(),durationMs});if(transactionTimings.length>64)transactionTimings.shift();}
         return;
       }
       const name='gv_owner_nested_'+(++serial);

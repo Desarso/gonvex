@@ -554,3 +554,11 @@ it('uses two-second local-read attempts and surfaces exhaustion after bounded re
  const reads=request.mock.calls.filter(call=>(call[1] as any)?.method==='entities');
  expect(reads).toHaveLength(3);expect(reads.every(call=>call[2]===2000)).toBe(true);
 });
+
+it('does not spend the authentication deadline while the transport is disconnected',async()=>{
+ vi.useFakeTimers();const f=fixture();let online=false;
+ f.handler=input=>{if(input.method==='controls')return {tokens:[],status:{isWebSocketConnected:online},session:'restored',authentication:online?'authenticated':'unavailable',failure:null};};
+ try{const done=vi.fn();const auth=f.client.authenticate({project:'project',tenant:'tenant',identity:{sub:'a'}});void auth.then(done,done);
+ await vi.advanceTimersByTimeAsync(31000);expect(done).not.toHaveBeenCalled();online=true;f.control();await vi.advanceTimersByTimeAsync(10);await auth;expect(done).toHaveBeenCalledOnce();
+ }finally{f.client.close();vi.useRealTimers();}
+});

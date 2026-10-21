@@ -15,7 +15,7 @@ type Delta=Extract<ServerMessage,{type:'replica.delta'}>;
 export type SQLiteFeedSource={id:string;signature:string;entity:string;key:string;path:string;completeEntity?:true;columns?:readonly string[]};
 type Source=SQLiteFeedSource&{deferredKey:string;bytes:number;start?:Start;preparedStart?:Start;deferActivation?:boolean;opening:boolean;closing?:{promise:Promise<void>;resolve():void;reject(error:unknown):void;timer:ReturnType<typeof setTimeout>}};
 type ControlBatch={state:State;frames:ServerMessage[];admissions:Promise<unknown>[];bytes:number;previous:Promise<void>;preceding:Promise<void>;promise:Promise<void>;resolve():void;reject(error:unknown):void;timer?:ReturnType<typeof setTimeout>};
-type State={stream:string;generation:number;scope:string;epoch:string;cursorEpoch?:string;logicalScope:string;gate:Promise<void>;ingress:SQLiteNativeIngress;admission?:number;closed:boolean;watermark?:number};
+type State={catchup:boolean;stream:string;generation:number;scope:string;epoch:string;cursorEpoch?:string;logicalScope:string;gate:Promise<void>;ingress:SQLiteNativeIngress;admission?:number;closed:boolean;watermark?:number};
 type Options={owner:SQLiteOwnerProgramContext;sessions:SQLiteWorkerSessions;connection:string;artifactHash:string;
  reserve?(bytes:number):()=>void;
  /** Binary pages already own bounded protocol credit and must not consume
@@ -40,6 +40,7 @@ const watermarkEffect=Symbol('watermark');
  * never waits for future snapshot bytes. Membership changes preceding the last
  * base page live on disk; only a verified window can retire those records. */
 export class SQLiteNativeFeed implements SQLiteTransportHost {
+ private admissions=0;private catchupMaxControlBatchFrames=0;
  private readonly sources=new Map<string,Source>();
  private sourceBytes=0;private startBytes=0;private closingBytes=0;
  private state?:State;
@@ -127,7 +128,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
     await this.mutate(state.scope,async()=>{await owner.activation.activate({scope:state.scope,subscription:source.id,snapshot:start.snapshotId,header});});
     await this.replay(state,source);
    }});
-  state={stream:crypto.randomUUID(),generation:input.connectionGeneration,scope:input.directive.visibilityScope,epoch:input.directive.epoch,logicalScope:input.directive.scope,gate:Promise.resolve(),ingress,closed:false};this.state=state;
+  state={catchup:this.admissions++>0,stream:crypto.randomUUID(),generation:input.connectionGeneration,scope:input.directive.visibilityScope,epoch:input.directive.epoch,logicalScope:input.directive.scope,gate:Promise.resolve(),ingress,closed:false};this.state=state;
   state.gate=(async()=>{await this.initialized;const admitted=await this.options.sessions.activate(this.options.connection,input,()=>this.state===state&&!state.closed&&isCurrent());if(!admitted)fail('FENCED','Native feed has no tenant admission');const current=this.options.sessions.frameAdmission(this.options.connection,state.generation);state.admission=current.token;this.check(state);})();void state.gate.catch(()=>{});await state.gate;
  }
  binary(frame:ArrayBuffer,generation:number){this.binaryFrames++;this.flushControls();const state=this.state;if(!state||state.generation!==generation||state.closed)fail('FENCED','Binary frame has no native session');void state.ingress.accept(frame,state.gate).catch(error=>this.reject(state,error));}
@@ -137,7 +138,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
   const bytes=sqlitePayloadBytes(message,262144);// One certificate per admitted source plus bounded protocol controls.
   if(this.queued>=320||this.queuedBytes+bytes>2097152)fail('BUDGET','Native control queue exceeded budget');
   const batchable=['replica.snapshotStart','replica.delta','replica.transactionEncoded','replica.ready','replica.readyMany','replica.watermark'].includes(message.type);
-  if(this.pendingControls&&(this.pendingControls.state!==state||this.pendingControls.bytes+bytes>262144||this.pendingControls.frames.length>=64))this.flushControls();
+  if(this.pendingControls&&(this.pendingControls.state!==state||this.pendingControls.bytes+bytes>262144||this.pendingControls.frames.length>=(state.catchup?8:64)))this.flushControls();
   // Charge rollback metadata to the first frame credit before queueing. Never
   // acquire a second active slot while processing a batch that holds slots.
   const credit=bytes+512+(batchable&&!this.pendingControls?this.sources.size*128+64*64:0);
@@ -148,7 +149,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
   let next:Promise<void>;
   if(batchable){
    let batch=this.pendingControls;
-   if(batch&&(batch.state!==state||batch.bytes+bytes>262144||batch.frames.length>=64)){this.flushControls();batch=undefined;}
+   if(batch&&(batch.state!==state||batch.bytes+bytes>262144||batch.frames.length>=(state.catchup?8:64))){this.flushControls();batch=undefined;}
    if(!batch){
     let resolve!:()=>void,reject!:(error:unknown)=>void;const promise=new Promise<void>((yes,no)=>{resolve=yes;reject=no;});
     batch={state,frames:[],admissions:[],bytes:0,previous:state.gate,preceding,promise,resolve,reject};this.pendingControls=batch;state.gate=promise;
@@ -174,7 +175,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
  }
  private committed(key:string|symbol,effect:()=>void){if(this.activeControls)this.activeControls.after.set(key,effect);else effect();}
  private async processControls(batch:ControlBatch){
-  await Promise.all(batch.admissions);const state=batch.state;let after=new Map<string|symbol,()=>void>();
+  await Promise.all(batch.admissions);const state=batch.state;if(state.catchup)this.catchupMaxControlBatchFrames=Math.max(this.catchupMaxControlBatchFrames,batch.frames.length);if(state.catchup)await new Promise<void>(resolve=>setTimeout(resolve,0));let after=new Map<string|symbol,()=>void>();
   await this.run(state,Math.max(262144,batch.bytes),async()=>{
    const saved=[...this.sources.values()].map(source=>({source,start:source.start,preparedStart:source.preparedStart,opening:source.opening,deferActivation:source.deferActivation})),startBytes=this.startBytes,watermark=state.watermark,cursorEpoch=state.cursorEpoch;
    const active={state,after:new Map<string|symbol,()=>void>()};this.activeControls=active;
@@ -367,5 +368,5 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
  disconnected(){this.stop();this.options.sessions.disconnected(this.options.connection);}
  failed(error:unknown){this.stop();this.options.failed(error);}
  close(){this.stop();this.sources.clear();this.sourceBytes=0;this.startBytes=0;this.closingBytes=0;}
- stats(){this.observeRegistry();return {binaryFrames:this.binaryFrames,controlKinds:Object.fromEntries(this.controlKinds),sourceControlCounts:[...this.sourceControlCounts].map(([id,frames])=>({path:this.sources.get(id)?.path,frames})),registryPeakBytes:this.registryPeakBytes,registryPeakEntries:this.registryPeakEntries,closePeakBytes:this.closePeakBytes,sources:this.sources.size,opening:[...this.sources.values()].filter(source=>source.opening).length,watermark:this.state?.watermark,sourceBytes:this.sourceBytes+this.startBytes+this.closingBytes,queued:this.queued,queuedBytes:this.queuedBytes,ingress:this.state?.ingress.stats()};}
+ stats(){this.observeRegistry();return {catchupMaxControlBatchFrames:this.catchupMaxControlBatchFrames,binaryFrames:this.binaryFrames,controlKinds:Object.fromEntries(this.controlKinds),sourceControlCounts:[...this.sourceControlCounts].map(([id,frames])=>({path:this.sources.get(id)?.path,frames})),registryPeakBytes:this.registryPeakBytes,registryPeakEntries:this.registryPeakEntries,closePeakBytes:this.closePeakBytes,sources:this.sources.size,opening:[...this.sources.values()].filter(source=>source.opening).length,watermark:this.state?.watermark,sourceBytes:this.sourceBytes+this.startBytes+this.closingBytes,queued:this.queued,queuedBytes:this.queuedBytes,ingress:this.state?.ingress.stats()};}
 }

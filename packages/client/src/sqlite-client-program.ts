@@ -136,7 +136,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
     try{await connection.feed.assertCommittedReadable({scope:admitted.scope,epoch:saved.directive.epoch});}catch(error){reconciliationRequired=true;throw error;}
     result=await read();this.checkCachedCaller(caller,connection,admitted.readGeneration);
    });return result;
-  });
+  },[],'committed-read');
   try{const result=await attempt();if(result!==null&&result!==undefined)return result;}catch(error){if((error as {code?:string})?.code!=='PAGE_CHANGED'||!reconciliationRequired)throw error;}
   // A cold/mixed bootstrap has no committed page yet. Wait outside the owner
   // queue for the existing feed barrier, then recheck in the read transaction.

@@ -9,7 +9,7 @@ import {SQLiteSnapshotPages} from './sqlite-snapshot-pages.js';
 import {sqliteRequestBytes} from './sqlite-request-frame.js';
 import {SQLiteCanonicalDispatcher} from './sqlite-canonical-dispatch.js';
 import {sqliteTypedReplicaStorage} from './sqlite-typed-row-layout.js';
-import {waitForSQLiteOwnerAdmission,SQLiteOwnerQueueBusyError,sqliteOwnerTransactions} from './sqlite-owner-transactions.js';
+import {waitForSQLiteOwnerAdmission,SQLiteOwnerQueueBusyError,sqliteOwnerTransactionStats, sqliteOwnerTransactions} from './sqlite-owner-transactions.js';
 import { sqliteWorkerOperations as publicOperations, sqliteOperationPublishes,sqliteWorkerProtocol as protocol } from './sqlite-worker-protocol.js';
 import { openOfficialSQLiteHost, type OfficialSQLiteHost } from './sqlite-official-host.js';
 import { SQLiteTypedReplicaEngine, sqlitePayloadBytes, type SQLiteTypedWrite } from './sqlite-typed-engine.js';
@@ -29,7 +29,7 @@ export type SQLiteOwnerProgram={
 };
 export type SQLiteOwnerProgramContext={
  database:SQLiteReplicaDatabase;engine:SQLiteTypedReplicaEngine;reader:SQLiteNativeReplicaReader;pendingReader:SQLitePendingSnapshotReader;canonical:SQLiteLocalReplicaStorage;snapshots:SQLiteSnapshotPages;activation:SQLiteSnapshotActivator;
- runOwner<T>(bytes:number,run:()=>Promise<T>,publishScopes?:readonly string[]):Promise<T>;
+ runOwner<T>(bytes:number,run:()=>Promise<T>,publishScopes?:readonly string[],label?:string):Promise<T>;
  /** Metadata-only hint; receiver polls bounded controls through clientCall. */
  notifyTab(tabID:string):Promise<void>;
  /** No SQL queue or new committed generation. Only SDK-owned stale display. */
@@ -53,6 +53,7 @@ function sampleStartupMemory(stage:string){if(host&&startupMemory.length<3)start
 let canonical:SQLiteCanonicalDispatcher|undefined;
 let nativeReader:SQLiteNativeReplicaReader|undefined,pendingReader:SQLitePendingSnapshotReader|undefined;
 let snapshots:SQLiteSnapshotPages|undefined,activation:SQLiteSnapshotActivator|undefined;
+const queueTimings:Array<{label:string;finishedAt:number;waitMs:number;runMs:number;bytes:number}>=[];let maxQueueWaitMs=0,maxOwnerRunMs=0;
 let lane = Promise.resolve(), operations = 0, bytes = 0,queuedOperations=0,queuedBytes=0,closed=false;
 let program:SQLiteOwnerProgram|undefined,ownerToken='';const workerLease=new OriginStorageWorkerLease();let originEpoch:number|undefined;
 const wireGeneration=(generation:{epoch:number;sequence:number})=>({...generation,epoch:originEpoch??generation.epoch});
@@ -73,13 +74,13 @@ function scope(value: unknown): string {
 function publish(scope:string,generation:{epoch:number;sequence:number}){
  tabs.publish(scope,wireGeneration(generation));
 }
-function schedule<T>(size:number,run:()=>Promise<T>):Promise<T>{
+function schedule<T>(size:number,run:()=>Promise<T>,label='operation'):Promise<T>{
  if(closed)return Promise.reject(Object.assign(Error('Storage owner is closed'),{code:'FENCED'}));
  if(!Number.isSafeInteger(size)||size<0||size>2097152)return Promise.reject(Object.assign(Error('Storage owner operation exceeds queue budget'),{code:'BUSY'}));
  if(queuedOperations>=64||queuedBytes+size>2097152)return Promise.reject(new SQLiteOwnerQueueBusyError());
  // The worker lifetime lock protects the connection through every disk phase.
  // SQLite's durable owner epoch fences reads and writes without a second DB.
- queuedOperations++;queuedBytes+=size;const operation=lane.then(async()=>{if(closed)throw Object.assign(Error('Storage owner is closed'),{code:'FENCED'});if(ownerToken&&!workerLease.stats().held)throw Object.assign(Error('Storage worker lease was released'),{code:'FENCED'});if(engine)await engine.verifyOwner();return run();});
+ const queuedAt=performance.now();queuedOperations++;queuedBytes+=size;const operation=lane.then(async()=>{const started=performance.now();maxQueueWaitMs=Math.max(maxQueueWaitMs,started-queuedAt);try{if(closed)throw Object.assign(Error('Storage owner is closed'),{code:'FENCED'});if(ownerToken&&!workerLease.stats().held)throw Object.assign(Error('Storage worker lease was released'),{code:'FENCED'});if(engine)await engine.verifyOwner();return await run();}finally{const runMs=performance.now()-started;maxOwnerRunMs=Math.max(maxOwnerRunMs,runMs);queueTimings.push({label,finishedAt:Date.now(),waitMs:started-queuedAt,runMs,bytes:size});if(queueTimings.length>64)queueTimings.shift();}});
  lane=operation.then(()=>undefined,()=>undefined);void operation.then(()=>{queuedOperations--;queuedBytes-=size;},()=>{queuedOperations--;queuedBytes-=size;});return operation;
 }
 async function execute(op: string, args: any, requestID:string) {
@@ -102,9 +103,9 @@ async function execute(op: string, args: any, requestID:string) {
       nativeReader=new SQLiteNativeReplicaReader(database,storage,engine);await nativeReader.ready();tabs.setGeneration(wireGeneration(await engine.verifyOwner()));
       pendingReader=new SQLitePendingSnapshotReader({database,canonical:storage,snapshots,schema:engine.schema,fence:()=>engine!.verifyOwner()});await pendingReader.ready();
       program=binding.createProgram?.({database,engine,notifyPreviewTab:tabID=>tabs.hintPending(tabID),publishPreviewTab:(tabID,value)=>tabs.preview(tabID,value),notifyTab:tabID=>schedule(0,async()=>{if(typeof tabID!=='string'||!tabID||tabID.length>128)throw new TypeError('Invalid control recipient');tabs.notify(tabID,wireGeneration(await engine!.verifyOwner()));}),reader:nativeReader,pendingReader,canonical:storage,snapshots,activation,
-       runOwner:async(size,run,scopes=[])=>{
+       runOwner:async(size,run,scopes=[],label='operation')=>{
         if(!Array.isArray(scopes)||scopes.length>8||scopes.some(value=>typeof value!=='string'||!value||value.length>512))throw new TypeError('Invalid owner publication scope');
-        return waitForSQLiteOwnerAdmission(()=>schedule(size,async()=>{const before=await engine!.verifyOwner();const value=await run();const after=await engine!.verifyOwner();if(after.sequence!==before.sequence)for(const selected of scopes)publish(selected,after);return value;}),()=>{if(closed)throw Object.assign(Error('Storage owner is closed'),{code:'FENCED'});});
+        return waitForSQLiteOwnerAdmission(()=>schedule(size,async()=>{const before=await engine!.verifyOwner();const value=await run();const after=await engine!.verifyOwner();if(after.sequence!==before.sequence)for(const selected of scopes)publish(selected,after);return value;},label),()=>{if(closed)throw Object.assign(Error('Storage owner is closed'),{code:'FENCED'});});
        }});
       if(program&&typeof program.call!=='function')throw new TypeError('Owner program factories must return synchronously; queue initialization through runOwner');
       globalThis.postMessage({type:'progress',stage:'created-program',sentAt:Date.now()});return { epoch:originEpoch??epoch, wasmBytes: host.memoryBytes() };
@@ -134,7 +135,7 @@ async function execute(op: string, args: any, requestID:string) {
     case 'canonicalRead': return canonical!.read(args);
     case 'canonicalGeneration': return canonical!.generation(scope(args.scope),args.expected);
     case 'ping': return { ready: true };
-    case 'stats': return { ...engine.stats(),originEpoch,persistence:host.persistence,workerLease:workerLease.stats(),startupMemory,...snapshots!.stats(),ingressNativeHash:Number(!!host.database.ingressNativeHash), wasmBytes: host.memoryBytes(),sqliteMemory:host.memoryStats?.(),statementBytes:host.statementBytes?.(), clients: ports.size,queuedOperations,queuedBytes,requests:operations,requestBytes:bytes,delivery:tabs.stats(),nativeProfile:host.takeProfile?.(),pendingPages:pendingReader?.budgets()??[],program:program?.budgets?.()??[],programDiagnostics:await program?.diagnostics?.() };
+    case 'stats': return { ...engine.stats(),originEpoch,persistence:host.persistence,workerLease:workerLease.stats(),startupMemory,...snapshots!.stats(),ingressNativeHash:Number(!!host.database.ingressNativeHash), wasmBytes: host.memoryBytes(),sqliteMemory:host.memoryStats?.(),statementBytes:host.statementBytes?.(), clients: ports.size,queuedOperations,queuedBytes,ownerQueue:{maxQueueWaitMs,maxOwnerRunMs,recent:queueTimings.slice()},transactions:sqliteOwnerTransactionStats(),requests:operations,requestBytes:bytes,delivery:tabs.stats(),nativeProfile:host.takeProfile?.(),pendingPages:pendingReader?.budgets()??[],program:program?.budgets?.()??[],programDiagnostics:await program?.diagnostics?.() };
     case 'integrity': return engine.integrity();
     case 'page': return engine.page(scope(args.scope), args.plan as SQLitePagePlan);
     case 'viewPage': return engine.viewPage(scope(args.scope), args.signature, args.plan as SQLitePagePlan, args.offset);

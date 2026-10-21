@@ -239,7 +239,8 @@ export class SQLiteBrowserClient {
    const cancel=()=>finish(new GonvexClientError('Client closed during authentication',{code:'closed'}));
    const finish=(error?:Error)=>{if(settled)return;settled=true;clearTimeout(timer);stop();this.authWaiters.delete(cancel);if(error)reject(error);else resolve();};
    const check=()=>{if(settled)return;if(this.authSerial!==serial){finish(new GonvexClientError('Authentication was superseded',{code:'superseded'}));return;}if(!armed)return;const state=this.controlsValue;if(state?.authentication==='authenticated')finish();else if(state?.authentication==='denied')finish(new GonvexClientError('Authentication rejected',{code:'auth'}));};
-   try{stop=this.observe(this.controlListeners,check);}catch(error){reject(error);return;}this.authWaiters.add(cancel);timer=setTimeout(()=>finish(new GonvexClientError('Authentication timed out',{code:'timeout'})),30000);
+   try{stop=this.observe(this.controlListeners,check);}catch(error){reject(error);return;}this.authWaiters.add(cancel);let connectedSince:number|undefined;
+   const deadline=()=>{if(settled)return;const connected=this.connectionState().isWebSocketConnected;if(!connected)connectedSince=undefined;else connectedSince??=Date.now();if(connectedSince!==undefined&&Date.now()-connectedSince>=30000){finish(new GonvexClientError('Authentication timed out',{code:'timeout'}));return;}timer=setTimeout(deadline,1000);};timer=setTimeout(deadline,1000);
    void this.setAuth(auth).then(()=>this.pollControls()).then(()=>{armed=true;check();},error=>finish(error instanceof Error?error:Error(String(error))));
   });
  }

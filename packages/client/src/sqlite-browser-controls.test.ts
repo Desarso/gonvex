@@ -20,3 +20,10 @@ it('redacts a prior identity immediately and refuses a late result before reopen
 it('serializes a new listener against an in-flight unsubscribe and bounds shared observers',async()=>{
  const f=fixture(),watch=f.controls.watch({path:'tenants'},{}),release=watch.onUpdate(()=>{});await vi.waitFor(()=>expect(watch.getSnapshot().result).toBeDefined());let finish!:(value:any)=>void;const barrier=new Promise(resolve=>{finish=resolve;});let retiring=false;f.handler=async input=>{if(input.method==='unwatchControl'){retiring=true;return barrier;}};release();await vi.waitFor(()=>expect(retiring).toBe(true));const again=watch.onUpdate(()=>{});await new Promise(resolve=>setTimeout(resolve,0));expect(f.opens).toBe(1);finish(null);await vi.waitFor(()=>expect(f.opens).toBe(2));await vi.waitFor(()=>expect(watch.getSnapshot().result).toBeDefined());const releases=Array.from({length:31},()=>f.controls.watch({path:'tenants'},{}).onUpdate(()=>{}));expect(()=>f.controls.watch({path:'tenants'},{}).onUpdate(()=>{})).toThrow('listener allowance');for(const release of releases)release();again();f.controls.close();
 });
+
+it('keeps known control rows on read timeout and retries without throwing during render',async()=>{
+ const f=fixture(),watch=f.controls.watch({path:'tenants'},{}),release=watch.onUpdate(()=>{});await vi.waitFor(()=>expect(watch.getSnapshot().result).toBeDefined());const previous=watch.getSnapshot().result;
+ let fail=true;f.handler=async input=>{if(input.method==='controlState'&&fail){fail=false;throw Object.assign(Error('Storage read timed out'),{code:'TIMEOUT',outcome:'rejected'});}};
+ f.controls.refresh();await vi.waitFor(()=>expect(watch.getSnapshot().status).toBe('refreshing'));expect(watch.getSnapshot().result).toBe(previous);
+ await vi.waitFor(()=>expect(watch.getSnapshot().status).toBeUndefined());expect(watch.getSnapshot().result).toBe(previous);release();f.controls.close();
+});
