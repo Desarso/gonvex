@@ -340,3 +340,69 @@ describe("cached session startup", () => {
     expect(client.localReplica.entity("tasks", "task")).toBeUndefined();
   });
 });
+
+describe('server tenant admission display signal', () => {
+  it('hides rows from the previous visibility scope before notifying admission observers', async () => {
+    const { client, storage } = await fixture(); await client.localSessionReady;
+    expect(client.localReplica.entity('tasks', 'task')).toBeDefined();
+    let release!: () => void;
+    storage.loadWorkingSet.mockImplementationOnce(() => new Promise(resolve => { release = () => resolve(undefined); }));
+    const observed: unknown[] = [];
+    client.onTenantAdmissionChange(() => {
+      if (client.tenantAdmission()) observed.push(client.localReplica.entity('tasks', 'task'));
+    });
+    const pending = client.authenticate(auth); const socket = socketFor(client);
+    socket.receive({ type: 'auth.result', id: socket.sent[0].id,
+      result: { replica: { ...directive, visibilityScope: 'changed-permissions' }, localIdentity: identity } });
+    expect(observed).toEqual([undefined]);
+    await vi.waitFor(() => expect(storage.loadWorkingSet).toHaveBeenCalledTimes(2));
+    release(); await pending;
+    expect(client.localReplica.entity('tasks', 'task')).toBeUndefined();
+  });
+
+  it('publishes accepted identity before blocked recovery without releasing authenticate or reducers', async () => {
+    const { client } = await fixture();
+    await client.localSessionReady;
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const restore = vi.spyOn(client as any, 'activateReplicaDirective').mockReturnValue(blocked);
+    const changes = vi.fn(); client.onTenantAdmissionChange(changes);
+    let settled = false;
+    const pending = client.authenticate(auth).then(() => { settled = true; });
+    const socket = socketFor(client);
+    socket.receive({ type: 'auth.result', id: socket.sent[0].id, result: { replica: directive, localIdentity: identity } });
+    expect(client.tenantAdmission()).toEqual({ project: 'project', accountId: 'account', tenantId: 'tenant', memberId: 'member' });
+    expect(changes).toHaveBeenCalledTimes(1);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect((client as any).authInFlight).toBe(true);
+    expect(socket.sent.every(message => message.type === 'auth')).toBe(true);
+    release(); await pending; restore.mockRestore();
+  });
+
+  it('revokes display admission immediately on credentials replacement and ignores old auth replies', async () => {
+    const { client } = await fixture(); await client.localSessionReady;
+    const first = client.authenticate(auth); const socket = socketFor(client);
+    const id = socket.sent[0].id;
+    socket.receive({ type: 'auth.result', id, result: { replica: directive, localIdentity: identity } });
+    await first;
+    expect(client.tenantAdmission()).toBeDefined();
+    client.setAuth({ ...auth, tenant: 'other' });
+    expect(client.tenantAdmission()).toBeUndefined();
+    socket.receive({ type: 'auth.result', id, result: { replica: directive, localIdentity: identity } });
+    expect(client.tenantAdmission()).toBeUndefined();
+  });
+
+  it('clears admitted display on server revocation, disconnect and close', async () => {
+    for (const end of ['revoked', 'disconnect', 'close']) {
+      const { client } = await fixture(); await client.localSessionReady;
+      const pending = client.authenticate(auth); const socket = socketFor(client);
+      socket.receive({ type: 'auth.result', id: socket.sent[0].id, result: { replica: directive, localIdentity: identity } });
+      await pending; expect(client.tenantAdmission()).toBeDefined();
+      if (end === 'revoked') socket.receive({ type: 'auth.error', id: 'membership-changed', code: 'revoked', error: 'removed' });
+      else if (end === 'disconnect') socket.close();
+      else client.close();
+      expect(client.tenantAdmission()).toBeUndefined();
+    }
+  });
+});

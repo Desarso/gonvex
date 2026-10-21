@@ -412,6 +412,15 @@ export type LocalDependencyResidency = "bounded" | "off" | {
 /** Default row bound of `localDependencyResidency: "bounded"`. */
 export const DEFAULT_LOCAL_DEPENDENCY_RESIDENT_MAX_ROWS = 1000;
 
+/** Server accepted the current tenant identity. This does not certify cached
+ * rows, local recovery, reducer readiness, or task coverage. */
+export type TenantAdmission = Readonly<{
+  project: string;
+  accountId: string;
+  tenantId: string;
+  memberId: string;
+}>;
+
 export type OutboxScope = ReducerOutboxScopeSummary & {
   /** True for the identity this client is currently signed in as. */
   current: boolean;
@@ -680,6 +689,8 @@ export class GonvexClient {
   private localSessionRestore: Promise<void> = Promise.resolve();
   private localSessionStateValue: "unavailable" | "restored" | "authenticated" = "unavailable";
   private readonly localSessionHandlers = new Set<() => void>();
+  private tenantAdmissionValue: TenantAdmission | undefined;
+  private readonly tenantAdmissionHandlers = new Set<() => void>();
   private replicaFrames: Promise<void> = Promise.resolve();
   private queuedReplicaWatermark?: { revision: number; scope: ReplicaScope; generation: number };
   private processedReplicaWatermarkRevision = 0;
@@ -1777,7 +1788,25 @@ export class GonvexClient {
     };
   }
 
+  /** Read the accepted server identity independently of local recovery.
+   * Undefined on pending/replaced/rejected credentials, disconnect or close. */
+  tenantAdmission(): TenantAdmission | undefined { return this.tenantAdmissionValue; }
+
+  onTenantAdmissionChange(listener: () => void): () => void {
+    this.tenantAdmissionHandlers.add(listener);
+    return () => { this.tenantAdmissionHandlers.delete(listener); };
+  }
+
+  private publishTenantAdmission(value: TenantAdmission | undefined) {
+    if (this.tenantAdmissionValue === value) return;
+    this.tenantAdmissionValue = value;
+    for (const listener of this.tenantAdmissionHandlers) {
+      try { listener(); } catch { /* Display observers cannot interrupt admission. */ }
+    }
+  }
+
   private applyAuth(auth: GonvexClientAuth) {
+    this.publishTenantAdmission(undefined);
     this.flushTelemetry();
     if (this.publicTenant && (auth.token || auth.fetchToken || auth.identity || auth.tenant !== undefined && auth.tenant !== this.publicTenant || auth.project !== undefined && auth.project !== this.auth.project)) {
       throw new Error("Public connection scope is fixed; create another client to sign in or change tenants");
@@ -1867,6 +1896,7 @@ export class GonvexClient {
     socket.addEventListener("close", () => {
       if (this.socket !== socket || this.manuallyClosed) return;
       this.flushTelemetry();
+      this.publishTenantAdmission(undefined);
       this.isWebSocketConnected = false;
       this.replica.setFreshness("offline");
       if (this.localSessionStateValue === "authenticated") this.setLocalSessionState("restored");
@@ -2071,7 +2101,23 @@ export class GonvexClient {
           const authScopeGeneration = this.outboxScopeGeneration;
           const isCurrentAuth = () => this.socket === socket && this.activeAuthFrameId === message.id
             && this.latestAuthFrameId === undefined && authScopeGeneration === this.outboxScopeGeneration;
-          void this.activateReplicaDirective(directive)
+          // Rotate/clear a changed visibility scope synchronously before display
+          // observers run. Awaiting disk/outbox work is still deferred below.
+          const localActivation = this.activateReplicaDirective(directive);
+          // This accepted, latest-frame identity is separate from the durable
+          // local activation/recovery barrier below. No reducer is released here.
+          if (localIdentity?.auth?.account?.id && localIdentity.tenant?.id && localIdentity.member?.id
+            && this.auth.project && directive.protocolVersion === 1
+            && directive.visibilityScope.trim() && directive.epoch.trim()) {
+            this.publishTenantAdmission(Object.freeze({
+              project: this.auth.project,
+              accountId: localIdentity.auth.account.id,
+              tenantId: localIdentity.tenant.id,
+              memberId: localIdentity.member.id,
+            }));
+          }
+          if (!isCurrentAuth()) { void localActivation.catch(() => undefined); return; }
+          void localActivation
             .then(() => isCurrentAuth() ? this.activateOutboxScope() : undefined)
             .then(async () => {
               if (!isCurrentAuth()) return;
@@ -2129,6 +2175,7 @@ export class GonvexClient {
             || (message.code === "credential_rejected" && /^gvx_(dev|imp)_/.test(this.auth.token ?? ""));
           this.authRetriedAfterError = false;
           this.authRefreshedToken = undefined;
+          this.publishTenantAdmission(undefined);
           this.settleManagedAuthAttempt(message.id, message.error);
           if (definitive) {
             this.quarantineReplicaScope();
@@ -2211,6 +2258,7 @@ export class GonvexClient {
   }
 
   close() {
+    this.publishTenantAdmission(undefined);
     this.snapshotDeferredFrames = [];
     this.snapshotDeferredBytes = 0;
     for (const subscription of this.replicaSubscriptions.values()) {
@@ -3574,6 +3622,7 @@ export class GonvexClient {
   }
 
   private quarantineReplicaScope() {
+    this.publishTenantAdmission(undefined);
     this.outboxScopeGeneration += 1;
     this.authenticatedSocketGeneration = 0;
     this.localIdentity = undefined;
