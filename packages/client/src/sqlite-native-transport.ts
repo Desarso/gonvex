@@ -42,7 +42,7 @@ export class SQLiteNativeTransport {
    const message=JSON.parse(event.data) as ServerMessage;if(!message||typeof message!=='object'||typeof message.type!=='string')throw Error('Invalid native control frame');
    this.receive(socket,generation,message);
   }catch(failure){this.options.ownerHost.failed(failure);socket.close();}});
-  socket.addEventListener('close',()=>{if(!this.current(socket,generation))return;this.socket=undefined;this.clearAdmission();this.authSerial++;this.tokenCancel?.();this.tokenCancel=undefined;this.session='unavailable';this.authInFlight=true;this.installing=false;this.clearAuthTimer();this.options.ownerHost.disconnected();
+  socket.addEventListener('close',()=>{if(!this.current(socket,generation))return;this.socket=undefined;this.activeAuth=undefined;this.latestAuth=undefined;this.clearAdmission();this.authSerial++;this.tokenCancel?.();this.tokenCancel=undefined;this.session='unavailable';this.authInFlight=true;this.installing=false;this.clearAuthTimer();this.options.ownerHost.disconnected();
    this.rejectAll(error('Connection interrupted; the dispatched outcome may be unknown','disconnected'));this.rejectNativeErrors(Error('Error report connection interrupted'));
    if(!this.closed&&!this.quarantined){const delay=Math.min(30000,250*2**Math.min(this.reconnectAttempts++,7));this.retry=setTimeout(()=>{this.retry=undefined;this.connect();},delay);}
   });
@@ -97,6 +97,9 @@ export class SQLiteNativeTransport {
     if(definitive)this.deny(generation,message.error,message.code);else{this.options.ownerHost.authError?.(message.error,{definitive:false,code:message.code});socket.close();}return;
    }
    this.latestAuth=undefined;this.activeAuth=message.id;this.clearAuthTimer();const serial=this.authSerial;this.installing=true;
+   // Network authentication is complete. Local replica admission remains fenced
+   // by authInFlight/installing until the durable session installation finishes.
+   this.options.ownerHost.authenticated?.();
    const directive=replicaDirectiveFromAuthResult(message.result),identity=localIdentityFromAuthResult(message.result);
    this.artifact=artifactHashFromAuthResult(message.result)??this.artifact;
    const developer=developerSessionTokenFromAuthResult(message.result);if(developer){if(developer.length>16384)throw Error('Developer credential exceeds admission budget');this.auth={...this.auth,token:developer,fetchToken:undefined};this.options.ownerHost.developerCredential?.(developer);}
@@ -201,7 +204,7 @@ export class SQLiteNativeTransport {
  callOwnerReducer<T extends JsonValue=JsonValue>(ref:FunctionReference,args:JsonValue,command:string):Promise<T>{if(!command||command.length>256)return Promise.reject(Error('Invalid durable command ID'));return this.invoke('reducer',ref,args,command);}
  serverInfo(){return this.capabilities;}
  diagnostics(){return {authenticationFrames:this.authFrames};}
- authenticationState(){return this.quarantined?'denied':this.activeAuth&&!this.authInFlight?'authenticated':this.socket?'authenticating':'unavailable';}
+ authenticationState(){return this.quarantined?'denied':this.socket&&this.activeAuth?'authenticated':this.socket?'authenticating':'unavailable';}
  localSessionState(){return this.session;}
  connectionState():ConnectionState{const values=[...this.pending.values()];return {isWebSocketConnected:this.socket?.readyState===1,hasEverConnected:this.hasEver,connectionCount:this.connectionCount,connectionRetries:this.reconnectAttempts,hasInflightRequests:!!values.length,inflightReducers:values.filter(p=>p.kind==='reducer').length,inflightActions:values.filter(p=>p.kind==='action').length,inflightOneShotQueries:values.filter(p=>p.kind==='query').length};}
  dispose(){if(this.disposed)return;this.close();for(const watch of this.controlWatches)watch.release();this.controlWatches.clear();this.disposed=true;this.auth={};this.options.releaseAuth?.();}

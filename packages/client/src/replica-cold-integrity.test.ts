@@ -85,7 +85,10 @@ it('verifies legacy partial-image deltas from cold durable rows in bounded pages
   const rows=Array.from({length:260},(_,i)=>({_id:'item-'+i,name:'Item '+i,note:'Preserved '+i}));
   const key=client.replicaSignature(projected,{});
   socket.receive({type:'replica.snapshot',id:open.id,path:projected.path,result:rows,key:'_id',cursor:{epoch:'epoch',revision:1}});
-  await vi.waitFor(()=>expect(client.localReplica.getWindow(key)?.ids.length).toBe(260));
+  // Snapshot persistence is part of the frame lane. Wait for that exact
+  // operation, rather than racing its disk work against waitFor's 1s default.
+  await (client as any).replicaFrames;
+  expect(client.localReplica.getWindow(key)?.ids.length).toBe(260);
   socket.receive({type:'replica.ready',id:open.id,path:projected.path,digest:await replicaHashesDigest(await replicaRowsHashes(rows,'_id')),cursor:{epoch:'epoch',revision:1},truncated:false});
   await vi.waitFor(()=>expect(client.localReplica.getWindow(key)?.completeness).toBe('complete'));
   const pages:number[]=[];const originalReadView=storage.withReadView.bind(storage);

@@ -6,7 +6,7 @@ import {SQLiteNativeIngress} from './sqlite-native-ingress.js';
 import {SQLiteWindowStore,type SQLiteWindowHeader} from './sqlite-window-store.js';
 import {SQLiteFeedGroups} from './sqlite-feed-groups.js';
 import {SQLiteDeferredReplicaFrames} from './sqlite-deferred-replica-frames.js';
-import {decodeSQLiteNativeDelta,decodeSQLiteNativeTransaction} from './sqlite-native-control.js';
+import {decodeSQLiteNativeDeltaBatches,decodeSQLiteNativeTransactionBatches} from './sqlite-native-control.js';
 import {waitForSQLiteOwnerAdmission,markSQLiteStagingCommit} from './sqlite-owner-transactions.js';
 import {SQLiteReducerPreparationRequiredError} from './sqlite-reducer-core.js';
 import {fail,sqlitePayloadBytes} from './sqlite-admission.js';
@@ -14,10 +14,11 @@ type Start=Pick<Extract<ServerMessage,{type:'replica.snapshotStart'}>,'snapshotI
 type Delta=Extract<ServerMessage,{type:'replica.delta'}>;
 export type SQLiteFeedSource={id:string;signature:string;entity:string;key:string;path:string;completeEntity?:true;columns?:readonly string[]};
 type Source=SQLiteFeedSource&{deferredKey:string;bytes:number;start?:Start;preparedStart?:Start;deferActivation?:boolean;opening:boolean;closing?:{promise:Promise<void>;resolve():void;reject(error:unknown):void;timer:ReturnType<typeof setTimeout>}};
-type ControlBatch={state:State;frames:ServerMessage[];bytes:number;previous:Promise<void>;preceding:Promise<void>;promise:Promise<void>;resolve():void;reject(error:unknown):void;timer?:ReturnType<typeof setTimeout>};
+type ControlBatch={state:State;frames:ServerMessage[];admissions:Promise<unknown>[];bytes:number;previous:Promise<void>;preceding:Promise<void>;promise:Promise<void>;resolve():void;reject(error:unknown):void;timer?:ReturnType<typeof setTimeout>};
 type State={stream:string;generation:number;scope:string;epoch:string;cursorEpoch?:string;logicalScope:string;gate:Promise<void>;ingress:SQLiteNativeIngress;admission?:number;closed:boolean;watermark?:number};
 type Options={owner:SQLiteOwnerProgramContext;sessions:SQLiteWorkerSessions;connection:string;artifactHash:string;
  reserve?(bytes:number):()=>void;
+ acquire?(bytes:number):Promise<()=>void>;
  sourceReady?(id:string):void;
  previewStaging?(source:SQLiteFeedSource,snapshot:string):Promise<(()=>void)|undefined>;
  freshSnapshot?(id:string):Promise<void>;
@@ -41,6 +42,8 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
  private state?:State;
  private pendingControls?:ControlBatch;
  private activeControls?:{state:State;after:Map<string|symbol,()=>void>};
+ private registryPeakBytes=0;private registryPeakEntries=0;private closePeakBytes=0;
+ private observeRegistry(){this.registryPeakBytes=Math.max(this.registryPeakBytes,this.sourceBytes+this.startBytes+this.closingBytes);this.registryPeakEntries=Math.max(this.registryPeakEntries,this.sources.size);this.closePeakBytes=Math.max(this.closePeakBytes,this.closingBytes);}
  private queued=0;private queuedBytes=0;private authorityDepth=0;
  private readonly windows:SQLiteWindowStore;private readonly deferred:SQLiteDeferredReplicaFrames;
  private readonly initialized:Promise<void>;private readonly groups:SQLiteFeedGroups;
@@ -60,7 +63,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
   const descriptor={id:input.id,signature:input.signature,entity:input.entity,key:input.key,path:input.path,...(input.completeEntity?{completeEntity:true as const}: {})};
   const owned:SQLiteFeedSource={...descriptor,...(columns?{columns}:{})},bytes=sqlitePayloadBytes(descriptor,16384)+256+(columns?.length??0)*8;
   if(this.sources.has(input.id))throw new TypeError('Native source already registered');if(this.sources.size>=256||this.sourceBytes+this.startBytes+this.closingBytes+bytes>262144)fail('BUDGET','Native source registry exceeded budget');
-  this.sources.set(input.id,{...owned,deferredKey:crypto.randomUUID(),bytes,opening:true});this.sourceBytes+=bytes;
+  this.sources.set(input.id,{...owned,deferredKey:crypto.randomUUID(),bytes,opening:true});this.sourceBytes+=bytes;this.observeRegistry();
  }
  private async retireDeferred(scope:string,key:string){
   // A closed source has no remaining ordered writer. Empty queues need no
@@ -72,7 +75,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
  closeSource(id:string):Promise<void>{
   const source=this.source(id);if(source.closing)return source.closing.promise;const state=this.state;if(!state||state.closed){this.removeSource(id);return Promise.resolve();}this.check(state);
   if(this.sourceBytes+this.startBytes+this.closingBytes+512>262144)fail('BUDGET','Native source close metadata exceeded budget');
-  let resolve!:()=>void,reject!:(error:unknown)=>void;const promise=new Promise<void>((yes,no)=>{resolve=yes;reject=no;});source.closing={promise,resolve,reject,timer:setTimeout(()=>this.reject(state,Object.assign(Error('Native source close acknowledgement timed out'),{code:'PAGE_CHANGED'})),30000)};this.closingBytes+=512;
+  let resolve!:()=>void,reject!:(error:unknown)=>void;const promise=new Promise<void>((yes,no)=>{resolve=yes;reject=no;});source.closing={promise,resolve,reject,timer:setTimeout(()=>this.reject(state,Object.assign(Error('Native source close acknowledgement timed out'),{code:'PAGE_CHANGED'})),30000)};this.closingBytes+=512;this.observeRegistry();
   try{this.options.send({type:'replica.close',id});}catch(error){this.removeSource(id);reject(error);}return promise;
  }
  private source(id:string){const source=this.sources.get(id);if(!source)fail('FENCED','Native frame has no generated subscription');return source;}
@@ -128,18 +131,22 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
   const state=this.state;if(!state||state.generation!==generation||state.closed)fail('FENCED','Control frame has no native session');
   const bytes=sqlitePayloadBytes(message,262144);// One certificate per admitted source plus bounded protocol controls.
   if(this.queued>=320||this.queuedBytes+bytes>2097152)fail('BUDGET','Native control queue exceeded budget');
-  const release=this.options.reserve?.(bytes+512);let owned:ServerMessage;try{owned=structuredClone(message);}catch(error){release?.();throw error;}// Preparing a different snapshot only installs its private stage. It does
+  const batchable=['replica.snapshotStart','replica.delta','replica.transactionEncoded','replica.ready','replica.readyMany','replica.watermark'].includes(message.type);
+  if(this.pendingControls&&(this.pendingControls.state!==state||this.pendingControls.bytes+bytes>262144||this.pendingControls.frames.length>=64))this.flushControls();
+  // Charge rollback metadata to the first frame credit before queueing. Never
+  // acquire a second active slot while processing a batch that holds slots.
+  const credit=bytes+512+(batchable&&!this.pendingControls?this.sources.size*128+64*64:0);
+  let release:(()=>void)|undefined;const admitted=this.options.acquire?this.options.acquire(credit).then(value=>{release=value;}):Promise.resolve().then(()=>{release=this.options.reserve?.(credit);});void admitted.catch(()=>{});let owned:ServerMessage;try{owned=structuredClone(message);}catch(error){void admitted.then(()=>release?.(),()=>{});throw error;}// Preparing a different snapshot only installs its private stage. It does
   // not consume preceding binary rows or publish canonical authority. Ordered
   // controls still flush every preceding frame before they enter the gate.
   const preceding=message.type==='replica.snapshotStart'?Promise.resolve():state.ingress.flush();void preceding.catch(()=>{});this.queued++;this.queuedBytes+=bytes;
-  const batchable=['replica.snapshotStart','replica.delta','replica.transactionEncoded','replica.ready','replica.readyMany','replica.watermark'].includes(owned.type);
   let next:Promise<void>;
   if(batchable){
    let batch=this.pendingControls;
-   if(batch&&(batch.state!==state||batch.bytes+bytes>262144)){this.flushControls();batch=undefined;}
+   if(batch&&(batch.state!==state||batch.bytes+bytes>262144||batch.frames.length>=64)){this.flushControls();batch=undefined;}
    if(!batch){
     let resolve!:()=>void,reject!:(error:unknown)=>void;const promise=new Promise<void>((yes,no)=>{resolve=yes;reject=no;});
-    batch={state,frames:[],bytes:0,previous:state.gate,preceding,promise,resolve,reject};this.pendingControls=batch;state.gate=promise;
+    batch={state,frames:[],admissions:[],bytes:0,previous:state.gate,preceding,promise,resolve,reject};this.pendingControls=batch;state.gate=promise;
     // Global queue count/bytes and this group's existing byte credit bound
     // tiny controls too. A separate sixteen-frame cap fragmented a byte-small
     // startup burst into multiple FULL commits before the coalescing turn.
@@ -147,12 +154,12 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
     // Use the same bounded window for certificates and feed controls.
     batch.timer=setTimeout(()=>this.flushControls(),4);
    }
-   batch.frames.push(owned);batch.bytes+=bytes;next=batch.promise;
+   batch.admissions.push(admitted);batch.frames.push(owned);batch.bytes+=bytes;next=batch.promise;
    if(batch.bytes>=262144)this.flushControls();
   }else{
-   this.flushControls();next=state.gate.then(()=>preceding).then(async()=>{this.check(state);await this.process(state,owned);});state.gate=next;
+   this.flushControls();next=state.gate.then(()=>preceding).then(()=>admitted).then(async()=>{this.check(state);await this.process(state,owned);});state.gate=next;
   }
-  void next.then(()=>{this.queued--;this.queuedBytes-=bytes;release?.();},error=>{this.queued--;this.queuedBytes-=bytes;release?.();this.reject(state,error);});return true;
+  void next.then(()=>{this.queued--;this.queuedBytes-=bytes;void admitted.then(()=>release?.(),()=>{});},error=>{this.queued--;this.queuedBytes-=bytes;void admitted.then(()=>release?.(),()=>{});this.reject(state,error);});return true;
  }
  /** Release the short group-commit delay when a row reader or binary frame waits.
   * Does not wait for network freshness or drain an unfinished feed cohort. */
@@ -162,16 +169,14 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
  }
  private committed(key:string|symbol,effect:()=>void){if(this.activeControls)this.activeControls.after.set(key,effect);else effect();}
  private async processControls(batch:ControlBatch){
-  const state=batch.state;let after=new Map<string|symbol,()=>void>();
-  const release=this.options.reserve?.(this.sources.size*128+batch.frames.length*64);
-  try{await this.run(state,Math.max(262144,batch.bytes),async()=>{
+  await Promise.all(batch.admissions);const state=batch.state;let after=new Map<string|symbol,()=>void>();
+  await this.run(state,Math.max(262144,batch.bytes),async()=>{
    const saved=[...this.sources.values()].map(source=>({source,start:source.start,preparedStart:source.preparedStart,opening:source.opening,deferActivation:source.deferActivation})),startBytes=this.startBytes,watermark=state.watermark,cursorEpoch=state.cursorEpoch;
    const active={state,after:new Map<string|symbol,()=>void>()};this.activeControls=active;
    try{for(const frame of batch.frames){this.check(state);await this.process(state,frame);}after=active.after;}
    catch(error){for(const entry of saved){entry.source.start=entry.start;entry.source.preparedStart=entry.preparedStart;entry.source.opening=entry.opening;entry.source.deferActivation=entry.deferActivation;}this.startBytes=startBytes;state.watermark=watermark;state.cursorEpoch=cursorEpoch;throw error;}
    finally{this.activeControls=undefined;}
-  });this.check(state);for(const effect of after.values())effect();}
-  finally{release?.();}
+  });this.check(state);for(const effect of after.values())effect();
  }
  private reject(state:State,error:unknown){if(this.state!==state||state.closed)return;const sourceID=String((error as Error)?.message??error).match(/source:[0-9a-f]{64}/)?.[0],source=sourceID?this.sources.get(sourceID):undefined;
   if(source)error=Object.assign(new Error(`${String((error as Error).message)} (${source.path})`),{code:(error as {code?:string}).code});this.stop();this.options.failed(error);}
@@ -192,9 +197,9 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
  private snapshotHeader(source:Source,start:Start,digest:string):SQLiteWindowHeader{return {signature:source.signature,entity:source.entity,key:source.key,kind:'replica',source:'server',cursor:start.cursor,aggregateDigest:digest,completeness:start.truncated?'partial':'complete',...(start.mode?{mode:start.mode}:{}),...(source.completeEntity&&!start.truncated?{entityCoverage:'complete' as const}:{}),columns:source.columns??Object.keys(this.options.owner.engine.schema[source.entity]!.fields),artifactHash:this.options.artifactHash};}
  private async mutate(scope:string,run:()=>Promise<void>){if(this.authorityDepth){await run();return;}this.authorityDepth++;try{if(this.options.authority)await this.options.authority(scope,run);else await run();}finally{this.authorityDepth--;}}
  private async applyDelta(state:State,source:Source,frame:Delta){
-  this.cursor(state,frame.cursor);const rows=await decodeSQLiteNativeDelta(frame,source.key),current=await this.windows.header(state.scope,source.signature);
+  this.cursor(state,frame.cursor);const upserts:Array<{id:string;hash:string}>=[];for await(const rows of decodeSQLiteNativeDeltaBatches(frame,source.key))for(const {id,hash} of rows)upserts.push({id,hash});const current=await this.windows.header(state.scope,source.signature);
   if(!current||current.header.cursor?.epoch!==state.cursorEpoch)fail('PAGE_CHANGED','Native delta needs a verified base window');
-  await this.windows.applyDelta({scope:state.scope,signature:source.signature,generation:current.generation,cursor:frame.cursor,upserts:rows.map(({id,hash})=>({id,hash})),deleted:frame.deleted??[],digest:frame.digest??''},()=>this.mutate(state.scope,async()=>{await this.options.owner.canonical.applyTransaction({cursor:frame.cursor,changes:rows.map(({id,row})=>({entity:source.entity,id,operation:'update',newValue:row}))},empty,state.scope);}));
+  await this.windows.applyDelta({scope:state.scope,signature:source.signature,generation:current.generation,cursor:frame.cursor,upserts,deleted:frame.deleted??[],digest:frame.digest??''},()=>this.mutate(state.scope,async()=>{for await(const rows of decodeSQLiteNativeDeltaBatches(frame,source.key))await this.options.owner.canonical.applyTransaction({cursor:frame.cursor,changes:rows.map(({id,row})=>({entity:source.entity,id,operation:'update',newValue:row}))},empty,state.scope);}));
  }
  private async replay(state:State,source:Source){
   const header=await this.windows.header(state.scope,source.signature);if(!header?.header.cursor)fail('PAGE_CHANGED','Native base publication missing');let after=header.header.cursor.revision;
@@ -226,7 +231,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
     await this.replay(state,source);
    }
    await this.groups.drain(state.stream,revision,async frame=>{
-    if(frame.type==='replica.transactionEncoded'){const keys=Object.fromEntries(Object.entries(this.options.owner.engine.schema).map(([entity,table])=>[entity,table.key]));await this.mutate(state.scope,async()=>{await this.options.owner.canonical.applyTransaction({cursor:frame.cursor,changes:decodeSQLiteNativeTransaction(frame,keys)},empty,state.scope);});}
+    if(frame.type==='replica.transactionEncoded'){const keys=Object.fromEntries(Object.entries(this.options.owner.engine.schema).map(([entity,table])=>[entity,table.key]));await this.mutate(state.scope,async()=>{for(const changes of decodeSQLiteNativeTransactionBatches(frame,keys))await this.options.owner.canonical.applyTransaction({cursor:frame.cursor,changes},empty,state.scope);});}
     else if(frame.type==='replica.delta')await this.applyDelta(state,this.source(frame.id),frame);
     else {await this.windows.confirmReady(state.scope,this.source(frame.id).signature,frame.cursor,frame.digest,frame.truncated??false);readySources.add(frame.id);}
    });
@@ -261,7 +266,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
      for(;;){const more=await this.run(state,16384,async()=>{const prior=await priorWindow();if(!prior)return false;await this.windows.collect(state.scope,source.signature,prior.generation);return true;});if(!more)break;}
      for(;;){const more=await this.run(state,16384,async()=>{const prior=await priorStage();if(!prior)return false;await owner.snapshots.discard(state.scope,source.id,prior.snapshot);return true;});if(!more)break;}
     }
-    source.deferActivation=(prepared??await this.run(state,16384,prepare)).defer;source.start=retained;this.startBytes+=startBytes;source.opening=true;return;
+    source.deferActivation=(prepared??await this.run(state,16384,prepare)).defer;source.start=retained;this.startBytes+=startBytes;this.observeRegistry();source.opening=true;return;
    }
    case 'replica.closed':{
     const source=this.source(message.id),closing=source.closing;if(!closing)fail('INVALID_ROW','Unexpected native source close acknowledgement');
@@ -281,7 +286,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
     this.cursor(state,message.cursor);
     // Validate before taking disk space; canonical authority stays unchanged
     // until the terminal watermark publishes this complete group.
-    decodeSQLiteNativeTransaction(message,Object.fromEntries(Object.entries(owner.engine.schema).map(([entity,table])=>[entity,table.key])));
+    for(const _changes of decodeSQLiteNativeTransactionBatches(message,Object.fromEntries(Object.entries(owner.engine.schema).map(([entity,table])=>[entity,table.key])))){/* Validate without retaining the decoded frame. */}
     await this.run(state,262144,()=>this.groups.append(state.stream,message));return;
    }
    case 'replica.readyMany':for(const ready of message.ready)await this.process(state,{type:'replica.ready',...ready});return;
@@ -357,5 +362,5 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
  disconnected(){this.stop();this.options.sessions.disconnected(this.options.connection);}
  failed(error:unknown){this.stop();this.options.failed(error);}
  close(){this.stop();this.sources.clear();this.sourceBytes=0;this.startBytes=0;this.closingBytes=0;}
- stats(){return {sources:this.sources.size,opening:[...this.sources.values()].filter(source=>source.opening).length,watermark:this.state?.watermark,sourceBytes:this.sourceBytes+this.startBytes+this.closingBytes,queued:this.queued,queuedBytes:this.queuedBytes,ingress:this.state?.ingress.stats()};}
+ stats(){this.observeRegistry();return {registryPeakBytes:this.registryPeakBytes,registryPeakEntries:this.registryPeakEntries,closePeakBytes:this.closePeakBytes,sources:this.sources.size,opening:[...this.sources.values()].filter(source=>source.opening).length,watermark:this.state?.watermark,sourceBytes:this.sourceBytes+this.startBytes+this.closingBytes,queued:this.queued,queuedBytes:this.queuedBytes,ingress:this.state?.ingress.stats()};}
 }

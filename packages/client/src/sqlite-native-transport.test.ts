@@ -154,3 +154,15 @@ it('keeps identical auth and metadata-only fetcher changes off the wire without 
  f.client.setAuth({token:'replacement',fetchToken:undefined},()=>{order.push('fence');});
  expect(order).toEqual(['fence','authenticating']);await vi.waitFor(()=>expect(f.socket.sent.filter(message=>message.type==='auth')).toHaveLength(2));
 });
+
+it('completes reload network authentication before delayed durable replica admission',async()=>{
+ let release!:()=>void;const installing=new Promise<void>(resolve=>{release=resolve;});
+ const f=fixture({},async()=>installing),notified=vi.fn();f.host.authenticated=notified;
+ const auth=await f.open();f.socket.receive({type:'auth.result',id:auth.id,result});
+ expect(f.client.authenticationState()).toBe('authenticated');expect(notified).toHaveBeenCalledTimes(1);
+ expect(f.client.localSessionState()).toBe('unavailable');
+ f.socket.receive({type:'replica.watermark',revision:9});expect(f.frames).toEqual([]);
+ release();await vi.waitFor(()=>expect(f.client.localSessionState()).toBe('authenticated'));
+ expect(f.frames).toEqual([{type:'replica.watermark',revision:9}]);
+ f.socket.close();expect(f.client.authenticationState()).toBe('unavailable');expect(f.client.localSessionState()).toBe('unavailable');
+});

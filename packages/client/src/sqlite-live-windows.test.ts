@@ -42,9 +42,22 @@ it('refuses corrupted durable frames for early display and canonical publication
 
 it('publishes wide bounded frames whose conservative decode charge exceeds their wire charge',async()=>{
  const columns=Array.from({length:52},(_,n)=>'column_'+n),schema:SQLiteTypedSchema={tasks:{key:'id',fields:{id:{kind:'text'},...Object.fromEntries(columns.map(name=>[name,{kind:'text' as const}]))},indexes:[]}},source:FunctionReference={...ref,live:{...ref.live!,plan:{columns:['id',...columns]} as any}};
- const rows=Array.from({length:16},(_,n)=>({id:String(n),...Object.fromEntries(columns.map(name=>[name,null]))}));
- expect(sqlitePayloadBytes(rows,131072)).toBeLessThan(131072);expect(()=>decodedJSONBytes(JSON.stringify(rows),131072)).toThrow('Decoded SQLite page');
+ const rows=Array.from({length:32},(_,n)=>({id:String(n),...Object.fromEntries(columns.map(name=>[name,null]))}));
+ expect(sqlitePayloadBytes(rows,131072)).toBeLessThan(131072);expect(()=>decodedJSONBytes(JSON.stringify(rows),262144)).toThrow('Decoded SQLite page');
  const f=await fixture(schema,source);await f.stage(2,rows);const pending=await f.tx(()=>f.windows.page('stream','visible','grid','e',{limit:4}));expect(pending?.rows).toHaveLength(4);expect(await f.publish(2)).toBe(1);
  expect((await f.reader.window({scope:'visible',signature:'grid',limit:4}))?.rows.map(row=>row.value)).toEqual(rows.slice(0,4));expect(await f.engine.integrity()).toBe('ok');
  await expect(f.stage(3,[{...rows[0],column_0:'x'.repeat(70000)}])).rejects.toMatchObject({code:'BUDGET'});
+});
+
+it('soaks wide staged generations without whole-page decode or retained old generations',async()=>{
+ const columns=Array.from({length:52},(_,n)=>'c'+n),schema:SQLiteTypedSchema={tasks:{key:'id',fields:{id:{kind:'text'},...Object.fromEntries(columns.map(name=>[name,{kind:'text' as const}]))},indexes:[]}},source:FunctionReference={...ref,live:{...ref.live!,plan:{columns:['id',...columns]} as any}};
+ const f=await fixture(schema,source);
+ for(let revision=1;revision<=10;revision++){
+  const rows=Array.from({length:40},(_,n)=>({id:String(n),...Object.fromEntries(columns.map(name=>[name,null])),c0:'quoted " \\ [,] 東京 '+revision}));
+  expect(()=>decodedJSONBytes(JSON.stringify(rows),262144)).toThrow();
+  await f.stage(revision,rows);expect(await f.publish(revision)).toBe(1);
+  expect((await f.reader.window({scope:'visible',signature:'grid',limit:2}))?.rows.map(row=>row.value)).toEqual(rows.slice(0,2));
+  expect((await f.db.getFirstAsync<{n:number}>('SELECT count(*) n FROM gv_live_window_stages'))?.n).toBe(0);
+ }
+ expect(await f.engine.integrity()).toBe('ok');
 });

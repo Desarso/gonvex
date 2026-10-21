@@ -1,3 +1,4 @@
+import {SQLiteTransientBudget} from './sqlite-transient-budget.js';
 import {afterEach,expect,it,vi} from 'vitest';
 import {GonvexClient} from './index.js';
 import {IDBFactory,IDBKeyRange} from 'fake-indexeddb';
@@ -492,3 +493,29 @@ it('keeps simultaneous admitted snapshot headers inside the existing registry bu
  expect(f.feed.stats().sources).toBe(191);
  expect(f.feed.stats().sourceBytes).toBeLessThanOrEqual(262144);
 });
+it.each(['transaction','delta'] as const)('rolls back earlier decoded chunks on a late %s fault without advancing authority',async kind=>{
+ const f=await fixture();await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();
+ const wide=Array.from({length:80},(_,n)=>({id:'new'+n,name:'Search after create '+n,n,...Object.fromEntries(Array.from({length:52},(_,i)=>['extra'+i,null]))}));
+ const original=f.canonical.applyTransaction.bind(f.canonical);let calls=0;
+ vi.spyOn(f.canonical,'applyTransaction').mockImplementation(async(...args)=>{if(++calls===2)throw Error('late decoded chunk fault');return original(...args);});
+ if(kind==='transaction')f.feed.frame({type:'replica.transactionEncoded',cursor:cursor(11),canonicalChanges:wide.map(row=>stable({entity:'tasks',id:row.id,operation:'insert',newValue:row}))},1);
+ else f.feed.frame({type:'replica.delta',id:'source',cursor:cursor(11),canonicalUpserts:wide.map(stable),deleted:[],digest:await digest([...rows,...wide])},1);
+ f.feed.frame({type:'replica.watermark',revision:11},1);
+ await vi.waitFor(()=>expect(f.failures.some(error=>String(error).includes('late decoded chunk fault'))).toBe(true));expect(calls).toBe(2);
+ expect(await f.canonical.loadEntityRows('visible','tasks',['new0','new79'])).toEqual([]);
+ expect((await f.canonical.loadEntityRows('visible','tasks',['a']))[0].row).toEqual(rows[0]);
+ expect((await f.db.getFirstAsync<{applied:number}>('SELECT applied FROM gv_native_feed_progress'))?.applied).toBe(10);
+ expect(f.watermarks).toEqual([10]);expect((await new SQLiteWindowStore(f.db,()=>f.engine.verifyOwner()).header('visible','tasks-all'))?.header.cursor).toEqual(cursor(10));expect(await f.engine.integrity()).toBe('ok');
+});
+
+it('soaks repeated reload-style control bursts beyond active slots without leaking ingress credit',async()=>{
+ const budget=new SQLiteTransientBudget(2097152,128);
+ const f=await fixture({reserve:bytes=>budget.reserve(bytes),acquire:bytes=>budget.acquire(bytes)});
+ for(let cycle=0;cycle<12;cycle++){
+  for(let n=0;n<200;n++)f.feed.frame({type:'replica.watermark',revision:cycle*200+n+1},1);
+  await f.feed.assertReadable();
+  await vi.waitFor(()=>expect(budget.stats()).toMatchObject({bytes:0,entries:0}));
+  expect(f.failures).toEqual([]);
+ }
+ expect(budget.stats().refusals).toBe(0);budget.close();
+},30000);

@@ -10,10 +10,32 @@ export type SQLitePendingLivePage={complete:false;serverVerified:false;generatio
 type Stage={stream:string;scope:string;signature:string;epoch:string;revision:number;generation:string;header:string;rows:string;fingerprint:string};
 const schema=`CREATE TABLE IF NOT EXISTS gv_live_window_stages(stream TEXT NOT NULL,scope TEXT NOT NULL,signature TEXT NOT NULL,epoch TEXT NOT NULL,revision INTEGER NOT NULL,generation TEXT NOT NULL,header TEXT NOT NULL CHECK(length(header)*2<=16384),rows TEXT NOT NULL CHECK(length(rows)*2<=131072),fingerprint TEXT NOT NULL,PRIMARY KEY(stream,scope,signature)) WITHOUT ROWID;`;
 const sha=async(value:string)=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))),byte=>byte.toString(16).padStart(2,'0')).join('');
+/** Scan encoded rows before parsing, so wide multi-row frames never allocate
+ * a single over-budget decoded graph. Each yielded batch fits the turn budget. */
+let liveDecodePeakBytes=0;
+export const liveStageBudgetStats=()=>({name:'live-stage-decoder',bytes:0,entries:0,maxBytes:NATIVE_LIVE_DECODE_BYTES,maxEntries:256,peakBytes:liveDecodePeakBytes,refusals:0,evictions:0});
+export function* decodeLiveStageBatches(text:string):Generator<Array<Record<string,JsonValue>>>{
+ let start=1,depth=0,quoted=false,escaped=false,batch:Array<Record<string,JsonValue>>=[],bytes=64;
+ if(text[0]!=='['||text.at(-1)!==']')fail('INTENT_CORRUPT','Invalid live stage rows');
+ for(let i=1;i<text.length;i++){
+  const c=text[i];
+  if(quoted){if(escaped)escaped=false;else if(c==='\\')escaped=true;else if(c==='"')quoted=false;continue;}
+  if(c==='"'){quoted=true;continue;}
+  if(c==='{'||c==='[')depth++;else if(c==='}'||c===']')depth--;
+  if(c===','&&depth===0||i===text.length-1){
+   const body=text.slice(start,i).trim();start=i+1;if(!body)continue;
+   const size=decodedJSONBytes(body,NATIVE_LIVE_DECODE_BYTES-64);
+   if(batch.length&&bytes+size>NATIVE_LIVE_DECODE_BYTES){yield batch;batch=[];bytes=64;}
+   const row=JSON.parse(body);if(!row||Array.isArray(row)||typeof row!=='object')fail('INTENT_CORRUPT','Invalid live stage row');
+   batch.push(row);bytes+=size;liveDecodePeakBytes=Math.max(liveDecodePeakBytes,bytes);
+  }
+ }
+ if(batch.length)yield batch;
+}
 async function decodeStage(stage:Stage){
- decodedJSONBytes(stage.rows,NATIVE_LIVE_DECODE_BYTES);decodedJSONBytes(stage.header,16384);const header=JSON.parse(stage.header) as SQLiteWindowHeader;
+ decodedJSONBytes(stage.header,16384);const header=JSON.parse(stage.header) as SQLiteWindowHeader;
  if(header.signature!==stage.signature||header.kind!=='live'||header.source!=='server'||header.entityCoverage!==undefined||header.cursor?.epoch!==stage.epoch||header.cursor?.revision!==stage.revision||await sha(stage.rows)!==header.aggregateDigest||await sha(stage.header+'\0'+stage.rows)!==stage.fingerprint)fail('INTENT_CORRUPT','Pending live window differs from its durable frame');
- const rows=JSON.parse(stage.rows) as Array<Record<string,JsonValue>>;return {rows,header};
+ return {batches:()=>decodeLiveStageBatches(stage.rows),header};
 }
 /** Exact server windows share the normalized replica. Only bounded frames are
  * decoded in JS; ordered memberships and result metadata persist in SQLite.
@@ -36,19 +58,19 @@ export class SQLiteLiveWindows {
  async publish(stream:string,scope:string,epoch:string,through:number){
   this.check();await this.ready();let published=0;
   for(;;){const stage=await this.owner.database.getFirstAsync<Stage>('SELECT * FROM gv_live_window_stages WHERE stream=? AND scope=? AND epoch=? AND revision<=? ORDER BY revision,signature LIMIT 1',stream,scope,epoch,through);if(!stage)break;
-   const {rows,header}=await decodeStage(stage);
+   const {batches,header}=await decodeStage(stage);
    // Each source has at most 256 rows. Collect old bounded generations before
    // admitting the next one, rather than waiting for the idle collector.
    const old=await this.owner.database.getAllAsync<{generation:string}>('SELECT generation FROM gv_window_generations WHERE scope=? AND signature=? AND generation<>coalesce((SELECT generation FROM gv_windows WHERE scope=? AND signature=?),\'\') LIMIT 3',scope,stage.signature,scope,stage.signature);for(const generation of old)while((await this.windows.collect(scope,stage.signature,generation.generation)).remaining){}
-   await this.owner.canonical.applyTransaction({cursor:header.cursor!,changes:rows.map(row=>({entity:header.entity,id:String(row[header.key]),operation:'update' as const,newValue:row}))},{entities:{},liveQueries:{}},scope);
-   await this.windows.begin(scope,header,stage.generation);let progress,offset=0,page=0;const ids=rows.map(row=>String(row[header.key]));do{let take=Math.min(64,ids.length-offset),encoded:string;for(;;){encoded=JSON.stringify({ids:ids.slice(offset,offset+take)});if(encoded.length*2<=65536)break;if(take<=1)fail('BUDGET','Live membership identity exceeds its frame budget');take=Math.max(1,Math.floor(take/2));}progress=await this.windows.append(scope,stage.signature,stage.generation,page++,encoded);offset+=take;}while(offset<ids.length);await this.windows.publish(scope,stage.signature,progress!);
+   const ids:string[]=[];for(const rows of batches()){ids.push(...rows.map(row=>String(row[header.key])));await this.owner.canonical.applyTransaction({cursor:header.cursor!,changes:rows.map(row=>({entity:header.entity,id:String(row[header.key]),operation:'update' as const,newValue:row}))},{entities:{},liveQueries:{}},scope);}
+   await this.windows.begin(scope,header,stage.generation);let progress,offset=0,page=0;do{let take=Math.min(64,ids.length-offset),encoded:string;for(;;){encoded=JSON.stringify({ids:ids.slice(offset,offset+take)});if(encoded.length*2<=65536)break;if(take<=1)fail('BUDGET','Live membership identity exceeds its frame budget');take=Math.max(1,Math.floor(take/2));}progress=await this.windows.append(scope,stage.signature,stage.generation,page++,encoded);offset+=take;}while(offset<ids.length);await this.windows.publish(scope,stage.signature,progress!);
    await this.owner.database.runAsync('DELETE FROM gv_live_window_stages WHERE stream=? AND scope=? AND signature=? AND generation=?',stream,scope,stage.signature,stage.generation);published++;
   }return published;
  }
  async page(stream:string,scope:string,signature:string,epoch:string,options:{offset?:number;limit?:number;generation?:string}={}):Promise<SQLitePendingLivePage|null>{
   this.check();await this.ready();await this.owner.engine.verifyOwner();const offset=options.offset??0,limit=options.limit??50;if(!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(limit)||limit<1||limit>128||offset>0&&!options.generation)throw new TypeError('Pending live continuation requires its generation and a bounded page');
-  const stage=await this.owner.database.getFirstAsync<Stage>('SELECT * FROM gv_live_window_stages WHERE stream=? AND scope=? AND signature=? AND epoch=?',stream,scope,signature,epoch);if(!stage){if(options.generation)fail('PAGE_CHANGED','Pending live window was replaced');return null;}if(options.generation&&options.generation!==stage.generation)fail('PAGE_CHANGED','Pending live generation changed');const {rows:values,header}=await decodeStage(stage);
-  let take=limit;for(;;){const selected=values.slice(offset,offset+take),next=offset+selected.length<values.length?offset+selected.length:null,output:SQLitePendingLivePage={complete:false,serverVerified:false,generation:stage.generation,header,offset,nextOffset:next,receivedRows:values.length,rows:selected.map(value=>({id:String(value[header.key]),value}))};try{sqlitePayloadBytes(output,131072);return output;}catch(error){if((error as {code?:string})?.code!=='BUDGET'||take===1)throw error;take=Math.max(1,Math.floor(take/2));}}
+  const stage=await this.owner.database.getFirstAsync<Stage>('SELECT * FROM gv_live_window_stages WHERE stream=? AND scope=? AND signature=? AND epoch=?',stream,scope,signature,epoch);if(!stage){if(options.generation)fail('PAGE_CHANGED','Pending live window was replaced');return null;}if(options.generation&&options.generation!==stage.generation)fail('PAGE_CHANGED','Pending live generation changed');const {batches,header}=await decodeStage(stage);const values:Array<Record<string,JsonValue>>=[];let receivedRows=0;for(const batch of batches()){for(const row of batch){if(receivedRows>=offset&&values.length<limit)values.push(row);receivedRows++;}}
+  let take=limit;for(;;){const selected=values.slice(0,take),next=offset+selected.length<receivedRows?offset+selected.length:null,output:SQLitePendingLivePage={complete:false,serverVerified:false,generation:stage.generation,header,offset,nextOffset:next,receivedRows,rows:selected.map(value=>({id:String(value[header.key]),value}))};try{sqlitePayloadBytes(output,131072);return output;}catch(error){if((error as {code?:string})?.code!=='BUDGET'||take===1)throw error;take=Math.max(1,Math.floor(take/2));}}
  }
  async retire(stream:string,signature?:string){this.check();await this.ready();await this.owner.engine.verifyOwner();if(signature)await this.owner.database.runAsync('DELETE FROM gv_live_window_stages WHERE stream=? AND signature=?',stream,signature);else await this.owner.database.runAsync('DELETE FROM gv_live_window_stages WHERE stream=?',stream);}
 }

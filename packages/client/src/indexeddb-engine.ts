@@ -20,7 +20,7 @@ type MemberRecord = {
   scope: string; signature: string; generation: number; entity: string; id: string;
   order: string; hash?: Uint8Array; duplicateOrders?: string[]; hashOnly?: 1;
 };
-type WindowRecord = { scope: ReplicaScope; signature: string; value: string; sequence?:number; deleted?:boolean; generation?:number; startupSequence?:number };
+type WindowRecord = { scope: ReplicaScope; signature: string; value: string; sequence?:number; deleted?:boolean; generation?:number; startupSequence?:number; initialPage?:{count:number} };
 type MetaRecord = { scope: ReplicaScope; key: string; value: string };
 type ReplicaDatabase = Dexie & {
   entities: Table<EntityRecord, [string, string, string]>;
@@ -277,9 +277,9 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
     return { ...window, ids, ...(hasHashes ? { hashes } : {}) };
   }
 
-  private async writeMetadata(scope: string, window: ReplicaWindow, sequence: number, generation: number, cached = false) {
+  private async writeMetadata(scope: string, window: ReplicaWindow, sequence: number, generation: number, cached = false, initialPage?:{count:number}) {
     const { ids, hashes, ...metadata } = window;
-    await this.database.windows.put({ scope, signature: window.signature, sequence, generation, startupSequence: cached ? sequence : undefined,
+    await this.database.windows.put({ scope, signature: window.signature, sequence, generation, startupSequence: cached ? sequence : undefined, ...(initialPage?{initialPage}:{}),
       value: JSON.stringify({ ...metadata, hasHashes: hashes !== undefined }) });
   }
 
@@ -323,7 +323,7 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
       await this.database.meta.put({ scope, key: this.startupPrefix(window.signature, generation),
         value: JSON.stringify({ sequence: generation, ids: window.ids,
           hashes: window.hashes === undefined ? undefined : Object.fromEntries(members.filter(member => member.hash).map(member => [member.id, hexHash(member.hash!)])) }) });
-      await this.writeMetadata(scope, window, sequence, generation, true);
+      await this.writeMetadata(scope, window, sequence, generation, true, members.every(member => !member.hashOnly && !member.duplicateOrders?.length) ? {count:window.ids.length} : undefined);
       const receipt = this.receipt();
       if (receipt) receipt.changes.windows[window.signature] = window;
     }
@@ -739,8 +739,15 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
       // counts or page boundaries. Duplicate positions share one native row.
       const members = this.database.members.where("[scope+signature+generation+order]")
         .between([normalizedScope, signature, record.generation!, ""], [normalizedScope, signature, record.generation!, "\uffff"], false, true);
-      const totalUniqueRows = await members.clone().count();
-      const page = await members.offset(options.offset).limit(options.limit).toArray();
+      // A freshly written unique window uses deterministic initialOrder keys.
+      // Seek its requested range directly instead of walking every skipped ID.
+      // Any later metadata/delta write drops this optional certificate.
+      const initial=record.initialPage;
+      const indexed=initial&&record.startupSequence===record.sequence&&Number.isSafeInteger(initial.count)&&initial.count>=0;
+      const totalUniqueRows = indexed ? initial!.count : await members.clone().count();
+      const page = indexed ? await this.database.members.where("[scope+signature+generation+order]")
+        .between([normalizedScope,signature,record.generation!,initialOrder(options.offset)], [normalizedScope,signature,record.generation!,"\uffff"],true,true).limit(options.limit).toArray()
+        : await members.offset(options.offset).limit(options.limit).toArray();
       const result: ReplicaRowsPage = { storageSequence, window, offset: options.offset, nextOffset: options.offset,
         totalUniqueRows, ids: [], rows: [], missingIds: [], decodedBytes: 0 };
       for (const member of page) {

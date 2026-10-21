@@ -27,3 +27,25 @@ export function decodeSQLiteNativeTransaction(frame:Extract<ServerMessage,{type:
   return value as unknown as ReplicaChange;
  });
 }
+
+/** Keep a wire-admitted control frame encoded while decoding bounded chunks.
+ * The caller applies every chunk inside one authority transaction. */
+function* encodedControlBatches(strings:readonly string[]):Generator<readonly string[]>{
+ if(!Array.isArray(strings)||strings.length>128)fail('BUDGET','Native control row count exceeds budget');
+ let batch:string[]=[],bytes=64;
+ for(const text of strings){if(typeof text!=='string')fail('INVALID_ROW','Native row must be canonical JSON text');const size=decodedJSONBytes(text,262144-64);if(batch.length&&bytes+size>262144){yield batch;batch=[];bytes=64;}batch.push(text);bytes+=size;}
+ if(batch.length)yield batch;
+}
+export function* decodeSQLiteNativeTransactionBatches(frame:Extract<ServerMessage,{type:'replica.transactionEncoded'}>,keys:Readonly<Record<string,string>>):Generator<ReplicaChange[]>{
+ for(const canonicalChanges of encodedControlBatches(frame.canonicalChanges))yield decodeSQLiteNativeTransaction({...frame,canonicalChanges:[...canonicalChanges]},keys);
+}
+export async function* decodeSQLiteNativeDeltaBatches(frame:Extract<ServerMessage,{type:'replica.delta'}>,key:string){
+ // Validate the envelope even for an empty update.
+ await decodeSQLiteNativeDelta({...frame,canonicalUpserts:[]},key);
+ const ids=new Set<string>();
+ for(const canonicalUpserts of encodedControlBatches(frame.canonicalUpserts!)){
+  const rows=await decodeSQLiteNativeDelta({...frame,canonicalUpserts:[...canonicalUpserts]},key);
+  for(const row of rows){if(ids.has(row.id))fail('INVALID_ROW','Duplicate native delta row identity');ids.add(row.id);}
+  yield rows;
+ }
+}

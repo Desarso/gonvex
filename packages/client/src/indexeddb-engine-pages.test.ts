@@ -21,10 +21,11 @@ it('reads only the requested disk range without reconstructing the full window',
   await seed(rows);
   const materialize = vi.spyOn(storage as any,'materializeWindow').mockImplementation(()=>{throw Error('Unbounded materialization');});
   const gets = vi.spyOn((storage as any).database.entities,'get');
+  const offset=vi.spyOn(Object.getPrototypeOf((storage as any).database.members.toCollection()),'offset');
   const page = await storage.loadReplicaRowsPage('tenant','items',{offset:700,limit:5,maxBytes:10_000});
   expect(page).toMatchObject({offset:700,nextOffset:705,totalUniqueRows:1_000,ids:rows.slice(700,705).map(row=>row.id),rows:rows.slice(700,705),missingIds:[]});
   expect(page?.window).not.toHaveProperty('ids');expect(page?.window).not.toHaveProperty('hashes');
-  expect(gets).toHaveBeenCalledTimes(5);expect(materialize).not.toHaveBeenCalled();
+  expect(gets).toHaveBeenCalledTimes(5);expect(materialize).not.toHaveBeenCalled();expect(offset).not.toHaveBeenCalled();
   expect(await storage.loadReplicaRowsPage('other','items',{offset:0,limit:5,maxBytes:10_000})).toBeUndefined();
 });
 
