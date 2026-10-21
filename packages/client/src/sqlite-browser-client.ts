@@ -24,7 +24,7 @@ type Broker=Pick<SQLiteReplicaBroker,'request'|'subscribeChanges'|'close'|'stats
 type Controls={supportCommands?:Array<SupportCommand&{sequence:number}>;rejections?:Array<ReducerRejectionEvent&{sequence:number}>;serverInfo?:Readonly<import('@gonvex/protocol').ServerCapabilities>;admissionKey?:string|null;tokens:SQLiteTokenRequest[];status:unknown;authentication?:'unavailable'|'authenticating'|'authenticated'|'denied';session:string;failure:{code:string;message:string}|null;authError?:{id:string;message:string;definitive:boolean;code?:string}|null;developerCredential?:{id:string;token:string}};
 type Handle={connection:string;identityKey:string};
 export type SQLiteCollectionPageResult=SQLiteTypedPage&{generation:string};
-export type SQLiteLocalQueryPage=(SQLiteTypedPage&{supported:true;complete:boolean;partialSearch?:boolean;total?:number;generation:string})|{supported:false;reason:string;generation:string;rows?:never};
+export type SQLiteLocalQueryPage=(SQLiteTypedPage&{supported:true;complete:boolean;partialSearch?:boolean;stale?:boolean;staleRelations?:string[];total?:number;generation:string})|{supported:false;reason:string;generation:string;rows?:never};
 type Page=SQLiteLocalQueryPage|SQLitePendingLivePage|SQLiteNativeWindowResult|SQLitePendingSnapshotPage|SQLiteNativeEntityResult|SQLiteCollectionPageResult|null;
 type WatchSnapshot={page:Page|undefined;stale:boolean;version:number};
 type Watch={previewID?:string;startupPublications?:number;bootPageKey?:string;kind:'replica'|'live';state:WatchSnapshot;retiring?:Promise<void>;key:string;remoteKey:string;lease:string;path:string;args:JsonValue;bytes:number;refs:number;source?:{id?:string;signature:string};bound:number;opening?:Promise<void>;listeners:Set<()=>void>;unpin?:()=>void;stale:boolean;version:number;invalidation:number;pendingDisplay?:boolean;compatibleFirstPage?:boolean};
@@ -292,6 +292,10 @@ export class SQLiteBrowserClient {
  }
  private store(watch:Watch,value:Page,compatibleFirstPage=false,stale=false){
   if(!watch.refs)fail('FENCED','Native watch closed during read');
+  const previous=this.pages.get(watch.key);
+  // A read completion is not a data change. In particular, empty certified
+  // pages must not notify their own consumer into another identical read.
+  if(previous!==undefined&&watch.compatibleFirstPage===compatibleFirstPage&&watch.stale===stale&&sameJSON(previous,value))return;
   if(value&&'window'in value)watch.previewID=undefined;
   if(value&&'window'in value){const prior=this.pages.get(watch.key);if(prior&&'window'in prior&&prior.window.header.entity===value.window.header.entity&&prior.rows.length===value.rows.length){for(let index=0;index<value.rows.length;index++){const slot=value.rows[index],old=prior.rows[index];if(slot.id===old.id&&sameJSON(slot.value,old.value)){slot.id=old.id;slot.value=old.value;}}}}
   const bytes=sqlitePayloadBytes({key:watch.key,value},262144);watch.unpin?.();watch.unpin=undefined;
@@ -334,10 +338,10 @@ export class SQLiteBrowserClient {
   const publish=()=>{for(const listener of listeners)try{listener();}catch{/* Observer only. */}};
   const refresh=async()=>{if(this.closed||closed||!listeners.size)return;if(loading){again=true;return;}loading=true;try{do{again=false;
     if(ref.live?.plan&&typeof ref.live.plan.table==='string'&&ref.live.plan.window){
-     let after:unknown,generation:string|undefined;const localRows:JsonValue[]=[];let unsupportedReason:string|undefined;let localSupported=false,exhausted=false,partialSearch=false,total:number|undefined;
+     let after:unknown,generation:string|undefined;const localRows:JsonValue[]=[];let unsupportedReason:string|undefined;let localSupported=false,exhausted=false,partialSearch=false,staleRelations=false,total:number|undefined;
      const requested=Math.min(256,Math.max(1,Number((args as any)?.[(ref.live.plan as any).window?.limitArgument??'limit']??(ref.live.plan as any).window?.defaultLimit??128)));
      for(;;){const local=await this.rpc<SQLiteLocalQueryPage|null>({method:'localLivePage',path:ref.path,args,...(generation?{generation}:{}),...(after?{after}:{})});
-      if(!local?.supported){unsupportedReason=local?.reason;break;}localSupported=true;total??=local.total;partialSearch||=!!local.partialSearch;generation??=local.generation;
+      if(!local?.supported){unsupportedReason=local?.reason;break;}localSupported=true;total??=local.total;partialSearch||=!!local.partialSearch;staleRelations||=!!local.stale;generation??=local.generation;
       localRows.push(...local.rows.slice(0,requested-localRows.length) as JsonValue[]);exhausted=local.cursor===null;
       if(exhausted||localRows.length>=requested)break;after=local.cursor;
      }
@@ -349,7 +353,7 @@ export class SQLiteBrowserClient {
       const path=ref.live.resultPath??[],metadata:Record<string,JsonValue>={offset:0,limit:requested,...(total!==undefined?{total}:exhausted?{total:localRows.length}:{})};
       let localValue:JsonValue=localRows;for(let i=path.length-1;i>=0;i--)localValue={...(i===0?metadata:{}),[path[i]!]:localValue};
       sqlitePayloadBytes(localValue,2097152);result=localValue as T;
-      this.memberships.publish(signature,{entity:ref.live.entity,ids:localRows.map(row=>String((row as Record<string,JsonValue>)[ref.live!.key])),...(total!==undefined?{total}:exhausted?{total:localRows.length}:{}),offset:0,limit:requested,source:'cache',completeness:partialSearch?'partial':'complete',freshness:this.connectionState().isWebSocketConnected?'current':'offline'});
+      this.memberships.publish(signature,{entity:ref.live.entity,ids:localRows.map(row=>String((row as Record<string,JsonValue>)[ref.live!.key])),...(total!==undefined?{total}:exhausted?{total:localRows.length}:{}),offset:0,limit:requested,source:'cache',completeness:partialSearch?'partial':'complete',freshness:this.connectionState().isWebSocketConnected?(staleRelations?'verifying':'current'):'offline'});
       publish();continue;
      }
     }

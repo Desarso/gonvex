@@ -438,10 +438,11 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
      if(lowered.offset)return {supported:false,reason:'offsetRequiresKeyset',generation:header.generation};
      if(input.generation!==undefined&&input.generation!==header.generation)fail('PAGE_CHANGED','Local query membership changed');
      const {table:_table,membership:_membership,...options}=lowered.plan;options.limit=Math.min(128,options.limit);if(input.after!==undefined)options.after=input.after;
-     const plan=sqliteCollectionPagePlan(source.ref,source.args,options,{signature:source.signature,generation:header.generation},new Set(Object.keys(context.coverage)));
+     const plan=sqliteCollectionPagePlan(source.ref,source.args,options,{signature:source.signature,generation:header.generation},new Set(Object.keys(context.coverage)),{allowStaleRelations:true});
+     const staleRelations=[...related].filter(entity=>!context.coverage[entity]);
      const page=await this.reducer.predictions.page(admitted.scope,plan.plan,plan.allowLocalInserts);const total=input.after===undefined?await this.reducer.predictions.count(admitted.scope,plan.plan,plan.allowLocalInserts):undefined;
      this.checkCachedCaller(caller,connection,admitted.readGeneration);
-     return {...page,...(total!==undefined?{total}:{}),supported:true,partialSearch:!!lowered.partialSearch,complete:page.cursor===null,generation:header.generation};
+     return {...page,...(total!==undefined?{total}:{}),supported:true,stale:staleRelations.length>0,staleRelations,partialSearch:!!lowered.partialSearch,complete:page.cursor===null,generation:header.generation};
     });
    }
    case 'collectionPage':{

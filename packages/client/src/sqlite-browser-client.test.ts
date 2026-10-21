@@ -576,3 +576,13 @@ it('attaches owner timing to diagnostics without exposing it in entity values',a
  const f=fixture(),owner={received:10,sqlStart:11,sqlEnd:12,reply:13};f.handler=input=>input.method==='entities'?{generation:{epoch:1,sequence:1},rows:[{id:'a',value:{id:'a'}}],_sqliteReadTiming:owner}:undefined;
  const result=await f.client.entities('tasks',['a']);expect(result).not.toHaveProperty('_sqliteReadTiming');expect(f.client.entityReadDiagnostics().at(-1)?.owner).toEqual(owner);
 });
+
+it('does not republish an unchanged empty page into a consumer read loop',async()=>{
+ const f=fixture(),watch=f.client.watchReplica({path:'empty'});cleanup.push(()=>watch.close());
+ f.handler=input=>input.method==='replicaPage'?{generation:{epoch:1,sequence:1},rows:[],window:{generation:'empty',total:0,header:{}}}:undefined;
+ await watch.page({limit:128});const listener=vi.fn();watch.subscribe(listener);
+ for(let n=0;n<20;n++)await watch.page({limit:128});
+ expect(listener).not.toHaveBeenCalled();
+ f.change();expect(listener).toHaveBeenCalledTimes(1);await watch.page({limit:128});
+ expect(watch.snapshot().stale).toBe(false);expect(listener).toHaveBeenCalledTimes(2);
+});
